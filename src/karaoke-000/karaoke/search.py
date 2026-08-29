@@ -62,19 +62,29 @@ def keyword_search(query: str, k: int = 5, os_client: Any = None) -> list[Search
 
 
 def find_track(artist: str, title: str, os_client: Any = None) -> Optional[dict[str, Any]]:
-    """Look up a specific indexed track by artist+title (best match)."""
+    """Look up a specific indexed track by EXACT artist+title (cache lookup).
+
+    Uses case-insensitive exact matching on both fields so a fuzzy title
+    collision can't return the wrong track's cached lyrics. Falls back to a
+    title-only exact match when no artist is supplied.
+    """
     from .osclient import client
 
     c = os_client or client()
-    body = {
-        "size": 1,
-        "query": {
-            "bool": {
-                "must": [{"match": {"title": title}}],
-                "should": [{"match": {"artist": artist}}] if artist else [],
-            }
-        },
-    }
+    must: list[dict[str, Any]] = [
+        {"match_phrase": {"title": title}},
+    ]
+    if artist:
+        must.append({"match_phrase": {"artist": artist}})
+    body = {"size": 1, "query": {"bool": {"must": must}}}
     res = c.search(index=settings.index_name, body=body)
     hits = res["hits"]["hits"]
-    return hits[0]["_source"] if hits else None
+    if not hits:
+        return None
+    src = hits[0]["_source"]
+    # Guard: confirm the returned title actually matches (case-insensitive).
+    if src.get("title", "").strip().lower() != title.strip().lower():
+        return None
+    if artist and src.get("artist", "").strip().lower() != artist.strip().lower():
+        return None
+    return src

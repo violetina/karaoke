@@ -30,6 +30,8 @@ def karaoke_main() -> int:
     ap.add_argument("--output", "-o", action="store_true", help="identify laptop output audio")
     ap.add_argument("--timeout", "-t", type=int, default=30, help="listen timeout secs")
     ap.add_argument("--no-cache", action="store_true", help="skip OpenSearch cache, always fetch")
+    ap.add_argument("--transcribe", action="store_true",
+                    help="if no LRCLIB lyrics, transcribe a local --file with Whisper")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="print lyrics instead of the live player")
@@ -42,7 +44,9 @@ def karaoke_main() -> int:
     from .player import get_synced, timeline_from_lyrics, render_lines, play
 
     ly = get_synced(ref.artist, ref.title, ref.album, ref.duration,
-                    use_cache=not args.no_cache)
+                    use_cache=not args.no_cache,
+                    audio_path=ref.path,
+                    transcribe=args.transcribe)
     tl = timeline_from_lyrics(ly)
 
     if not tl.lines:

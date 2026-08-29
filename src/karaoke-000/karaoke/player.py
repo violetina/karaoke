@@ -61,8 +61,14 @@ def get_synced(
     *,
     os_client: Any = None,
     use_cache: bool = True,
+    audio_path: Optional[str] = None,
+    transcribe: bool = False,
 ) -> Lyrics:
-    """Return synced lyrics: OpenSearch cache first, then LRCLIB (and cache it)."""
+    """Return synced lyrics: OpenSearch cache first, then LRCLIB (and cache it).
+
+    If LRCLIB has no synced lyrics and `transcribe=True` with a local
+    `audio_path`, fall back to Whisper transcription and cache the result.
+    """
     from .config import settings
 
     c = None
@@ -84,6 +90,22 @@ def get_synced(
             c = None  # cache unavailable -> fall through to live fetch
 
     ly = fetch_lrclib(artist, title, album, duration)
+
+    # Whisper fallback: no synced lyrics from LRCLIB but we have local audio.
+    if not ly.has_synced and transcribe and audio_path:
+        try:
+            from .whisper_sync import transcribe_to_lrc
+
+            lrc = transcribe_to_lrc(audio_path)
+            if lrc.strip():
+                ly = Lyrics(
+                    plain="\n".join(t for _, t in parse_lrc(lrc)),
+                    synced_raw=lrc,
+                    source="whisper",
+                    lines=parse_lrc(lrc),
+                )
+        except Exception:
+            pass
 
     # Best-effort write-through cache so the next play is offline.
     if use_cache and c is not None and (ly.synced_raw or ly.plain):
