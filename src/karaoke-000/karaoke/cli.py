@@ -81,6 +81,14 @@ def karaoke_main() -> int:
         play_spotify_synced(tl, title=ref.title, artist=ref.artist, offset=args.offset)
         return 0
 
+    # Live mic/output identification returns a position offset -> auto-sync to it.
+    if ref.offset is not None and ref.offset_mono is not None:
+        from .player import play_offset_synced
+        play_offset_synced(tl, title=ref.title, artist=ref.artist,
+                           offset=ref.offset, offset_mono=ref.offset_mono,
+                           extra_latency=args.offset)
+        return 0
+
     play(tl, title=ref.title, artist=ref.artist, offset=args.offset)
     return 0
 

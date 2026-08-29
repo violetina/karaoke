@@ -56,9 +56,19 @@ karaoke --file song.mp3 --transcribe          # Whisper fallback if no LRCLIB ly
 karaoke --file song.mp3 --force-transcribe    # always transcribe (skip cache + LRCLIB)
 karaoke --listen                              # identify room audio via mic (songrec)
 karaoke --output                              # identify audio playing on this machine
-karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
+karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 ```
+
+### Live audio sync (mic / room)
+
+`karaoke --listen` (mic) or `--output` (this machine's audio) identify the song
+via songrec AND read its Shazam `offset` (position in the track at match time).
+The player anchors that offset to a monotonic clock, so lyrics scroll in sync
+with whatever is playing in the room — no keypress, no Spotify needed. Offsets
+from several matches are clustered (median of the tightest group) to reject the
+occasional chorus-repeat outlier. Use `--offset <secs>` to nudge for latency if
+lines run early/late.
 
 ### Spotify position sync
 

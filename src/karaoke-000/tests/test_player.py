@@ -69,3 +69,27 @@ def test_parse_query_title_only():
     ref = parse_query("Bohemian Rhapsody")
     assert ref.artist == ""
     assert ref.title == "Bohemian Rhapsody"
+
+
+def test_robust_offset_single():
+    from karaoke.identify import robust_offset
+    assert robust_offset([{"offset": 42.0}]) == 42.0
+
+
+def test_robust_offset_rejects_outlier():
+    from karaoke.identify import robust_offset
+    # three tight ~89s + one 134.9s outlier (real songrec case) -> ~89
+    ms = [{"offset": 89.14}, {"offset": 89.05}, {"offset": 89.41}, {"offset": 134.90}]
+    r = robust_offset(ms)
+    assert r is not None and 88.0 <= r <= 90.0
+
+
+def test_robust_offset_empty():
+    from karaoke.identify import robust_offset
+    assert robust_offset([]) is None
+    assert robust_offset([{"timeskew": 0.1}]) is None
+
+
+def test_robust_offset_median_of_cluster():
+    from karaoke.identify import robust_offset
+    assert robust_offset([{"offset": 10.0}, {"offset": 12.0}, {"offset": 14.0}]) == 12.0

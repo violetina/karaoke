@@ -202,6 +202,70 @@ def play(tl: LyricTimeline, *, title: str = "", artist: str = "",
         console.print("\n[dim]stopped[/]")
 
 
+def play_offset_synced(
+    tl: LyricTimeline,
+    *,
+    title: str = "",
+    artist: str = "",
+    offset: float,
+    offset_mono: float,
+    extra_latency: float = 0.0,
+) -> None:  # pragma: no cover - interactive/live
+    """Render synced lyrics anchored to a known track position (mic/room sync).
+
+    `offset` is the position-in-track (seconds) reported by songrec at monotonic
+    instant `offset_mono`. We advance a local clock from that anchor, so the
+    highlighted line follows the live audio heard through the mic. `extra_latency`
+    nudges for recognizer/audio delay (add a bit if lyrics run early).
+    """
+    from rich.align import Align
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+
+    console = Console()
+    if not tl.lines:
+        console.print("[yellow]No synced lyrics available for this track.[/]")
+        return
+
+    header = f"{artist} - {title}".strip(" -")
+
+    def elapsed_now() -> float:
+        return offset + (time.monotonic() - offset_mono) + extra_latency
+
+    def frame() -> Panel:
+        e = elapsed_now()
+        active = tl.active_index(e)
+        body = Text()
+        lo = max(0, active - 3)
+        hi = min(len(tl.lines), active + 5)
+        for i in range(lo, hi):
+            line = tl.lines[i][1]
+            if i == active:
+                body.append("♪ " + line + "\n", style="bold white on blue")
+            elif i < active:
+                body.append("  " + line + "\n", style="dim")
+            else:
+                body.append("  " + line + "\n", style="grey70")
+        nxt = tl.next_time(e)
+        foot = f"{e:0.1f}s"
+        foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
+        return Panel(Align.left(body), title=header, subtitle=foot)
+
+    console.print(f"[bold cyan]{header}[/]  [dim](synced to live audio)[/]")
+    try:
+        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+            while True:
+                e = elapsed_now()
+                live.update(frame())
+                if tl.next_time(e) is None and e > tl.times[-1] + 4:
+                    break
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/]")
+
+
 def play_spotify_synced(
     tl: LyricTimeline,
     *,
