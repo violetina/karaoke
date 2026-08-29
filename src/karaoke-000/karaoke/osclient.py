@@ -23,7 +23,7 @@ def client() -> OpenSearch:
 def index_body() -> dict[str, Any]:
     """Mapping for the `tracks` index: metadata + lyrics + kNN lyric vector."""
     return {
-        "settings": {"index": {"knn": True}},
+        "settings": {"index": {"knn": True, "number_of_replicas": 0}},
         "mappings": {
             "properties": {
                 "path": {"type": "keyword"},
