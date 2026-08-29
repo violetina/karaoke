@@ -38,3 +38,26 @@ python3.14 -m venv .venv && . .venv/bin/activate
 pip install -e "src/karaoke-000[dev]"
 pytest src/karaoke-000/tests -v
 ```
+
+## Usage
+
+```bash
+# Index a music library (tags -> LRCLIB lyrics -> embed -> OpenSearch)
+music-index --dir ~/Music
+
+# Semantic search: find a song by what its lyrics mean
+lyricsearch "religion faith losing my belief"
+lyricsearch --keyword "teen spirit"          # keyword mode
+
+# Karaoke: synced, highlighted lyrics in the terminal
+karaoke "R.E.M. - Losing My Religion"        # by name (uses cache/LRCLIB)
+karaoke --file song.mp3                       # from a local file's tags
+karaoke --listen                              # identify room audio via mic (songrec)
+karaoke --output                              # identify audio playing on this machine
+karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
+```
+
+The live player prints the header, waits for you to press Enter when the music
+starts, then highlights each line in time with a countdown to the next. Clock is
+keypress-driven (MVP); true audio-position sync is a later upgrade.
+
