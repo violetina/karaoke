@@ -1,0 +1,123 @@
+{
+  "items": [
+    {
+      "track": {
+        "id": "7fkWpK1YcIMtM7PdMawgfY",
+        "uri": "spotify:track:7fkWpK1YcIMtM7PdMawgfY",
+        "name": "A Plea",
+        "duration_ms": 458053,
+        "artists": [
+          {
+            "name": "Flea"
+          }
+        ],
+        "album": {
+          "name": "A Plea",
+          "release_date": "2025-12-02"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "7vuI7MKPrRX3vPbsft78qz",
+        "uri": "spotify:track:7vuI7MKPrRX3vPbsft78qz",
+        "name": "Tetrastructural Minds",
+        "duration_ms": 321880,
+        "artists": [
+          {
+            "name": "Vektor"
+          }
+        ],
+        "album": {
+          "name": "Outer Isolation",
+          "release_date": "2011"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "3mnAnVhmKgis6CDcRCPZoz",
+        "uri": "spotify:track:3mnAnVhmKgis6CDcRCPZoz",
+        "name": "Triti Morfi",
+        "duration_ms": 243789,
+        "artists": [
+          {
+            "name": "Dury Dava"
+          }
+        ],
+        "album": {
+          "name": "DEPY",
+          "release_date": "2025-11-07"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "6p7qDgJQLki95PmV0AWfZK",
+        "uri": "spotify:track:6p7qDgJQLki95PmV0AWfZK",
+        "name": "Globecore Flats",
+        "duration_ms": 337525,
+        "artists": [
+          {
+            "name": "Clark"
+          }
+        ],
+        "album": {
+          "name": "Steep Stims",
+          "release_date": "2025-11-07"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "5jXzG56pDO74wRBG7GBoyf",
+        "uri": "spotify:track:5jXzG56pDO74wRBG7GBoyf",
+        "name": "Near DT, MI",
+        "duration_ms": 140466,
+        "artists": [
+          {
+            "name": "black midi"
+          }
+        ],
+        "album": {
+          "name": "Schlagenheim",
+          "release_date": "2019-06-21"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "5ISnCccJ9svKn12tF7aGm1",
+        "uri": "spotify:track:5ISnCccJ9svKn12tF7aGm1",
+        "name": "Reducer",
+        "duration_ms": 267880,
+        "artists": [
+          {
+            "name": "Pigs Pigs Pigs Pigs Pigs Pigs Pigs"
+          }
+        ],
+        "album": {
+          "name": "Viscerals",
+          "release_date": "2020-04-03"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "0O9EK9beonzkng21pItifQ",
+        "uri": "spotify:track:0O9EK9beonzkng21pItifQ",
+        "name": "Soulfly XIII",
+        "duration_ms": 223681,
+        "artists": [
+          {
+            "name": "Soulfly"
+          }
+        ],
+        "album": {
+          "name": "Chama",
+          "release_date": "2025-10-24"
+        }
+      }
+    }
+  ]
+}
