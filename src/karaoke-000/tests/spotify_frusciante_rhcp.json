@@ -1,0 +1,140 @@
+{
+  "items": [
+    {
+      "track": {
+        "id": "3d9DChrdc6BOeFsbrZ3Is0",
+        "uri": "spotify:track:3d9DChrdc6BOeFsbrZ3Is0",
+        "name": "Under the Bridge",
+        "duration_ms": 264306,
+        "artists": [
+          {
+            "name": "Red Hot Chili Peppers"
+          }
+        ],
+        "album": {
+          "name": "Blood Sugar Sex Magik",
+          "release_date": "1991-09-24"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "6Dm2KfuPBa3eXOgHaT88r4",
+        "uri": "spotify:track:6Dm2KfuPBa3eXOgHaT88r4",
+        "name": "The Past Recedes",
+        "duration_ms": 233626,
+        "artists": [
+          {
+            "name": "John Frusciante"
+          }
+        ],
+        "album": {
+          "name": "Curtains",
+          "release_date": "2005-02-01"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "2NVmpcUm2FUUQ04FlWIj2q",
+        "uri": "spotify:track:2NVmpcUm2FUUQ04FlWIj2q",
+        "name": "Before The Beginning",
+        "duration_ms": 548533,
+        "artists": [
+          {
+            "name": "John Frusciante"
+          }
+        ],
+        "album": {
+          "name": "The Empyrean",
+          "release_date": "2009"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "7vxlM6ouhpJy5WMEZqU7vV",
+        "uri": "spotify:track:7vxlM6ouhpJy5WMEZqU7vV",
+        "name": "Going Inside",
+        "duration_ms": 215400,
+        "artists": [
+          {
+            "name": "John Frusciante"
+          }
+        ],
+        "album": {
+          "name": "To Record Only Water For Ten Days",
+          "release_date": "2001-02-12"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "callf",
+        "uri": "spotify:track:callf",
+        "name": "Californication",
+        "duration_ms": 321666,
+        "artists": [
+          {
+            "name": "Red Hot Chili Peppers"
+          }
+        ],
+        "album": {
+          "name": "\u2014",
+          "release_date": "1999-06-08"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "scar",
+        "uri": "spotify:track:scar",
+        "name": "Scar Tissue",
+        "duration_ms": 217346,
+        "artists": [
+          {
+            "name": "Red Hot Chili Peppers"
+          }
+        ],
+        "album": {
+          "name": "\u2014",
+          "release_date": "1999-06-08"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "other",
+        "uri": "spotify:track:other",
+        "name": "Otherside",
+        "duration_ms": 255560,
+        "artists": [
+          {
+            "name": "Red Hot Chili Peppers"
+          }
+        ],
+        "album": {
+          "name": "\u2014",
+          "release_date": "1999-06-08"
+        }
+      }
+    },
+    {
+      "track": {
+        "id": "snow",
+        "uri": "spotify:track:snow",
+        "name": "Snow (Hey Oh)",
+        "duration_ms": 334666,
+        "artists": [
+          {
+            "name": "Red Hot Chili Peppers"
+          }
+        ],
+        "album": {
+          "name": "\u2014",
+          "release_date": "2006-05-05"
+        }
+      }
+    }
+  ]
+}

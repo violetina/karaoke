@@ -52,12 +52,19 @@ lyricsearch --keyword "teen spirit"          # keyword mode
 # Karaoke: synced, highlighted lyrics in the terminal
 karaoke "R.E.M. - Losing My Religion"        # by name (uses cache/LRCLIB)
 karaoke --file song.mp3                       # from a local file's tags
+karaoke --file song.mp3 --transcribe          # Whisper fallback if no LRCLIB lyrics
 karaoke --listen                              # identify room audio via mic (songrec)
 karaoke --output                              # identify audio playing on this machine
+karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 ```
 
-The live player prints the header, waits for you to press Enter when the music
-starts, then highlights each line in time with a countdown to the next. Clock is
-keypress-driven (MVP); true audio-position sync is a later upgrade.
+### Spotify position sync
+
+`karaoke --spotify` reads the track currently playing on Spotify and scrolls the
+lyrics locked to the **real playback position** (polls progress + interpolates),
+so lines advance in time with the audio — no keypress needed. It reuses the OAuth
+credentials Hermes already stored in `~/.hermes/auth.json` (no separate login).
+Spotify's API forbids audio download, so these tracks use LRCLIB lyrics only
+(no Whisper); metadata can be indexed for search via the Spotify importer.
 

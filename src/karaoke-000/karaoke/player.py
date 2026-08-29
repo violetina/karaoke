@@ -187,3 +187,82 @@ def play(tl: LyricTimeline, *, title: str = "", artist: str = "",
                 time.sleep(0.1)
     except KeyboardInterrupt:
         console.print("\n[dim]stopped[/]")
+
+
+def play_spotify_synced(
+    tl: LyricTimeline,
+    *,
+    title: str = "",
+    artist: str = "",
+    offset: float = 0.0,
+    poll_interval: float = 1.0,
+) -> None:  # pragma: no cover - interactive/live
+    """Render synced lyrics locked to the LIVE Spotify playback position.
+
+    Polls Spotify for progress_ms every `poll_interval`s and interpolates with a
+    local monotonic clock between polls, so the highlighted line follows the real
+    track position (no keypress guessing). Stops when playback ends/stops.
+    """
+    from rich.align import Align
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from .spotify_client import SpotifyClient
+
+    console = Console()
+    if not tl.lines:
+        console.print("[yellow]No synced lyrics available for this track.[/]")
+        return
+
+    sp = SpotifyClient()
+    header = f"{artist} - {title}".strip(" -")
+
+    # Anchor: real position at a known monotonic instant; interpolate between polls.
+    def anchor() -> tuple[float, float, bool]:
+        pb = sp.current_playback()
+        if pb is None:
+            return (0.0, time.monotonic(), False)
+        return (pb.position_s, time.monotonic(), pb.is_playing)
+
+    pos0, mono0, playing = anchor()
+    last_poll = time.monotonic()
+
+    def elapsed_now() -> float:
+        return pos0 + (time.monotonic() - mono0) + offset
+
+    def frame() -> Panel:
+        e = elapsed_now()
+        active = tl.active_index(e)
+        body = Text()
+        lo = max(0, active - 3)
+        hi = min(len(tl.lines), active + 5)
+        for i in range(lo, hi):
+            line = tl.lines[i][1]
+            if i == active:
+                body.append("♪ " + line + "\n", style="bold white on blue")
+            elif i < active:
+                body.append("  " + line + "\n", style="dim")
+            else:
+                body.append("  " + line + "\n", style="grey70")
+        nxt = tl.next_time(e)
+        foot = f"{e:0.1f}s"
+        foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
+        return Panel(Align.left(body), title=header, subtitle=foot)
+
+    console.print(f"[bold cyan]{header}[/]  [dim](syncing to Spotify)[/]")
+    try:
+        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+            while True:
+                now = time.monotonic()
+                if now - last_poll >= poll_interval:
+                    pos0, mono0, playing = anchor()
+                    last_poll = now
+                    if not playing and pos0 == 0.0:
+                        console.print("\n[dim]playback stopped[/]")
+                        break
+                live.update(frame())
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/]")

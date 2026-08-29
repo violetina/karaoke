@@ -11,6 +11,15 @@ from .identify import SongRef, from_file, identify_live, parse_query
 def _resolve(args) -> Optional[SongRef]:
     if args.file:
         return from_file(args.file)
+    if args.spotify:
+        from .spotify_client import SpotifyClient
+        pb = SpotifyClient().current_playback()
+        if not pb or not pb.title:
+            print("Nothing playing on Spotify. Start a track first.", file=sys.stderr)
+            return None
+        print(f"Spotify: {pb.artist} - {pb.title}", file=sys.stderr)
+        return SongRef(artist=pb.artist, title=pb.title,
+                       duration=pb.duration_ms / 1000.0, source="spotify")
     if args.listen or args.output:
         print(f"Listening ({'output' if args.output else 'mic'})...", file=sys.stderr)
         ref = identify_live(mic=not args.output, timeout=args.timeout)
@@ -28,6 +37,8 @@ def karaoke_main() -> int:
     ap.add_argument("--file", "-f", help="local audio file (read tags)")
     ap.add_argument("--listen", "-l", action="store_true", help="identify room audio via mic")
     ap.add_argument("--output", "-o", action="store_true", help="identify laptop output audio")
+    ap.add_argument("--spotify", "-s", action="store_true",
+                    help="sync lyrics to the track currently playing on Spotify")
     ap.add_argument("--timeout", "-t", type=int, default=30, help="listen timeout secs")
     ap.add_argument("--no-cache", action="store_true", help="skip OpenSearch cache, always fetch")
     ap.add_argument("--transcribe", action="store_true",
@@ -60,6 +71,11 @@ def karaoke_main() -> int:
     if args.print_only:
         for t, text in tl.lines:
             print(f"[{int(t//60):02d}:{t%60:05.2f}] {text}")
+        return 0
+
+    if args.spotify:
+        from .player import play_spotify_synced
+        play_spotify_synced(tl, title=ref.title, artist=ref.artist, offset=args.offset)
         return 0
 
     play(tl, title=ref.title, artist=ref.artist, offset=args.offset)
