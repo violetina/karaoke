@@ -64,6 +64,26 @@ def group_words_to_lines(
     return lines
 
 
+def _dedup_adjacent(
+    lines: list[tuple[float, str]],
+    *,
+    max_gap: float = 6.0,
+) -> list[tuple[float, str]]:
+    """Drop a line whose text repeats the immediately previous line within
+    `max_gap` seconds. Kills Whisper's repetition artifact on music beds while
+    preserving intentional repeats (chorus lines spaced further apart).
+    """
+    out: list[tuple[float, str]] = []
+    for t, text in lines:
+        norm = text.strip().lower()
+        if out:
+            pt, ptext = out[-1]
+            if norm == ptext.strip().lower() and (t - pt) <= max_gap:
+                continue
+        out.append((t, text))
+    return out
+
+
 def lines_to_lrc(lines: list[tuple[float, str]]) -> str:
     """Render (time, text) lines to LRC text ([mm:ss.xx] line)."""
     out = []
@@ -77,19 +97,29 @@ def lines_to_lrc(lines: list[tuple[float, str]]) -> str:
 def transcribe_to_lrc(
     audio_path: str,
     *,
-    model_size: str = "base",
+    model_size: str = "small",
     language: Optional[str] = None,
     compute_type: str = "int8",
+    vad_filter: bool = False,
 ) -> str:
     """Transcribe an audio file to LRC text using faster-whisper.
 
-    Returns LRC string (may be empty if nothing was transcribed).
+    Defaults to the `small` model. `condition_on_previous_text=False` plus a
+    post-hoc dedup pass suppress the line-repetition the model produces on
+    musical audio. VAD is OFF by default: faster-whisper's Silero VAD
+    over-filters singing/quiet intros and can discard the entire track.
+    Returns an LRC string (may be empty if nothing was transcribed).
     """
     from faster_whisper import WhisperModel
 
     model = WhisperModel(model_size, device="cpu", compute_type=compute_type)
     segments, _info = model.transcribe(
-        audio_path, word_timestamps=True, language=language,
+        audio_path,
+        word_timestamps=True,
+        language=language,
+        vad_filter=vad_filter,
+        # Suppress runaway repetition (Whisper looping a line on music beds).
+        condition_on_previous_text=False,
     )
     words: list[Word] = []
     for seg in segments:
@@ -100,7 +130,7 @@ def transcribe_to_lrc(
         else:
             # no word timestamps -> fall back to one line per segment
             words.append(Word(start=seg.start, end=seg.end, text=seg.text))
-    lines = group_words_to_lines(words)
+    lines = _dedup_adjacent(group_words_to_lines(words))
     return lines_to_lrc(lines)
 
 
@@ -109,10 +139,13 @@ def _cli() -> int:  # pragma: no cover - manual run
 
     ap = argparse.ArgumentParser(description="Transcribe audio -> LRC via Whisper")
     ap.add_argument("audio")
-    ap.add_argument("--model", default="base")
+    ap.add_argument("--model", default="small")
     ap.add_argument("--language", default=None)
+    ap.add_argument("--vad", action="store_true",
+                    help="enable VAD filtering (off by default; can over-filter singing)")
     a = ap.parse_args()
-    print(transcribe_to_lrc(a.audio, model_size=a.model, language=a.language))
+    print(transcribe_to_lrc(a.audio, model_size=a.model, language=a.language,
+                            vad_filter=a.vad))
     return 0
 
 

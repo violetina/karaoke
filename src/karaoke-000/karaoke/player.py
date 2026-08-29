@@ -63,13 +63,26 @@ def get_synced(
     use_cache: bool = True,
     audio_path: Optional[str] = None,
     transcribe: bool = False,
+    force_transcribe: bool = False,
 ) -> Lyrics:
     """Return synced lyrics: OpenSearch cache first, then LRCLIB (and cache it).
 
     If LRCLIB has no synced lyrics and `transcribe=True` with a local
     `audio_path`, fall back to Whisper transcription and cache the result.
+    `force_transcribe=True` skips cache + LRCLIB entirely and always uses Whisper.
     """
     from .config import settings
+
+    # Force path: Whisper only, no cache read, no LRCLIB.
+    if force_transcribe and audio_path:
+        from .whisper_sync import transcribe_to_lrc
+
+        lrc = transcribe_to_lrc(audio_path)
+        ly = Lyrics(
+            plain="\n".join(t for _, t in parse_lrc(lrc)),
+            synced_raw=lrc, source="whisper", lines=parse_lrc(lrc),
+        ) if lrc.strip() else Lyrics()
+        return ly
 
     c = None
     if use_cache:

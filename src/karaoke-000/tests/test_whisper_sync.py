@@ -1,5 +1,5 @@
 """Tests for Whisper word-grouping -> LRC (no model needed)."""
-from karaoke.whisper_sync import Word, group_words_to_lines, lines_to_lrc
+from karaoke.whisper_sync import Word, group_words_to_lines, lines_to_lrc, _dedup_adjacent
 
 
 def _w(start, end, text):
@@ -57,3 +57,23 @@ def test_roundtrip_lrc_parseable():
     lrc = lines_to_lrc(group_words_to_lines(words))
     parsed = parse_lrc(lrc)
     assert [t for t, _ in parsed] == [0.0, 1.5]
+
+
+def test_dedup_drops_close_repeat():
+    lines = [(0.0, "same line"), (2.0, "same line"), (4.0, "next")]
+    assert _dedup_adjacent(lines, max_gap=6.0) == [(0.0, "same line"), (4.0, "next")]
+
+
+def test_dedup_keeps_distant_repeat():
+    # a chorus line repeating 10s later is intentional, keep it
+    lines = [(0.0, "chorus"), (10.0, "chorus")]
+    assert _dedup_adjacent(lines, max_gap=6.0) == [(0.0, "chorus"), (10.0, "chorus")]
+
+
+def test_dedup_case_insensitive():
+    lines = [(0.0, "Hey Oh"), (1.0, "hey oh")]
+    assert _dedup_adjacent(lines, max_gap=6.0) == [(0.0, "Hey Oh")]
+
+
+def test_dedup_empty():
+    assert _dedup_adjacent([]) == []

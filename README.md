@@ -53,6 +53,7 @@ lyricsearch --keyword "teen spirit"          # keyword mode
 karaoke "R.E.M. - Losing My Religion"        # by name (uses cache/LRCLIB)
 karaoke --file song.mp3                       # from a local file's tags
 karaoke --file song.mp3 --transcribe          # Whisper fallback if no LRCLIB lyrics
+karaoke --file song.mp3 --force-transcribe    # always transcribe (skip cache + LRCLIB)
 karaoke --listen                              # identify room audio via mic (songrec)
 karaoke --output                              # identify audio playing on this machine
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position

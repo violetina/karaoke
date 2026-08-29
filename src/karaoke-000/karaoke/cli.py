@@ -43,6 +43,8 @@ def karaoke_main() -> int:
     ap.add_argument("--no-cache", action="store_true", help="skip OpenSearch cache, always fetch")
     ap.add_argument("--transcribe", action="store_true",
                     help="if no LRCLIB lyrics, transcribe a local --file with Whisper")
+    ap.add_argument("--force-transcribe", action="store_true",
+                    help="always transcribe --file with Whisper (skip cache + LRCLIB)")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="print lyrics instead of the live player")
@@ -57,7 +59,8 @@ def karaoke_main() -> int:
     ly = get_synced(ref.artist, ref.title, ref.album, ref.duration,
                     use_cache=not args.no_cache,
                     audio_path=ref.path,
-                    transcribe=args.transcribe)
+                    transcribe=args.transcribe or args.force_transcribe,
+                    force_transcribe=args.force_transcribe)
     tl = timeline_from_lyrics(ly)
 
     if not tl.lines:
