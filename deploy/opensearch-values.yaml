@@ -1,0 +1,40 @@
+# OpenSearch single-node values for a local kind cluster (dev only).
+# Security plugin disabled + NodePort => reachable at http://localhost:9200.
+# NEVER expose this NodePort beyond localhost.
+singleNode: true
+replicas: 1
+
+# Keep the JVM small; the index is tiny.
+opensearchJavaOpts: "-Xms1g -Xmx1g"
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1536Mi"
+  limits:
+    memory: "2Gi"
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+# Single-node: don't wait for a green multi-node cluster.
+clusterName: karaoke-os
+nodeGroup: master
+masterService: opensearch-cluster-master
+
+extraEnvs:
+  - name: discovery.type
+    value: single-node
+  - name: DISABLE_SECURITY_PLUGIN
+    value: "true"
+  - name: DISABLE_INSTALL_DEMO_CONFIG
+    value: "true"
+
+config:
+  opensearch.yml: |
+    plugins.security.disabled: true
+
+service:
+  type: NodePort
+  nodePort: 30920
