@@ -54,7 +54,8 @@ karaoke "R.E.M. - Losing My Religion"        # by name (uses cache/LRCLIB)
 karaoke --file song.mp3                       # from a local file's tags
 karaoke --file song.mp3 --transcribe          # Whisper fallback if no LRCLIB lyrics
 karaoke --file song.mp3 --force-transcribe    # always transcribe (skip cache + LRCLIB)
-karaoke --listen                              # identify room audio via mic (songrec)
+karaoke --listen                              # identify room audio via mic (songrec), sync once
+karaoke --radio                               # CONTINUOUS: follow live radio, re-lock as songs change
 karaoke --output                              # identify audio playing on this machine
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position

@@ -39,6 +39,10 @@ def karaoke_main() -> int:
     ap.add_argument("--output", "-o", action="store_true", help="identify laptop output audio")
     ap.add_argument("--spotify", "-s", action="store_true",
                     help="sync lyrics to the track currently playing on Spotify")
+    ap.add_argument("--radio", "-r", action="store_true",
+                    help="continuously follow live audio (mic): re-identify + re-sync as songs change")
+    ap.add_argument("--reidentify", type=float, default=30.0,
+                    help="seconds between re-identifications in --radio mode (default 30)")
     ap.add_argument("--timeout", "-t", type=int, default=30, help="listen timeout secs")
     ap.add_argument("--no-cache", action="store_true", help="skip OpenSearch cache, always fetch")
     ap.add_argument("--transcribe", action="store_true",
@@ -49,6 +53,13 @@ def karaoke_main() -> int:
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="print lyrics instead of the live player")
     args = ap.parse_args()
+
+    # Continuous radio mode: self-contained loop, no single-song resolution.
+    if args.radio:
+        from .player import play_radio_synced
+        play_radio_synced(mic=not args.output, reidentify_interval=args.reidentify,
+                          extra_latency=args.offset, listen_timeout=args.timeout)
+        return 0
 
     ref = _resolve(args)
     if not ref or not ref.title:

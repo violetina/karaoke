@@ -266,6 +266,129 @@ def play_offset_synced(
         console.print("\n[dim]stopped[/]")
 
 
+def play_radio_synced(
+    *,
+    mic: bool = True,
+    reidentify_interval: float = 30.0,
+    extra_latency: float = 0.0,
+    listen_timeout: int = 30,
+) -> None:  # pragma: no cover - interactive/live
+    """Continuously follow live audio (radio/room): identify, sync, re-lock.
+
+    Runs a background thread that re-identifies every `reidentify_interval`s.
+    Each result either re-anchors the current song (drift correction) or, if the
+    song changed, swaps in new lyrics. Between/over speech it keeps the last song
+    and shows a listening hint. Ctrl-C to stop.
+    """
+    import threading
+
+    from rich.align import Align
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from .identify import identify_live
+    from .player import get_synced, timeline_from_lyrics  # self-import safe
+
+    console = Console()
+
+    # Shared state guarded by a lock; updated by the background identifier.
+    state = {
+        "key": None,        # (artist, title) currently displayed
+        "artist": "",
+        "title": "",
+        "tl": LyricTimeline([]),
+        "offset": 0.0,
+        "offset_mono": time.monotonic(),
+        "status": "listening…",
+        "has_lyrics": False,
+    }
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def apply(ref) -> None:
+        """Fold a fresh identification into shared state."""
+        if ref is None or not ref.title or ref.offset is None:
+            with lock:
+                state["status"] = "listening… (no match — speech/ad/quiet?)"
+            return
+        key = (ref.artist.lower(), ref.title.lower())
+        with lock:
+            same = key == state["key"]
+        if same:
+            # Drift correction: re-anchor the clock, keep the timeline.
+            with lock:
+                state["offset"] = ref.offset
+                state["offset_mono"] = ref.offset_mono
+                state["status"] = "in sync"
+            return
+        # New song -> fetch lyrics (slow) OUTSIDE the lock.
+        ly = get_synced(ref.artist, ref.title)
+        tl = timeline_from_lyrics(ly)
+        with lock:
+            state["key"] = key
+            state["artist"] = ref.artist
+            state["title"] = ref.title
+            state["tl"] = tl
+            state["offset"] = ref.offset
+            state["offset_mono"] = ref.offset_mono
+            state["has_lyrics"] = bool(tl.lines)
+            state["status"] = "in sync" if tl.lines else "no synced lyrics for this track"
+
+    def identifier() -> None:
+        # First pass immediately, then every interval.
+        while not stop.is_set():
+            try:
+                ref = identify_live(mic=mic, timeout=listen_timeout)
+                apply(ref)
+            except Exception as e:  # keep the loop alive on transient errors
+                with lock:
+                    state["status"] = f"identify error: {e}"
+            stop.wait(reidentify_interval)
+
+    def elapsed_now() -> float:
+        return state["offset"] + (time.monotonic() - state["offset_mono"]) + extra_latency
+
+    def frame() -> Panel:
+        with lock:
+            tl = state["tl"]
+            artist, title = state["artist"], state["title"]
+            status = state["status"]
+            has = state["has_lyrics"]
+        header = f"{artist} - {title}".strip(" -") or "listening for music…"
+        body = Text()
+        if has and tl.lines:
+            e = elapsed_now()
+            active = tl.active_index(e)
+            lo = max(0, active - 3)
+            hi = min(len(tl.lines), active + 5)
+            for i in range(lo, hi):
+                line = tl.lines[i][1]
+                if i == active:
+                    body.append("♪ " + line + "\n", style="bold white on blue")
+                elif i < active:
+                    body.append("  " + line + "\n", style="dim")
+                else:
+                    body.append("  " + line + "\n", style="grey70")
+        else:
+            body.append("\n  ♪ …\n\n", style="dim")
+        return Panel(Align.left(body), title=header, subtitle=status)
+
+    console.print("[bold cyan]Radio karaoke[/]  [dim](listening — Ctrl-C to stop)[/]")
+    th = threading.Thread(target=identifier, daemon=True)
+    th.start()
+    try:
+        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+            while not stop.is_set():
+                live.update(frame())
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/]")
+    finally:
+        stop.set()
+
+
 def play_spotify_synced(
     tl: LyricTimeline,
     *,
