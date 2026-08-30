@@ -139,6 +139,81 @@ def get_synced(
     return ly
 
 
+def line_nudge_delta(times: list[float], elapsed: float, direction: int) -> float:
+    """Clock delta to move the highlighted line by one, in seconds.
+
+    `direction > 0` advances to the NEXT line (lyrics catch up to audio running
+    ahead of the display); `direction < 0` steps back one line. Returns the
+    amount to ADD to the lyric clock (the accumulated nudge). Returns 0.0 when
+    already at an edge (past the last line going forward, or in the intro going
+    back). A small epsilon lands the clock just inside the target line so the
+    active-line lookup is unambiguous.
+    """
+    if not times:
+        return 0.0
+    # Active index: latest i with times[i] <= elapsed, else -1 (intro).
+    a = -1
+    for i, t in enumerate(times):
+        if t <= elapsed:
+            a = i
+        else:
+            break
+    if direction > 0:
+        j = a + 1
+        if j >= len(times):
+            return 0.0  # already at/after the last line
+        return (times[j] + 0.05) - elapsed
+    # backward
+    if a <= -1:
+        return 0.0  # already in the intro
+    j = a - 1
+    if j < 0:
+        return (times[0] - 0.5) - elapsed  # step back into the intro
+    return (times[j] + 0.05) - elapsed
+
+
+class _KeyReader:
+    """Non-blocking single-key reader (cbreak) for live nudge controls.
+
+    cbreak (not raw) keeps ISIG on, so Ctrl-C still raises KeyboardInterrupt.
+    Falls back to a no-op when stdin isn't a TTY (piped/tests). Reads one byte
+    at a time via select so it never blocks the render loop.
+    """
+
+    def __init__(self) -> None:
+        self._fd = None
+        self._old = None
+
+    def __enter__(self):
+        import sys
+        if not sys.stdin.isatty():
+            return self
+        import termios
+        import tty
+        self._fd = sys.stdin.fileno()
+        self._old = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+        return self
+
+    def get(self) -> Optional[str]:
+        if self._fd is None:
+            return None
+        import select
+        import sys
+        r, _, _ = select.select([sys.stdin], [], [], 0)
+        if r:
+            return sys.stdin.read(1)
+        return None
+
+    def __exit__(self, *exc) -> None:
+        if self._fd is not None and self._old is not None:
+            import termios
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+
+
+_NUDGE_HINT = "[v]-line [b]+line [0]reset [q]quit"
+
+
 def render_lines(tl: LyricTimeline, active: int, context: int = 3) -> str:
     """Plain-text window around the active line (used by tests + fallback)."""
     if not tl.lines:
@@ -230,9 +305,10 @@ def play_offset_synced(
         return
 
     header = f"{artist} - {title}".strip(" -")
+    nudge = [float(extra_latency)]  # live per-line adjustment (v/b keys)
 
     def elapsed_now() -> float:
-        return offset + (time.monotonic() - offset_mono) + extra_latency
+        return offset + (time.monotonic() - offset_mono) + nudge[0]
 
     def frame() -> Panel:
         e = elapsed_now()
@@ -251,17 +327,31 @@ def play_offset_synced(
         nxt = tl.next_time(e)
         foot = f"{e:0.1f}s"
         foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
+        if abs(nudge[0]) > 1e-6:
+            foot += f"  ·  nudge {nudge[0]:+.1f}s"
+        foot += "  ·  " + _NUDGE_HINT
         return Panel(Align.left(body), title=header, subtitle=foot)
 
-    console.print(f"[bold cyan]{header}[/]  [dim](synced to live audio)[/]")
+    console.print(f"[bold cyan]{header}[/]  [dim](synced to live audio — v/b nudge, q to stop)[/]")
     try:
-        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+        with _KeyReader() as keys, \
+                Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
             while True:
+                k = keys.get()
+                if k:
+                    if k in ("q", "\x1b"):
+                        break
+                    elif k == "v":  # v = step lyrics one line BACK
+                        nudge[0] += line_nudge_delta(tl.times, elapsed_now(), -1)
+                    elif k == "b":  # b = step lyrics one line FORWARD (catch up)
+                        nudge[0] += line_nudge_delta(tl.times, elapsed_now(), +1)
+                    elif k == "0":
+                        nudge[0] = float(extra_latency)
                 e = elapsed_now()
                 live.update(frame())
                 if tl.next_time(e) is None and e > tl.times[-1] + 4:
                     break
-                time.sleep(0.1)
+                time.sleep(0.05)
     except KeyboardInterrupt:
         console.print("\n[dim]stopped[/]")
 
@@ -306,6 +396,7 @@ def play_radio_synced(
     }
     lock = threading.Lock()
     stop = threading.Event()
+    nudge = [float(extra_latency)]  # live per-line adjustment (v/b keys)
 
     def apply(ref) -> None:
         """Fold a fresh identification into shared state."""
@@ -348,7 +439,7 @@ def play_radio_synced(
             stop.wait(reidentify_interval)
 
     def elapsed_now() -> float:
-        return state["offset"] + (time.monotonic() - state["offset_mono"]) + extra_latency
+        return state["offset"] + (time.monotonic() - state["offset_mono"]) + nudge[0]
 
     def frame() -> Panel:
         with lock:
@@ -373,16 +464,36 @@ def play_radio_synced(
                     body.append("  " + line + "\n", style="grey70")
         else:
             body.append("\n  ♪ …\n\n", style="dim")
-        return Panel(Align.left(body), title=header, subtitle=status)
+        n = nudge[0]
+        foot = status
+        if abs(n) > 1e-6:
+            foot += f"  ·  nudge {n:+.1f}s"
+        foot += "  ·  " + _NUDGE_HINT
+        return Panel(Align.left(body), title=header, subtitle=foot)
 
-    console.print("[bold cyan]Radio karaoke[/]  [dim](listening — Ctrl-C to stop)[/]")
+    console.print("[bold cyan]Radio karaoke[/]  [dim](listening — v/b nudge, q or Ctrl-C to stop)[/]")
     th = threading.Thread(target=identifier, daemon=True)
     th.start()
     try:
-        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+        with _KeyReader() as keys, \
+                Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
             while not stop.is_set():
+                k = keys.get()
+                if k:
+                    if k in ("q", "\x1b"):
+                        break
+                    elif k == "v":  # v = step lyrics one line BACK
+                        with lock:
+                            times = state["tl"].times
+                        nudge[0] += line_nudge_delta(times, elapsed_now(), -1)
+                    elif k == "b":  # b = step lyrics one line FORWARD (catch up)
+                        with lock:
+                            times = state["tl"].times
+                        nudge[0] += line_nudge_delta(times, elapsed_now(), +1)
+                    elif k == "0":  # reset nudge to the CLI-provided baseline
+                        nudge[0] = float(extra_latency)
                 live.update(frame())
-                time.sleep(0.1)
+                time.sleep(0.05)
     except KeyboardInterrupt:
         console.print("\n[dim]stopped[/]")
     finally:

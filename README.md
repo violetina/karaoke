@@ -71,6 +71,22 @@ from several matches are clustered (median of the tightest group) to reject the
 occasional chorus-repeat outlier. Use `--offset <secs>` to nudge for latency if
 lines run early/late.
 
+**Live nudge controls** (in `--radio`, `--listen`, `--output` players): the
+song-recognition step listens for ~10s before returning a position, which can
+leave the highlighted line running a couple of lines behind the audio. Correct
+it on the fly without restarting:
+
+| Key | Action |
+|-----|--------|
+| `b` | lyrics are **behind** → jump the highlight **forward** one line |
+| `v` | lyrics are **ahead** → step the highlight **back** one line |
+| `0` | reset the nudge to the `--offset` baseline |
+| `q` | quit |
+
+Each press snaps the highlight exactly one line and the accumulated nudge is
+shown in the footer (e.g. `nudge +6.2s`), so it sticks for the rest of the song.
+`--offset <secs>` still sets the starting bias if you already know the lag.
+
 ### Spotify position sync
 
 `karaoke --spotify` reads the track currently playing on Spotify and scrolls the

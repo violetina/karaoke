@@ -1,5 +1,5 @@
 """Tests for lyric timing logic and identify parsing (no audio/network)."""
-from karaoke.player import LyricTimeline, timeline_from_lyrics, render_lines
+from karaoke.player import LyricTimeline, timeline_from_lyrics, render_lines, line_nudge_delta
 from karaoke.lyrics import Lyrics
 from karaoke.identify import parse_query, SongRef
 
@@ -93,3 +93,54 @@ def test_robust_offset_empty():
 def test_robust_offset_median_of_cluster():
     from karaoke.identify import robust_offset
     assert robust_offset([{"offset": 10.0}, {"offset": 12.0}, {"offset": 14.0}]) == 12.0
+
+
+# --- live nudge (v=back / b=forward one line) ---------------------------------
+
+NT = [10.0, 20.0, 30.0, 40.0]
+
+
+def _apply(times, elapsed, direction):
+    """Return the new elapsed after one nudge (delta added to the clock)."""
+    return elapsed + line_nudge_delta(times, elapsed, direction)
+
+
+def test_nudge_forward_advances_one_line():
+    # At 22s the active line is index 1 (20s). Forward should land inside line 2 (30s).
+    assert LyricTimeline([(t, "x") for t in NT]).active_index(_apply(NT, 22.0, +1)) == 2
+
+
+def test_nudge_backward_steps_one_line():
+    # At 22s (active index 1) backward should land inside line 0 (10s).
+    e2 = _apply(NT, 22.0, -1)
+    assert LyricTimeline([(t, "x") for t in NT]).active_index(e2) == 0
+
+
+def test_nudge_forward_and_back_returns_close():
+    # forward then back from the same spot should land on the original line again.
+    tl = LyricTimeline([(t, "x") for t in NT])
+    start = 22.0
+    fwd = _apply(NT, start, +1)
+    back = _apply(NT, fwd, -1)
+    assert tl.active_index(back) == tl.active_index(start) == 1
+
+
+def test_nudge_forward_at_last_line_is_noop():
+    # Past the last line, forward can't advance further.
+    assert line_nudge_delta(NT, 45.0, +1) == 0.0
+
+
+def test_nudge_backward_in_intro_is_noop():
+    # Before the first line, back can't go further.
+    assert line_nudge_delta(NT, 2.0, -1) == 0.0
+
+
+def test_nudge_backward_from_first_line_enters_intro():
+    # At the first line, back should move into the intro (active index -1).
+    e2 = _apply(NT, 12.0, -1)
+    assert LyricTimeline([(t, "x") for t in NT]).active_index(e2) == -1
+
+
+def test_nudge_empty_timeline():
+    assert line_nudge_delta([], 5.0, +1) == 0.0
+    assert line_nudge_delta([], 5.0, -1) == 0.0
