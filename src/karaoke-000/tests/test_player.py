@@ -1,4 +1,5 @@
 """Tests for lyric timing logic and identify parsing (no audio/network)."""
+import pytest
 from karaoke.player import LyricTimeline, timeline_from_lyrics, render_lines, line_nudge_delta
 from karaoke.lyrics import Lyrics
 from karaoke.identify import parse_query, SongRef
@@ -144,3 +145,48 @@ def test_nudge_backward_from_first_line_enters_intro():
 def test_nudge_empty_timeline():
     assert line_nudge_delta([], 5.0, +1) == 0.0
     assert line_nudge_delta([], 5.0, -1) == 0.0
+
+
+# --- active_fraction (word-highlight interpolation) ---
+
+def test_active_fraction_intro_is_zero():
+    tl = LyricTimeline([(t, "x") for t in NT])
+    assert tl.active_fraction(5.0) == 0.0
+
+
+def test_active_fraction_midline():
+    # line 0 spans 10..20; at 15s we're halfway.
+    tl = LyricTimeline([(t, "x") for t in NT])
+    assert tl.active_fraction(15.0) == pytest.approx(0.5)
+
+
+def test_active_fraction_clamps_and_last_line_uses_tail():
+    tl = LyricTimeline([(t, "x") for t in NT])
+    # last line (40s) with default 4s tail: 42s -> 0.5
+    assert tl.active_fraction(42.0, tail=4.0) == pytest.approx(0.5)
+    # way past end clamps to 1.0
+    assert tl.active_fraction(999.0) == 1.0
+
+
+# --- active_word_index (per-word purple highlight) ---
+
+def test_active_word_index_spreads_words():
+    from karaoke.player import active_word_index
+    line = "one two three four"
+    assert active_word_index(line, 0.0) == 0
+    assert active_word_index(line, 0.3) == 1
+    assert active_word_index(line, 0.6) == 2
+    assert active_word_index(line, 0.99) == 3
+
+
+def test_active_word_index_clamps_last():
+    from karaoke.player import active_word_index
+    assert active_word_index("a b c", 1.0) == 2
+    assert active_word_index("a b c", 5.0) == 2
+
+
+def test_active_word_index_blank_line():
+    from karaoke.player import active_word_index
+    assert active_word_index("", 0.5) == -1
+    assert active_word_index("   ", 0.5) == -1
+

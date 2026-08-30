@@ -87,6 +87,22 @@ Each press snaps the highlight exactly one line and the accumulated nudge is
 shown in the footer (e.g. `nudge +6.2s`), so it sticks for the rest of the song.
 `--offset <secs>` still sets the starting bias if you already know the lag.
 
+**Default forward lead**: because that ~10s recognition window biases the
+reported position low, mic/radio locks now start with a **+12.6s forward
+pre-bias** baked in (`DEFAULT_LEAD_S`), so the highlight lands close to the audio
+without tapping `b` at all. Tune or disable it with `--lead <secs>` (e.g.
+`--lead 0` for the raw offset, `--lead 8` for a smaller push). `--lead` stacks on
+top of `--offset`; the `0` key resets the live nudge back to this baseline.
+
+### Word-level highlight
+
+The active line highlights the **current word in purple** (magenta) on top of the
+blue line background. LRCLIB only timestamps whole lines, so the word playhead is
+interpolated: the line's on-screen duration (until the next line's timestamp, or
+a 4s tail for the last line) is spread evenly across its words. It's an estimate,
+not per-word karaoke timing, but it gives a natural left-to-right sweep to sing
+along to. Falls back cleanly on blank lines.
+
 ### Spotify position sync
 
 `karaoke --spotify` reads the track currently playing on Spotify and scrolls the

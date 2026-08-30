@@ -44,6 +44,23 @@ class LyricTimeline:
                 return t
         return None
 
+    def active_fraction(self, elapsed: float, tail: float = 4.0) -> float:
+        """Progress (0..1) through the currently-active line.
+
+        Used to interpolate a word-level highlight: LRCLIB gives only per-LINE
+        timestamps, so we spread the line's on-screen duration across its words.
+        Returns 0.0 in the intro (no active line). For the last line (no next
+        timestamp) assumes a `tail`-second duration.
+        """
+        a = self.active_index(elapsed)
+        if a < 0:
+            return 0.0
+        start = self.lines[a][0]
+        end = self.lines[a + 1][0] if a + 1 < len(self.lines) else start + tail
+        if end <= start:
+            return 0.0
+        return max(0.0, min(1.0, (elapsed - start) / (end - start)))
+
 
 def timeline_from_lyrics(ly: Lyrics) -> LyricTimeline:
     if ly.lines:
@@ -213,6 +230,72 @@ class _KeyReader:
 
 _NUDGE_HINT = "[v]-line [b]+line [0]reset [q]quit"
 
+# Live recognition (songrec) listens ~10s before returning a position, biasing
+# the reported offset low so the highlight starts a couple of lines behind the
+# audio. Pre-bias the lyric clock forward by this many seconds on mic/radio
+# locks so the start is close without needing to tap `b`. Overridable via --lead.
+DEFAULT_LEAD_S = 12.6
+
+
+def active_word_index(text: str, frac: float) -> int:
+    """Index of the word to highlight given progress `frac` (0..1) through a line.
+
+    LRCLIB timestamps are per-line only, so we spread the line's duration evenly
+    across its whitespace-split words and pick the one under the playhead.
+    Returns -1 for an empty/blank line. Clamps to the last word at frac>=1.
+    """
+    words = text.split()
+    if not words:
+        return -1
+    f = max(0.0, min(0.999999, frac))
+    return min(len(words) - 1, int(f * len(words)))
+
+
+def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0) -> None:
+    """Append one lyric line to a Rich Text body.
+
+    kind: 'active' (current line — highlight the current word in purple),
+    'past' (dim) or 'future' (grey). `frac` drives the word highlight on the
+    active line. Imports Rich lazily so pure/tested code needn't depend on it.
+    """
+    if kind == "past":
+        body.append("  " + line + "\n", style="dim")
+        return
+    if kind == "future":
+        body.append("  " + line + "\n", style="grey70")
+        return
+    # active line: word-level purple highlight over the blue line background
+    wi = active_word_index(line, frac)
+    body.append("♪ ", style="bold white on blue")
+    if wi < 0:
+        body.append(line + "\n", style="bold white on blue")
+        return
+    words = line.split()
+    for j, w in enumerate(words):
+        if j == wi:
+            body.append(w, style="bold white on magenta")
+        else:
+            body.append(w, style="bold white on blue")
+        body.append(" " if j < len(words) - 1 else "\n",
+                    style="bold white on blue")
+
+
+def _render_body(body, tl: "LyricTimeline", elapsed: float,
+                 *, before: int = 3, after: int = 5) -> None:
+    """Fill a Rich Text `body` with the window around the active line."""
+    active = tl.active_index(elapsed)
+    frac = tl.active_fraction(elapsed)
+    lo = max(0, active - before)
+    hi = min(len(tl.lines), active + after)
+    for i in range(lo, hi):
+        line = tl.lines[i][1]
+        if i == active:
+            _append_lyric_line(body, line, kind="active", frac=frac)
+        elif i < active:
+            _append_lyric_line(body, line, kind="past")
+        else:
+            _append_lyric_line(body, line, kind="future")
+
 
 def render_lines(tl: LyricTimeline, active: int, context: int = 3) -> str:
     """Plain-text window around the active line (used by tests + fallback)."""
@@ -248,18 +331,8 @@ def play(tl: LyricTimeline, *, title: str = "", artist: str = "",
 
     def frame() -> Panel:
         elapsed = time.monotonic() - start + offset
-        active = tl.active_index(elapsed)
         body = Text()
-        lo = max(0, active - 3)
-        hi = min(len(tl.lines), active + 5)
-        for i in range(lo, hi):
-            line = tl.lines[i][1]
-            if i == active:
-                body.append("♪ " + line + "\n", style="bold white on blue")
-            elif i < active:
-                body.append("  " + line + "\n", style="dim")
-            else:
-                body.append("  " + line + "\n", style="grey70")
+        _render_body(body, tl, elapsed)
         nxt = tl.next_time(elapsed)
         footer = f"  next in {nxt - elapsed:0.1f}s" if nxt else "  (end)"
         return Panel(Align.left(body), title=header, subtitle=footer.strip())
@@ -312,18 +385,8 @@ def play_offset_synced(
 
     def frame() -> Panel:
         e = elapsed_now()
-        active = tl.active_index(e)
         body = Text()
-        lo = max(0, active - 3)
-        hi = min(len(tl.lines), active + 5)
-        for i in range(lo, hi):
-            line = tl.lines[i][1]
-            if i == active:
-                body.append("♪ " + line + "\n", style="bold white on blue")
-            elif i < active:
-                body.append("  " + line + "\n", style="dim")
-            else:
-                body.append("  " + line + "\n", style="grey70")
+        _render_body(body, tl, e)
         nxt = tl.next_time(e)
         foot = f"{e:0.1f}s"
         foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
@@ -451,17 +514,7 @@ def play_radio_synced(
         body = Text()
         if has and tl.lines:
             e = elapsed_now()
-            active = tl.active_index(e)
-            lo = max(0, active - 3)
-            hi = min(len(tl.lines), active + 5)
-            for i in range(lo, hi):
-                line = tl.lines[i][1]
-                if i == active:
-                    body.append("♪ " + line + "\n", style="bold white on blue")
-                elif i < active:
-                    body.append("  " + line + "\n", style="dim")
-                else:
-                    body.append("  " + line + "\n", style="grey70")
+            _render_body(body, tl, e)
         else:
             body.append("\n  ♪ …\n\n", style="dim")
         n = nudge[0]
@@ -545,18 +598,8 @@ def play_spotify_synced(
 
     def frame() -> Panel:
         e = elapsed_now()
-        active = tl.active_index(e)
         body = Text()
-        lo = max(0, active - 3)
-        hi = min(len(tl.lines), active + 5)
-        for i in range(lo, hi):
-            line = tl.lines[i][1]
-            if i == active:
-                body.append("♪ " + line + "\n", style="bold white on blue")
-            elif i < active:
-                body.append("  " + line + "\n", style="dim")
-            else:
-                body.append("  " + line + "\n", style="grey70")
+        _render_body(body, tl, e)
         nxt = tl.next_time(e)
         foot = f"{e:0.1f}s"
         foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"

@@ -6,6 +6,7 @@ import sys
 from typing import Optional
 
 from .identify import SongRef, from_file, identify_live, parse_query
+from .player import DEFAULT_LEAD_S
 
 
 def _resolve(args) -> Optional[SongRef]:
@@ -50,15 +51,22 @@ def karaoke_main() -> int:
     ap.add_argument("--force-transcribe", action="store_true",
                     help="always transcribe --file with Whisper (skip cache + LRCLIB)")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
+    ap.add_argument("--lead", type=float, default=None,
+                    help="forward pre-bias (secs) for mic/radio sync to offset the "
+                         f"~10s recognition window (default {DEFAULT_LEAD_S}; use 0 to disable)")
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="print lyrics instead of the live player")
     args = ap.parse_args()
+
+    # Forward pre-bias for live recognition (mic/radio) modes only. Spotify has an
+    # exact position and text/file modes start from a keypress, so no lead there.
+    lead = DEFAULT_LEAD_S if args.lead is None else args.lead
 
     # Continuous radio mode: self-contained loop, no single-song resolution.
     if args.radio:
         from .player import play_radio_synced
         play_radio_synced(mic=not args.output, reidentify_interval=args.reidentify,
-                          extra_latency=args.offset, listen_timeout=args.timeout)
+                          extra_latency=args.offset + lead, listen_timeout=args.timeout)
         return 0
 
     ref = _resolve(args)
@@ -97,7 +105,7 @@ def karaoke_main() -> int:
         from .player import play_offset_synced
         play_offset_synced(tl, title=ref.title, artist=ref.artist,
                            offset=ref.offset, offset_mono=ref.offset_mono,
-                           extra_latency=args.offset)
+                           extra_latency=args.offset + lead)
         return 0
 
     play(tl, title=ref.title, artist=ref.artist, offset=args.offset)
