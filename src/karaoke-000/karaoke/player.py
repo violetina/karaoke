@@ -12,6 +12,24 @@ from typing import Any, Optional
 
 from .lyrics import Lyrics, fetch_lrclib, parse_lrc
 
+# Active-line background per detected mood (see sentiment.mood_of). Word highlight
+# stays magenta on top; neutral keeps the original blue.
+_MOOD_BG = {
+    "happy": "on green",
+    "sad": "on blue",
+    "angry": "on red",
+    "tender": "on deep_pink4",
+    "neutral": "on blue",
+}
+# Panel border colour per mood — also the colour used for the beat "flash".
+_MOOD_BORDER = {
+    "happy": "green",
+    "sad": "blue",
+    "angry": "red",
+    "tender": "magenta",
+    "neutral": "cyan",
+}
+
 
 @dataclass
 class LyricTimeline:
@@ -234,7 +252,7 @@ _NUDGE_HINT = "[v]-line [b]+line [0]reset [q]quit"
 # the reported offset low so the highlight starts a couple of lines behind the
 # audio. Pre-bias the lyric clock forward by this many seconds on mic/radio
 # locks so the start is close without needing to tap `b`. Overridable via --lead.
-DEFAULT_LEAD_S = 12.6
+DEFAULT_LEAD_S = 13.0
 
 
 def active_word_index(text: str, frac: float) -> int:
@@ -251,12 +269,14 @@ def active_word_index(text: str, frac: float) -> int:
     return min(len(words) - 1, int(f * len(words)))
 
 
-def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0) -> None:
+def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
+                       mood: str = "neutral") -> None:
     """Append one lyric line to a Rich Text body.
 
-    kind: 'active' (current line — highlight the current word in purple),
-    'past' (dim) or 'future' (grey). `frac` drives the word highlight on the
-    active line. Imports Rich lazily so pure/tested code needn't depend on it.
+    kind: 'active' (current line — highlight the current word in purple over a
+    mood-tinted background), 'past' (dim) or 'future' (grey). `frac` drives the
+    word highlight; `mood` (from sentiment.mood_of) picks the active-line
+    background. Imports Rich lazily so pure/tested code needn't depend on it.
     """
     if kind == "past":
         body.append("  " + line + "\n", style="dim")
@@ -264,25 +284,30 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0) -> None
     if kind == "future":
         body.append("  " + line + "\n", style="grey70")
         return
-    # active line: word-level purple highlight over the blue line background
+    # active line: word-level purple highlight over a mood-tinted background
+    bg = _MOOD_BG.get(mood, "on blue")
+    base = f"bold white {bg}"
     wi = active_word_index(line, frac)
-    body.append("♪ ", style="bold white on blue")
+    body.append("♪ ", style=base)
     if wi < 0:
-        body.append(line + "\n", style="bold white on blue")
+        body.append(line + "\n", style=base)
         return
     words = line.split()
     for j, w in enumerate(words):
         if j == wi:
             body.append(w, style="bold white on magenta")
         else:
-            body.append(w, style="bold white on blue")
-        body.append(" " if j < len(words) - 1 else "\n",
-                    style="bold white on blue")
+            body.append(w, style=base)
+        body.append(" " if j < len(words) - 1 else "\n", style=base)
 
 
 def _render_body(body, tl: "LyricTimeline", elapsed: float,
-                 *, before: int = 3, after: int = 5) -> None:
-    """Fill a Rich Text `body` with the window around the active line."""
+                 *, before: int = 3, after: int = 5, mood: str = "neutral") -> None:
+    """Fill a Rich Text `body` with the window around the active line.
+
+    `mood` tints the active line's background (from sentiment.mood_of on the
+    active line's text); pass "neutral" to keep the original blue.
+    """
     active = tl.active_index(elapsed)
     frac = tl.active_fraction(elapsed)
     lo = max(0, active - before)
@@ -290,11 +315,57 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
     for i in range(lo, hi):
         line = tl.lines[i][1]
         if i == active:
-            _append_lyric_line(body, line, kind="active", frac=frac)
+            _append_lyric_line(body, line, kind="active", frac=frac, mood=mood)
         elif i < active:
             _append_lyric_line(body, line, kind="past")
         else:
             _append_lyric_line(body, line, kind="future")
+
+
+def _active_mood(tl: "LyricTimeline", elapsed: float) -> str:
+    """Mood of the currently-active lyric line (neutral in the intro)."""
+    from .sentiment import mood_of
+    a = tl.active_index(elapsed)
+    if a < 0:
+        return "neutral"
+    return mood_of(tl.lines[a][1])
+
+
+def _build_frame(tl: "LyricTimeline", elapsed: float, header: str, *,
+                 beat_times=None, footer_extra: str = ""):
+    """Assemble the mood-tinted, beat-flashed Rich Panel for one render tick.
+
+    Shared by every player. `beat_times` (sorted list) drives a real on-beat
+    border flash in --file mode; when None we fall back to a per-line pulse so
+    audio-less modes (Spotify/live) still blink. The border colour follows the
+    active line's mood; on a flash tick it brightens.
+    """
+    from rich.align import Align
+    from rich.panel import Panel
+    from rich.text import Text
+    from .beats import beat_on, line_pulse
+
+    mood = _active_mood(tl, elapsed)
+    body = Text()
+    _render_body(body, tl, elapsed, mood=mood)
+
+    if beat_times:
+        flash = beat_on(beat_times, elapsed)
+    else:
+        a = tl.active_index(elapsed)
+        line_start = tl.lines[a][0] if a >= 0 else None
+        flash = line_pulse(line_start, elapsed)
+
+    color = _MOOD_BORDER.get(mood, "cyan")
+    border_style = f"bold {color}" if flash else color
+
+    nxt = tl.next_time(elapsed)
+    foot = f"{mood}"
+    foot += f"  ·  next in {nxt - elapsed:0.1f}s" if nxt else "  ·  (end)"
+    if footer_extra:
+        foot = f"{footer_extra}  ·  {foot}"
+    return Panel(Align.left(body), title=header, subtitle=foot,
+                 border_style=border_style)
 
 
 def render_lines(tl: LyricTimeline, active: int, context: int = 3) -> str:
@@ -311,13 +382,16 @@ def render_lines(tl: LyricTimeline, active: int, context: int = 3) -> str:
 
 
 def play(tl: LyricTimeline, *, title: str = "", artist: str = "",
-         offset: float = 0.0) -> None:  # pragma: no cover - interactive
-    """Render synced lyrics with a Rich Live view, clock from keypress."""
-    from rich.align import Align
+         offset: float = 0.0,
+         beat_times: Optional[list[float]] = None) -> None:  # pragma: no cover - interactive
+    """Render synced lyrics with a Rich Live view, clock from keypress.
+
+    `beat_times` (from beats.detect_beats on a local file) enables a real on-beat
+    border flash; without it the border pulses once per lyric line.
+    """
     from rich.console import Console
     from rich.live import Live
     from rich.panel import Panel
-    from rich.text import Text
 
     console = Console()
     if not tl.lines:
@@ -331,11 +405,7 @@ def play(tl: LyricTimeline, *, title: str = "", artist: str = "",
 
     def frame() -> Panel:
         elapsed = time.monotonic() - start + offset
-        body = Text()
-        _render_body(body, tl, elapsed)
-        nxt = tl.next_time(elapsed)
-        footer = f"  next in {nxt - elapsed:0.1f}s" if nxt else "  (end)"
-        return Panel(Align.left(body), title=header, subtitle=footer.strip())
+        return _build_frame(tl, elapsed, header, beat_times=beat_times)
 
     try:
         with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
@@ -384,16 +454,22 @@ def play_offset_synced(
         return offset + (time.monotonic() - offset_mono) + nudge[0]
 
     def frame() -> Panel:
+        from .beats import line_pulse
         e = elapsed_now()
+        mood = _active_mood(tl, e)
         body = Text()
-        _render_body(body, tl, e)
+        _render_body(body, tl, e, mood=mood)
         nxt = tl.next_time(e)
-        foot = f"{e:0.1f}s"
+        foot = f"{mood}  ·  {e:0.1f}s"
         foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
         if abs(nudge[0]) > 1e-6:
             foot += f"  ·  nudge {nudge[0]:+.1f}s"
         foot += "  ·  " + _NUDGE_HINT
-        return Panel(Align.left(body), title=header, subtitle=foot)
+        a = tl.active_index(e)
+        flash = line_pulse(tl.lines[a][0] if a >= 0 else None, e)
+        color = _MOOD_BORDER.get(mood, "cyan")
+        return Panel(Align.left(body), title=header, subtitle=foot,
+                     border_style=f"bold {color}" if flash else color)
 
     console.print(f"[bold cyan]{header}[/]  [dim](synced to live audio — v/b nudge, q to stop)[/]")
     try:
@@ -505,6 +581,7 @@ def play_radio_synced(
         return state["offset"] + (time.monotonic() - state["offset_mono"]) + nudge[0]
 
     def frame() -> Panel:
+        from .beats import line_pulse
         with lock:
             tl = state["tl"]
             artist, title = state["artist"], state["title"]
@@ -512,17 +589,24 @@ def play_radio_synced(
             has = state["has_lyrics"]
         header = f"{artist} - {title}".strip(" -") or "listening for music…"
         body = Text()
+        mood = "neutral"
+        flash = False
         if has and tl.lines:
             e = elapsed_now()
-            _render_body(body, tl, e)
+            mood = _active_mood(tl, e)
+            _render_body(body, tl, e, mood=mood)
+            a = tl.active_index(e)
+            flash = line_pulse(tl.lines[a][0] if a >= 0 else None, e)
         else:
             body.append("\n  ♪ …\n\n", style="dim")
         n = nudge[0]
-        foot = status
+        foot = f"{mood}  ·  {status}"
         if abs(n) > 1e-6:
             foot += f"  ·  nudge {n:+.1f}s"
         foot += "  ·  " + _NUDGE_HINT
-        return Panel(Align.left(body), title=header, subtitle=foot)
+        color = _MOOD_BORDER.get(mood, "cyan")
+        return Panel(Align.left(body), title=header, subtitle=foot,
+                     border_style=f"bold {color}" if flash else color)
 
     console.print("[bold cyan]Radio karaoke[/]  [dim](listening — v/b nudge, q or Ctrl-C to stop)[/]")
     th = threading.Thread(target=identifier, daemon=True)
@@ -553,70 +637,118 @@ def play_radio_synced(
         stop.set()
 
 
-def play_spotify_synced(
-    tl: LyricTimeline,
+def play_spotify_loop(
     *,
-    title: str = "",
-    artist: str = "",
     offset: float = 0.0,
     poll_interval: float = 1.0,
+    use_cache: bool = True,
 ) -> None:  # pragma: no cover - interactive/live
-    """Render synced lyrics locked to the LIVE Spotify playback position.
+    """Continuously follow Spotify playback, one track after another.
 
-    Polls Spotify for progress_ms every `poll_interval`s and interpolates with a
-    local monotonic clock between polls, so the highlighted line follows the real
-    track position (no keypress guessing). Stops when playback ends/stops.
+    For each track: fetch synced lyrics and sync to the live position. If a track
+    has no synced lyrics, print a note and WAIT (polling) for the next song
+    instead of exiting. Auto-advances when the track changes. Runs until playback
+    stops entirely or Ctrl-C.
     """
-    from rich.align import Align
     from rich.console import Console
-    from rich.live import Live
-    from rich.panel import Panel
-    from rich.text import Text
 
     from .spotify_client import SpotifyClient
 
     console = Console()
-    if not tl.lines:
-        console.print("[yellow]No synced lyrics available for this track.[/]")
-        return
-
     sp = SpotifyClient()
-    header = f"{artist} - {title}".strip(" -")
+    handled_id: Optional[str] = None   # track we've already resolved (played or skipped)
+    warned_idle = False
 
-    # Anchor: real position at a known monotonic instant; interpolate between polls.
-    def anchor() -> tuple[float, float, bool]:
-        pb = sp.current_playback()
-        if pb is None:
-            return (0.0, time.monotonic(), False)
-        return (pb.position_s, time.monotonic(), pb.is_playing)
+    console.print("[dim]Following Spotify — Ctrl-C to stop.[/]")
+    try:
+        while True:
+            try:
+                pb = sp.current_playback()
+            except Exception as e:  # noqa: BLE001 - keep the loop alive on transient errors
+                console.print(f"[red]Spotify error:[/] {e}")
+                time.sleep(poll_interval)
+                continue
 
-    pos0, mono0, playing = anchor()
+            if pb is None or not pb.title:
+                if not warned_idle:
+                    console.print("[dim]Nothing playing on Spotify. Waiting for a track…[/]")
+                    warned_idle = True
+                handled_id = None
+                time.sleep(poll_interval)
+                continue
+            warned_idle = False
+
+            if pb.track_id == handled_id:
+                # Already resolved this track (it had no lyrics) — keep waiting.
+                time.sleep(poll_interval)
+                continue
+
+            handled_id = pb.track_id
+            header = f"{pb.artist} - {pb.title}".strip(" -")
+            console.print(f"[bold cyan]{header}[/]  [dim](fetching lyrics…)[/]")
+
+            ly = get_synced(pb.artist, pb.title,
+                            duration=pb.duration_ms / 1000.0, use_cache=use_cache)
+            tl = timeline_from_lyrics(ly)
+            if not tl.lines:
+                console.print(
+                    f"[yellow]No synced lyrics for {header} "
+                    f"(source={ly.source}). Waiting for the next track…[/]")
+                continue
+
+            # Sync this track until it changes or playback stops, then loop.
+            _sync_one_spotify_track(sp, tl, header, pb, offset, poll_interval, console)
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/]")
+
+
+def _sync_one_spotify_track(
+    sp: Any,
+    tl: LyricTimeline,
+    header: str,
+    pb0: Any,
+    offset: float,
+    poll_interval: float,
+    console: Any,
+) -> None:  # pragma: no cover - interactive/live
+    """Render `tl` locked to the live Spotify position for the current track.
+
+    Returns when the track changes or playback stops (so the caller advances).
+    KeyboardInterrupt propagates to the caller to exit the whole loop.
+    """
+    from rich.align import Align
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+
+    track_id = pb0.track_id
+    pos0 = pb0.position_s
+    mono0 = time.monotonic()
+    playing = pb0.is_playing
     last_poll = time.monotonic()
 
     def elapsed_now() -> float:
-        return pos0 + (time.monotonic() - mono0) + offset
+        base = pos0 + offset
+        # Only advance the local clock while actually playing (paused holds).
+        return base + (time.monotonic() - mono0) if playing else base
 
     def frame() -> Panel:
         e = elapsed_now()
-        body = Text()
-        _render_body(body, tl, e)
-        nxt = tl.next_time(e)
-        foot = f"{e:0.1f}s"
-        foot += f"  ·  next in {nxt - e:0.1f}s" if nxt else "  ·  (end)"
-        return Panel(Align.left(body), title=header, subtitle=foot)
+        return _build_frame(tl, e, header, footer_extra=f"{e:0.1f}s")
 
-    console.print(f"[bold cyan]{header}[/]  [dim](syncing to Spotify)[/]")
-    try:
-        with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
-            while True:
-                now = time.monotonic()
-                if now - last_poll >= poll_interval:
-                    pos0, mono0, playing = anchor()
-                    last_poll = now
-                    if not playing and pos0 == 0.0:
-                        console.print("\n[dim]playback stopped[/]")
-                        break
-                live.update(frame())
-                time.sleep(0.1)
-    except KeyboardInterrupt:
-        console.print("\n[dim]stopped[/]")
+    with Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
+        while True:
+            now = time.monotonic()
+            if now - last_poll >= poll_interval:
+                last_poll = now
+                pb = sp.current_playback()
+                if pb is None or not pb.title:
+                    console.print("\n[dim]playback stopped[/]")
+                    return
+                if pb.track_id != track_id:
+                    return  # track changed — caller resolves the new one
+                pos0 = pb.position_s
+                mono0 = time.monotonic()
+                playing = pb.is_playing
+            live.update(frame())
+            time.sleep(0.1)
