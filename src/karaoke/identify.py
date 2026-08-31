@@ -31,6 +31,7 @@ class SongRef:
     album: str = ""
     duration: Optional[float] = None
     path: Optional[str] = None       # local file, if any
+    url: Optional[str] = None        # origin URL, if any
     source: str = "unknown"          # file | query | songrec | index
     offset: Optional[float] = None   # position in the track (s) at match time
     offset_mono: Optional[float] = None  # time.monotonic() when offset was valid
