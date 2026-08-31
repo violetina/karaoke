@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 from .lyrics import Lyrics, fetch_lrclib, parse_lrc
 
+DEFAULT_LEAD_S = 13.0
+
 # Active-line background per detected mood (see sentiment.mood_of). Word highlight
 # stays magenta on top; neutral keeps the original blue.
 _MOOD_BG = {
