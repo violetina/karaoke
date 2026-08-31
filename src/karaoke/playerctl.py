@@ -29,7 +29,7 @@ def _clean_piece(text: str) -> str:
     return (text or "").strip().strip('"\u201c\u201d\u2018\u2019')
 
 
-def normalize_player_track(artist: str, title: str, album: str = "") -> SongRef:
+def normalize_player_track(artist: str, title: str, album: str = "", url: str = "") -> SongRef:
     """Normalize noisy MPRIS metadata into a SongRef.
 
     Some players (notably VLC for files with imperfect tags) expose artist in
@@ -47,7 +47,7 @@ def normalize_player_track(artist: str, title: str, album: str = "") -> SongRef:
     elif not a and " - " in t:
         parsed = parse_query(t)
         a, t = parsed.artist, parsed.title
-    return SongRef(artist=a, title=t, album=_clean_piece(album), source="player")
+    return SongRef(artist=a, title=t, album=_clean_piece(album), url=url, source="player")
 
 
 def _metadata_format() -> str:
@@ -85,7 +85,7 @@ def current_songref() -> Optional[SongRef]:
     meta = current_metadata()
     if meta is None:
         return None
-    ref = normalize_player_track(meta.artist, meta.title, meta.album)
+    ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
     if not ref.title:
         return None
     return ref

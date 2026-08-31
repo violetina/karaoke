@@ -158,8 +158,13 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
         )
 
     if not tl.lines:
-        print(f"No synced lyrics for {ref.artist} - {ref.title} "
-              f"(source={ly.source}).", file=sys.stderr)
+        player_url = getattr(ref, "url", None)
+        if player_url and ("youtube.com/" in player_url or "youtu.be/" in player_url):
+            print(f"No synced lyrics for {ref.artist} - {ref.title} (source={ly.source}).", file=sys.stderr)
+            print(f"To stage lyrics from YouTube captions, run:", file=sys.stderr)
+            print(f"  karaoke-stage youtube '{player_url}'", file=sys.stderr)
+            return 2
+        print(f"No synced lyrics for {ref.artist} - {ref.title} (source={ly.source}).", file=sys.stderr)
         if ly.plain:
             print("\n--- plain lyrics ---\n" + ly.plain)
             return 0
