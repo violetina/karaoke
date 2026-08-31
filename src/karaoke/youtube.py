@@ -21,6 +21,7 @@ import is lazy so the rest of the app never pays for it.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -187,12 +188,115 @@ def _cookie_opts(
     return opts
 
 
+_AUDIO_EXTS = {
+    ".webm", ".m4a", ".mp3", ".opus", ".ogg", ".flac", ".wav", ".aac",
+}
+
+
+@dataclass(frozen=True)
+class YouTubeCacheSummary:
+    """Size/count report for the YouTube audio download cache."""
+
+    directory: Path
+    files: int
+    bytes: int
+    removed_files: int = 0
+    removed_bytes: int = 0
+
+    @property
+    def mib(self) -> float:
+        """Current cache size in MiB."""
+        return self.bytes / (1024 * 1024)
+
+    @property
+    def removed_mib(self) -> float:
+        """Pruned cache size in MiB."""
+        return self.removed_bytes / (1024 * 1024)
+
+
+def _youtube_audio_files(directory: Optional[Path] = None) -> list[Path]:
+    """Return downloaded audio files in the YouTube cache (oldest first)."""
+    root = Path(directory or settings.youtube_dir)
+    if not root.is_dir():
+        return []
+    files = [
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix.lower() in _AUDIO_EXTS
+    ]
+    return sorted(files, key=lambda p: (p.stat().st_mtime, p.name))
+
+
+def youtube_cache_summary(directory: Optional[Path] = None) -> YouTubeCacheSummary:
+    """Report the current YouTube download-cache size/count."""
+    root = Path(directory or settings.youtube_dir)
+    files = _youtube_audio_files(root)
+    total = sum(p.stat().st_size for p in files)
+    return YouTubeCacheSummary(root, len(files), total)
+
+
+def prune_youtube_cache(
+    max_mb: int,
+    *,
+    keep: Optional[Path] = None,
+    directory: Optional[Path] = None,
+) -> YouTubeCacheSummary:
+    """Prune the YouTube audio cache to at most ``max_mb`` MiB (oldest first).
+
+    ``keep`` protects the just-downloaded file so a single large current download
+    is never immediately deleted. ``max_mb <= 0`` disables automatic pruning.
+    """
+    root = Path(directory or settings.youtube_dir)
+    files = _youtube_audio_files(root)
+    total = sum(p.stat().st_size for p in files)
+    if max_mb <= 0:
+        return YouTubeCacheSummary(root, len(files), total)
+
+    limit = max_mb * 1024 * 1024
+    protected = keep.resolve() if keep else None
+    removed_files = 0
+    removed_bytes = 0
+
+    for p in files:
+        if total <= limit:
+            break
+        if protected and p.resolve() == protected:
+            continue
+        size = p.stat().st_size
+        try:
+            p.unlink()
+        except OSError:
+            continue
+        total -= size
+        removed_files += 1
+        removed_bytes += size
+
+    remaining = len(_youtube_audio_files(root))
+    return YouTubeCacheSummary(root, remaining, total, removed_files, removed_bytes)
+
+
+def clear_youtube_cache(directory: Optional[Path] = None) -> YouTubeCacheSummary:
+    """Delete all downloaded YouTube audio files."""
+    root = Path(directory or settings.youtube_dir)
+    removed_files = 0
+    removed_bytes = 0
+    for p in _youtube_audio_files(root):
+        size = p.stat().st_size
+        try:
+            p.unlink()
+        except OSError:
+            continue
+        removed_files += 1
+        removed_bytes += size
+    return YouTubeCacheSummary(root, 0, 0, removed_files, removed_bytes)
+
+
 def fetch_metadata(
     url: str,
     *,
     download: bool = False,
     cookies_from_browser: Optional[str] = None,
     cookies_file: Optional[str] = None,
+    cache_max_mb: Optional[int] = None,
 ) -> dict:
     """Fetch YouTube video metadata via yt-dlp (optionally downloading audio).
 
@@ -223,7 +327,7 @@ def fetch_metadata(
     opts.update(_cookie_opts(cookies_from_browser, cookies_file))
     path: Optional[str] = None
     if download:
-        out_dir = Path(settings.data_dir) / "youtube"
+        out_dir = settings.youtube_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         opts.update(
             {
@@ -236,6 +340,11 @@ def fetch_metadata(
         info = ydl.extract_info(url, download=download)
         if download:
             path = ydl.prepare_filename(info)
+            if path and Path(path).is_file():
+                prune_youtube_cache(
+                    settings.yt_cache_max_mb if cache_max_mb is None else cache_max_mb,
+                    keep=Path(path),
+                )
 
     dur = info.get("duration")
     return {
@@ -252,6 +361,7 @@ def resolve_youtube(
     download: bool = False,
     cookies_from_browser: Optional[str] = None,
     cookies_file: Optional[str] = None,
+    cache_max_mb: Optional[int] = None,
 ) -> Optional[SongRef]:
     """Resolve a YouTube URL into a SongRef (source="youtube").
 
@@ -263,6 +373,7 @@ def resolve_youtube(
     meta = fetch_metadata(
         url, download=download,
         cookies_from_browser=cookies_from_browser, cookies_file=cookies_file,
+        cache_max_mb=cache_max_mb,
     )
     raw_title = meta["title"]
     if not raw_title:
