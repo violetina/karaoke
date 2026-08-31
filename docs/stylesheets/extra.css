@@ -1,0 +1,151 @@
+/* --- MEEMOO BRAND VARIABLES --- */
+
+:root {
+    --meemoo-green: #00C8AA;
+    --meemoo-darkgreen: #00857D;
+    --meemoo-black: #000000;
+    --meemoo-white: #E6E6E6;
+
+    /* MkDocs Material mapping */
+    --md-primary-fg-color: var(--meemoo-green);
+    --md-primary-fg-color--light: var(--meemoo-green);
+    --md-primary-fg-color--dark: var(--meemoo-darkgreen);
+
+    --md-accent-fg-color: var(--meemoo-darkgreen);
+}
+/* Typography Adjustments (Sofia Pro Lookalike) */
+body, .md-typeset {
+    font-variant-ligatures: common-ligatures;
+    -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 {
+    font-weight: 700 !important; /* Sofia Pro Bold */
+    color: var(--meemoo-black);
+    letter-spacing: -0.02em;
+}
+
+/* --- HEADER TITLE --- */
+
+.md-header__title {
+    font-size: 1.64rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.md-header__topic:first-child {
+    font-size: 1.85rem;
+    font-weight: 700;
+}
+
+/* Page title */
+
+.md-typeset h1 {
+    font-size: 1.7rem;
+    font-weight 700;
+    color: var(--meemoo-indigo);
+    letter-spacing: +0.02em;
+    margin-bottom: 1rem;
+}
+/* Modern Header with Brand Gradient Touch */
+.md-header {
+    background-color: var(--meemoo-green);
+    border-bottom: 2px solid var(--meemoo-cyan);
+    color: var(meemoo-white);
+
+}
+
+.md-tabs {
+    background-color: var(--meemoo-darkgreen);
+    border-bottom: 2px solid var(--meemoo-cyan);
+    color: var(meemoo-white);
+
+}
+
+
+/* Sidebar Navigation Styling */
+.md-nav__link--active {
+    color: var(--meemoo-cyan) !important;
+    font-weight: 700;
+}
+
+.md-nav__link:hover {
+    color: var(--meemoo-indigo);
+}
+
+/* "Expressive" UI Elements: Rounded Corners */
+.md-content__inner img, .md-content__inner video {
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.md-button {
+    border-radius: 20px;
+    text-transform: none;
+    font-weight: 600;
+
+    background-color: var(--meemoo-green);
+    border-bottom: 2px solid var(--meemoo-green);
+
+}
+
+.md-button--primary {
+    background-color: var(--meemoo-darkgreen);
+    border-color: var(--meemoo-green);
+}
+
+/* Code block adjustments */
+.md-typeset pre > code {
+    border-radius: 4px;
+    background-color: #f8f9fa;
+}
+
+/* Dark mode specific tweaks */
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color: #1a1a1a;
+    --md-accent-fg-color: var(--meemoo-darkgreen);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+    background-color: #0c0c0c;
+}
+
+
+/* --- LOGO & HEADER TWEAKS --- */
+
+/* Material renders the logo as an img when 'theme.logo' is set */
+.md-header__button.md-logo img {
+    height: 96px; /* Slightly larger for the meemoo wordmark */
+    width: auto;
+    color: var(--meemoo-white);
+
+}
+
+/* Ensure the header has the brand primary color */
+.md-header {
+    background-color: var(--meemoo-darkgreen) !important;
+    color: var(--meemoo-white);
+
+}
+
+/* Breadcrumb / Title tweaks */
+.md-header__topic {
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--meemoo-white);
+
+}
+
+/* --- TYPOGRAPHY --- */
+
+h1, h2, h3, h4 {
+    color: var(--meemoo-indigo);
+    font-weight: 600 !important;
+}
+
+/* Buttons and interactive elements */
+.md-button--primary {
+    background-color: var(--meemoo-cyan) !important;
+    border-color: var(--meemoo-cyan) !important;
+    border-radius: 20px;
+}

@@ -1,0 +1,32 @@
+site_name: Infra Project Template
+docs_dir: docs_confluence
+
+theme:
+  name: materialx
+
+plugins:
+  - search
+  - confluence-publisher:
+      host_url: https://your-domain.atlassian.net/wiki/
+      space_key: INFRA
+      parent_page_id: 5970526245
+      page_title_prefix: "MkDocs - "
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+
+nav:
+  - Overview: index.md
+  - Architecture: architecture.md
+  - Workflow: workflow.md
+  - Makefile targets: makefile-targets.md
+  - Troubleshooting: troubleshooting.md
+
+exclude_docs: |
+  generated/

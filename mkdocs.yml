@@ -1,0 +1,69 @@
+site_name: Karaoke
+site_description: Documentation for Local karaoke and lyric semantic search
+
+
+site_url: https://github.com/violetina/karaoke
+repo_url: https://github.com/violetina/karaoke
+repo_name: violetina/karaoke
+
+docs_dir: docs
+
+theme:
+  name: materialx
+  logo: assets/logo.svg
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+  - monorepo
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+  - mermaid2
+  - glightbox
+  - mkdocs_graphviz
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path:
+        - docs
+        - .
+  - pymdownx.inlinehilite
+  #- pymdownx.tabbed:
+  #    alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/gh/rod2ik/cdn@main/mkdocs/javascripts/mkdocs-graphviz.js
+  # This allows Mermaid to render correctly in the browser
+  - https://unpkg.com/mermaid/dist/mermaid.min.js
+
+nav:
+  - Overview: index.md
+  - Architecture: architecture.md
+  - Workflow poc: workflow.md
+  - Makefile targets: makefile-targets.md
+  - Troubleshooting: troubleshooting.md
+  - Tools:
+      - karaoke: '!include ./src/karaoke/mkdocs.yml'
+

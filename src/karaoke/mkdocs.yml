@@ -1,0 +1,4 @@
+site_name: Karaoke package
+
+nav:
+  - Package overview: index.md
