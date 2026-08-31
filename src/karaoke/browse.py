@@ -49,14 +49,12 @@ class KaraokeBrowser(App):
     def action_select_song(self) -> None:
         """Called when the user presses Enter on a song."""
         table = self.query_one(DataTable)
-        row_key = table.get_row_key(table.cursor_row)
-        if not row_key:
+        row_key_obj = table.get_row_key(table.cursor_row)
+        if not row_key_obj:
             return
         
-        url, kind = row_key
+        url, kind = row_key_obj.value
         if not url or kind == "local":
-            # For local tracks without a URL, we could eventually
-            # try to play them if we have a file path. For now, do nothing.
             return
 
         if kind == "spotify":
