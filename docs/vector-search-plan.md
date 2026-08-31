@@ -106,15 +106,19 @@ CREATE TABLE IF NOT EXISTS lyric_line_features (
 
 ## Re-index workflow
 
-Add a command such as:
+Implemented command:
 
 ```bash
+karaoke-vector-index --dry-run --no-embed --lines
 karaoke-vector-index --rebuild
-karaoke-vector-index --changed-only
-karaoke-vector-index --lines
+karaoke-vector-index --rebuild --lines
+make vector-index-dry-run
+make vector-index LINES=1
 ```
 
-Implementation sketch:
+Future flags can add changed-only behavior once SQLite stores per-row `updated_at` timestamps.
+
+Implementation flow:
 
 1. Read tracks, preferred source and approved lyrics from SQLite.
 2. Parse LRC with `parse_lrc`.

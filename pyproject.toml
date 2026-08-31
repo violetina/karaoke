@@ -34,6 +34,7 @@ karaoke-stage = "karaoke.cli:stage_main"
 karaoke-player = "karaoke.cli:player_main"
 karaoke-backfill = "karaoke.cli:backfill_main"
 karaoke-browse = "karaoke.cli:browse_main"
+karaoke-vector-index = "karaoke.vector_index:vector_index_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

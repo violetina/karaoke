@@ -15,7 +15,8 @@ MAKE2GRAPH_REF ?= master
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
-        test test-audio mic-test stats clean clean-tools browse
+        test test-audio mic-test stats clean clean-tools browse \
+        vector-index vector-index-dry-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -104,7 +105,9 @@ clean: ## Remove build artifacts
 	
 browse: ## Launch the interactive song browser TUI
 	$(PYTHON) -m karaoke.browse
-	
-	
-	
-	
+
+vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without writing
+	$(PYTHON) -m karaoke.vector_index --dry-run --no-embed --lines
+
+vector-index: ## Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
+	$(PYTHON) -m karaoke.vector_index --rebuild $(if $(LINES),--lines,)
