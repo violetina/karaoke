@@ -135,7 +135,10 @@ def get_synced(
         if ly.synced_raw or ly.plain:
             try:
                 with localcache.connect() as conn:
-                    localcache.add_track_and_lyrics(artist, title, ly, album=album, duration=duration, conn=conn)
+                    localcache.add_track_and_lyrics(
+                        artist, title, ly,
+                        album=album, duration=duration, url=ref.url, conn=conn,
+                    )
             except Exception:
                 pass
         return ly

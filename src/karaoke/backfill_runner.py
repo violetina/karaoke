@@ -5,6 +5,7 @@ import time
 from . import localcache
 from . import youtube
 from . import web
+from .identify import SongRef
 from .player import get_synced
 
 def run() -> None:
@@ -68,11 +69,17 @@ def _process_gap(gap_id: int, artist: str, title: str) -> None:
         lyrics_file_path = f.name
     
     try:
+        ref = SongRef(
+            artist=artist,
+            title=title,
+            path=str(audio_path),
+            source="backfill",
+            url=yt_url,
+        )
         get_synced(
-            artist, title,
+            ref,
             force_transcribe=True,
-            audio_path=str(audio_path),
-            lyrics_file=lyrics_file_path
+            lyrics_file=lyrics_file_path,
         )
     finally:
         import os

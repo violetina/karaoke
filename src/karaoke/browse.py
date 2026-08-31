@@ -45,7 +45,12 @@ class KaraokeBrowser(App):
             )
             rows = cur.fetchall()
             for row in rows:
-                self._song_data.append({'url': row['url'], 'kind': row['kind']})
+                self._song_data.append({
+                    'artist': row['artist'],
+                    'title': row['title'],
+                    'url': row['url'],
+                    'kind': row['kind'],
+                })
                 table.add_row(row["artist"], row["title"])
 
     def action_select_song(self) -> None:
@@ -56,7 +61,13 @@ class KaraokeBrowser(App):
         url, kind = song.get('url'), song.get('kind')
 
         if not url:
-            return
+            artist = song.get('artist') or ''
+            title = song.get('title') or ''
+            query = f"{artist} {title}".strip().replace(" ", "+")
+            if not query:
+                return
+            url = f"https://www.youtube.com/results?search_query={query}"
+            kind = "youtube_search"
 
         if kind == "spotify":
             subprocess.run(["playerctl", "open", url])
