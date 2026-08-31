@@ -121,6 +121,23 @@ def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional
     return row["track_id"] if row else None
 
 
+def find_track_by_url(url: str, conn: sqlite3.Connection) -> Optional[tuple[int, str, str]]:
+    """Find a track by source URL, returning (track_id, artist, title)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT t.track_id, t.artist, t.title
+        FROM tracks t JOIN sources s ON t.track_id = s.track_id
+        WHERE s.url = ?
+        """,
+        (url,)
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return row["track_id"], row["artist"], row["title"]
+
+
 def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[Lyrics]:
     """Get approved lyrics for a given track ID."""
     cur = conn.cursor()
