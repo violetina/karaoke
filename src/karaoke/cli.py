@@ -152,9 +152,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     elif args.output:
         stats_mode = "output"
 
-    ly = get_synced(ref.artist, ref.title, ref.album, ref.duration,
+    ly = get_synced(ref,
                     use_cache=not args.no_cache,
-                    audio_path=ref.path,
                     transcribe=args.transcribe or args.force_transcribe,
                     force_transcribe=args.force_transcribe,
                     lyrics_file=args.lyrics_file,

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .lyrics import Lyrics, fetch_lrclib, parse_lrc
+from .identify import SongRef
 
 # Active-line background per detected mood (see sentiment.mood_of). Word highlight
 # stays magenta on top; neutral keeps the original blue.
@@ -93,13 +94,9 @@ def timeline_from_lyrics(ly: Lyrics) -> LyricTimeline:
 
 
 def get_synced(
-    artist: str,
-    title: str,
-    album: str = "",
-    duration: Optional[float] = None,
+    ref: SongRef,
     *,
     use_cache: bool = True,
-    audio_path: Optional[str] = None,
     transcribe: bool = False,
     force_transcribe: bool = False,
     lyrics_file: Optional[str] = None,
@@ -107,6 +104,10 @@ def get_synced(
 ) -> Lyrics:
     """Return synced lyrics, checking caches before going online."""
     from . import localcache
+
+    artist, title, album, duration = ref.artist, ref.title, ref.album, ref.duration
+    audio_path = ref.path
+
 
     def _log(event: str, ly: Optional[Lyrics] = None) -> None:
         if not stats_mode:
@@ -183,7 +184,7 @@ def get_synced(
     if use_cache and (ly.synced_raw or ly.plain):
         try:
             with localcache.connect() as conn:
-                localcache.add_track_and_lyrics(artist, title, ly, album=album, duration=duration, conn=conn)
+                localcache.add_track_and_lyrics(artist, title, ly, album=album, duration=duration, url=ref.url, conn=conn)
         except Exception:
             pass
             

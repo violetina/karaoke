@@ -247,6 +247,8 @@ def add_track_and_lyrics(
     lyrics: Lyrics,
     album: str = "",
     duration: Optional[float] = None,
+    url: Optional[str] = None,
+    kind: str = "youtube",
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Add a new track and its lyrics to the database."""
@@ -261,6 +263,12 @@ def add_track_and_lyrics(
         track_id = find_track_id(artist, title, c)
         if not track_id:
             return
+
+        if url:
+            cur.execute(
+                "INSERT OR IGNORE INTO sources (track_id, url, kind) VALUES (?, ?, ?)",
+                (track_id, url, kind)
+            )
 
         cur.execute(
             """
