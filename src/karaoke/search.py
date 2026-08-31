@@ -9,6 +9,8 @@ from .config import settings
 
 @dataclass
 class SearchHit:
+    """One normalized search result from OpenSearch."""
+
     score: float
     artist: str
     title: str

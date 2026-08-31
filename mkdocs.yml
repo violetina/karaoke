@@ -61,6 +61,8 @@ extra_javascript:
 nav:
   - Overview: index.md
   - Architecture: architecture.md
+  - Cache schema: cache-schema.md
+  - API reference: api.md
   - Workflow poc: workflow.md
   - Makefile targets: makefile-targets.md
   - Troubleshooting: troubleshooting.md

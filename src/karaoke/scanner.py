@@ -18,10 +18,12 @@ from .tags import TrackTags, extract_tags, is_audio
 
 
 def doc_id(path: str) -> str:
+    """Stable OpenSearch document id for a local audio path."""
     return hashlib.sha1(path.encode("utf-8")).hexdigest()
 
 
 def iter_audio_files(root: Path) -> Iterator[Path]:
+    """Yield supported audio files below `root` in deterministic order."""
     for p in sorted(root.rglob("*")):
         if p.is_file() and is_audio(p):
             yield p
@@ -36,6 +38,8 @@ def _embed_source(tags: TrackTags, plain_lyrics: str) -> str:
 
 @dataclass
 class ScanStats:
+    """Counters returned by a music-library scan."""
+
     seen: int = 0
     indexed: int = 0
     skipped: int = 0

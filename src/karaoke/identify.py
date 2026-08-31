@@ -20,6 +20,12 @@ from .tags import extract_tags
 
 @dataclass
 class SongRef:
+    """A resolved song plus optional sync metadata.
+
+    `offset` and `offset_mono` are populated by live songrec identification so
+    the player can anchor lyric time to the position heard in the room/output.
+    """
+
     artist: str
     title: str
     album: str = ""
@@ -31,6 +37,7 @@ class SongRef:
 
 
 def from_file(path: str | Path) -> SongRef:
+    """Resolve a song reference from a local audio file's metadata tags."""
     t = extract_tags(path)
     return SongRef(
         artist=t.artist, title=t.title, album=t.album,
