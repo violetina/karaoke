@@ -127,7 +127,7 @@ flowchart TD
 | Spotify | Spotify Web API `progress_ms` | Polls current playback; moves to next track automatically. | Does not download audio; lyrics are LRCLIB/cache only. |
 | Listen/output | songrec match `offset` + `time.monotonic()` anchor | One-shot lock | `--lead` applies a default forward bias for recognition latency. |
 | Radio | Repeated songrec matches | Re-anchors same track, swaps timeline on new track | Keeps rendering while speech/ad/quiet sections do not match. |
-| YouTube | User presses Enter at music start | None | yt-dlp title → smart parse → LRCLIB; `--download` unlocks Whisper/beats. Live-position sync not available — use `--output`/`--radio` for that. |
+| YouTube | User presses Enter at music start | None | yt-dlp title → smart parse → LRCLIB; `--download` unlocks Whisper/beats; `--cookies-from-browser`/`--cookies` authenticate for Premium-quality/library access. Live-position sync not available — use `--output`/`--radio` for that. |
 
 ## Ingest and semantic search flow
 

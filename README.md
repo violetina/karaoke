@@ -173,5 +173,25 @@ the audio so the Whisper fallback and librosa beat detection work on videos with
 no LRCLIB match. (Downloading is a YouTube ToS gray area; metadata-only is the
 default.)
 
+#### YouTube Premium / library access (cookies)
+
+If you have YouTube Music Premium, you can authenticate the fetch with your
+logged-in session to get higher-bitrate audio (better Whisper/beat results) and
+access library-only / private / age-restricted tracks:
+
+```bash
+karaoke-yt URL --download --cookies-from-browser firefox   # read cookies live from a browser
+karaoke-yt URL --download --cookies ~/yt-cookies.txt        # or an exported cookies.txt
+```
+
+The browser spec accepts yt-dlp's full form, e.g. `firefox:PROFILE`,
+`chrome+gnomekeyring`, `firefox:prof::Container`. Notes:
+
+- This does **not** use Premium's in-app "Download" — those offline files are
+  DRM-locked and unreadable. It authenticates the normal yt-dlp fetch *as you*.
+- Automating downloads with your account cookies is against YouTube's ToS and can
+  get an account flagged with heavy use. Fine for occasional karaoke; your call.
+  Anonymous, metadata-only stays the default.
+
 [yt-dlp]: https://github.com/yt-dlp/yt-dlp
 

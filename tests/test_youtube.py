@@ -9,6 +9,7 @@ import types
 import pytest
 
 from karaoke.youtube import (
+    _cookie_opts,
     clean_uploader,
     fetch_metadata,
     parse_youtube_title,
@@ -172,3 +173,76 @@ def test_fetch_metadata_raises_actionable_error_without_ytdlp(monkeypatch):
     monkeypatch.setitem(sys.modules, "yt_dlp", None)
     with pytest.raises(RuntimeError, match="yt-dlp"):
         fetch_metadata("https://youtu.be/x")
+
+
+# --- cookie / Premium auth --------------------------------------------------
+
+def test_cookie_opts_empty_when_none():
+    assert _cookie_opts(None, None) == {}
+
+
+def test_cookie_opts_browser_simple():
+    assert _cookie_opts("firefox", None) == {
+        "cookiesfrombrowser": ("firefox", None, None, None)
+    }
+
+
+def test_cookie_opts_browser_with_profile():
+    assert _cookie_opts("chrome:Default", None) == {
+        "cookiesfrombrowser": ("chrome", "Default", None, None)
+    }
+
+
+def test_cookie_opts_browser_with_keyring_and_container():
+    # Full BROWSER+KEYRING:PROFILE::CONTAINER spec.
+    assert _cookie_opts("firefox+basictext:myprofile::Personal", None) == {
+        "cookiesfrombrowser": ("firefox", "myprofile", "basictext", "Personal")
+    }
+
+
+def test_cookie_opts_file():
+    assert _cookie_opts(None, "/home/tina/cookies.txt") == {
+        "cookiefile": "/home/tina/cookies.txt"
+    }
+
+
+def test_cookie_opts_both_sources():
+    opts = _cookie_opts("firefox", "/tmp/c.txt")
+    assert opts["cookiesfrombrowser"] == ("firefox", None, None, None)
+    assert opts["cookiefile"] == "/tmp/c.txt"
+
+
+class _CapturingYDL(_FakeYDL):
+    """FakeYDL that records the opts of the last constructed instance."""
+    last_opts: dict = {}
+
+    def __init__(self, opts):
+        super().__init__(opts)
+        type(self).last_opts = opts
+
+
+def _install_capturing_ytdlp(monkeypatch, info):
+    mod = types.ModuleType("yt_dlp")
+    ydl = type("YoutubeDL", (_CapturingYDL,), {"_info": info, "last_opts": {}})
+    mod.YoutubeDL = ydl
+    monkeypatch.setitem(sys.modules, "yt_dlp", mod)
+    return ydl
+
+
+def test_fetch_metadata_forwards_cookies_to_ytdlp(monkeypatch):
+    ydl = _install_capturing_ytdlp(monkeypatch, {
+        "title": "x - y", "uploader": "x", "duration": 10,
+    })
+    fetch_metadata("https://youtu.be/x", cookies_from_browser="firefox",
+                   cookies_file="/tmp/c.txt")
+    assert ydl.last_opts["cookiesfrombrowser"] == ("firefox", None, None, None)
+    assert ydl.last_opts["cookiefile"] == "/tmp/c.txt"
+
+
+def test_fetch_metadata_no_cookie_keys_by_default(monkeypatch):
+    ydl = _install_capturing_ytdlp(monkeypatch, {
+        "title": "x - y", "uploader": "x", "duration": 10,
+    })
+    fetch_metadata("https://youtu.be/x")
+    assert "cookiesfrombrowser" not in ydl.last_opts
+    assert "cookiefile" not in ydl.last_opts

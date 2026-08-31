@@ -146,11 +146,62 @@ def parse_youtube_title(
     return "", cleaned
 
 
-def fetch_metadata(url: str, *, download: bool = False) -> dict:
+def _cookie_opts(
+    cookies_from_browser: Optional[str], cookies_file: Optional[str]
+) -> dict:
+    """Build yt-dlp cookie options for authenticated (e.g. Premium) access.
+
+    ``cookies_from_browser`` is a yt-dlp browser spec — ``"firefox"``,
+    ``"chrome"``, or the full ``BROWSER[+KEYRING][:PROFILE][::CONTAINER]`` form
+    (e.g. ``"firefox::Meta"`` for a container). It is passed as the
+    ``cookiesfrombrowser`` tuple yt-dlp expects. ``cookies_file`` points at an
+    exported Netscape ``cookies.txt``.
+
+    Using your logged-in YouTube Music cookies unlocks higher-bitrate Premium
+    audio, library-only/private tracks, and age-restricted videos. It does NOT
+    read Premium's encrypted in-app offline downloads (those are DRM-locked and
+    unreadable) — it authenticates the normal yt-dlp fetch as you.
+    """
+    opts: dict = {}
+    if cookies_from_browser:
+        # yt-dlp parses "BROWSER[+KEYRING][:PROFILE][::CONTAINER]"; the API wants
+        # a tuple (browser, profile|None, keyring|None, container|None). We hand
+        # it the raw spec split minimally and let yt-dlp normalize, matching how
+        # the --cookies-from-browser CLI flag is parsed.
+        spec = cookies_from_browser.strip()
+        browser, _, profile = spec.partition(":")
+        keyring = None
+        if "+" in browser:
+            browser, _, keyring = browser.partition("+")
+        container = None
+        if "::" in profile:
+            profile, _, container = profile.partition("::")
+        opts["cookiesfrombrowser"] = (
+            browser.lower() or None,
+            profile or None,
+            keyring or None,
+            container or None,
+        )
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+    return opts
+
+
+def fetch_metadata(
+    url: str,
+    *,
+    download: bool = False,
+    cookies_from_browser: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+) -> dict:
     """Fetch YouTube video metadata via yt-dlp (optionally downloading audio).
 
     Returns a dict with ``title``, ``uploader``, ``duration`` (seconds, float or
     None) and ``path`` (local audio file when ``download=True``, else None).
+
+    ``cookies_from_browser`` / ``cookies_file`` authenticate the request with
+    your logged-in YouTube (Music) session — see ``_cookie_opts`` — which unlocks
+    higher-quality Premium audio and library/private/age-restricted tracks.
 
     Raises ``RuntimeError`` with an actionable message when yt-dlp is not
     installed, so the CLI can tell the user how to enable YouTube mode.
@@ -169,6 +220,7 @@ def fetch_metadata(url: str, *, download: bool = False) -> dict:
         "noplaylist": True,
         "skip_download": not download,
     }
+    opts.update(_cookie_opts(cookies_from_browser, cookies_file))
     path: Optional[str] = None
     if download:
         out_dir = Path(settings.data_dir) / "youtube"
@@ -194,14 +246,24 @@ def fetch_metadata(url: str, *, download: bool = False) -> dict:
     }
 
 
-def resolve_youtube(url: str, *, download: bool = False) -> Optional[SongRef]:
+def resolve_youtube(
+    url: str,
+    *,
+    download: bool = False,
+    cookies_from_browser: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+) -> Optional[SongRef]:
     """Resolve a YouTube URL into a SongRef (source="youtube").
 
     Uses yt-dlp track/artist tags when present (music.youtube.com often supplies
     them), otherwise the smart title parser. Returns None only when yt-dlp yields
-    no usable title at all.
+    no usable title at all. ``cookies_from_browser`` / ``cookies_file`` forward
+    your logged-in session for Premium-quality / library access.
     """
-    meta = fetch_metadata(url, download=download)
+    meta = fetch_metadata(
+        url, download=download,
+        cookies_from_browser=cookies_from_browser, cookies_file=cookies_file,
+    )
     raw_title = meta["title"]
     if not raw_title:
         return None

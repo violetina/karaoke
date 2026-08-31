@@ -64,3 +64,16 @@ def test_yt_all_options_combined(monkeypatch):
         "--youtube", "URL", "--download", "--transcribe", "--print",
         "--no-cache", "--no-beats", "--offset", "2.0",
     ]
+
+
+def test_yt_cookies_from_browser_forwarded(monkeypatch):
+    seen = _capture(monkeypatch)
+    cli.karaoke_yt_main(["URL", "--cookies-from-browser", "firefox"])
+    assert seen["argv"] == ["--youtube", "URL",
+                            "--cookies-from-browser", "firefox"]
+
+
+def test_yt_cookies_file_forwarded(monkeypatch):
+    seen = _capture(monkeypatch)
+    cli.karaoke_yt_main(["URL", "--cookies", "/tmp/c.txt"])
+    assert seen["argv"] == ["--youtube", "URL", "--cookies", "/tmp/c.txt"]
