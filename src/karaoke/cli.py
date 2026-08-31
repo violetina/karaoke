@@ -16,7 +16,11 @@ def _resolve(args) -> Optional[SongRef]:
         from .youtube import resolve_youtube
         print("Resolving YouTube video…", file=sys.stderr)
         try:
-            ref = resolve_youtube(args.youtube, download=args.download)
+            ref = resolve_youtube(
+                args.youtube, download=args.download,
+                cookies_from_browser=args.cookies_from_browser,
+                cookies_file=args.cookies,
+            )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return None
@@ -57,6 +61,12 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="karaoke a YouTube video URL (yt-dlp metadata -> lyrics)")
     ap.add_argument("--download", action="store_true",
                     help="with --youtube: download audio so Whisper/beats can run")
+    ap.add_argument("--cookies-from-browser", metavar="BROWSER",
+                    help="with --youtube: use a logged-in browser's cookies for "
+                         "Premium-quality/library access (e.g. firefox, chrome, "
+                         "'firefox:PROFILE')")
+    ap.add_argument("--cookies", metavar="FILE",
+                    help="with --youtube: cookies.txt for authenticated access")
     ap.add_argument("--spotify", "-s", action="store_true",
                     help="sync lyrics to the track currently playing on Spotify")
     ap.add_argument("--radio", "-r", action="store_true",
@@ -188,6 +198,11 @@ def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
                     help="skip caches, always fetch fresh")
     ap.add_argument("--no-beats", action="store_true",
                     help="skip librosa beat detection on downloaded audio")
+    ap.add_argument("--cookies-from-browser", metavar="BROWSER",
+                    help="use a logged-in browser's cookies for Premium-quality/"
+                         "library access (e.g. firefox, chrome, 'firefox:PROFILE')")
+    ap.add_argument("--cookies", metavar="FILE",
+                    help="cookies.txt for authenticated (Premium/library) access")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     args = ap.parse_args(argv)
 
@@ -205,6 +220,10 @@ def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
         forwarded.append("--no-cache")
     if args.no_beats:
         forwarded.append("--no-beats")
+    if args.cookies_from_browser:
+        forwarded += ["--cookies-from-browser", args.cookies_from_browser]
+    if args.cookies:
+        forwarded += ["--cookies", args.cookies]
     if args.offset:
         forwarded += ["--offset", str(args.offset)]
 
