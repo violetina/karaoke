@@ -172,7 +172,13 @@ def get_synced(
 
     if not (ly.synced_raw or ly.plain):
         _log("no_lyrics", ly)
-
+        if stats_mode in ("radio", "player"):
+            try:
+                with localcache.connect() as conn:
+                    localcache.log_lyric_gap(artist, title, conn)
+            except Exception:
+                pass
+    
     # Write-through to local cache
     if use_cache and (ly.synced_raw or ly.plain):
         try:

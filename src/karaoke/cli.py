@@ -176,6 +176,15 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
             print(f"  karaoke-stage youtube '{player_url}'", file=sys.stderr)
             return 2
         print(f"No synced lyrics for {ref.artist} - {ref.title} (source={ly.source}).", file=sys.stderr)
+        
+        if stats_mode in ("radio", "player", "query"):
+            from . import localcache
+            try:
+                with localcache.connect() as conn:
+                    localcache.log_lyric_gap(ref.artist, ref.title, conn)
+            except Exception:
+                pass
+
         if ly.plain:
             print("\n--- plain lyrics ---\n" + ly.plain)
             return 0
@@ -528,3 +537,9 @@ def player_main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(karaoke_main())
+
+def backfill_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-backfill` CLI to fill lyric gaps."""
+    from .backfill import backfill_main as _backfill_main
+    return _backfill_main(argv)
+

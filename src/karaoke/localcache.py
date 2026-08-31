@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS lyrics (
     plain_lyrics    TEXT,
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
+
+CREATE TABLE IF NOT EXISTS lyric_gaps (
+    gap_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist          TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending | processed | failed
+    created_at      REAL NOT NULL,
+    processed_at    REAL,
+    UNIQUE(artist, title)
+);
 """
 
 _SCHEMA = """
@@ -69,6 +79,15 @@ CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events (artist, title);
 def _key(artist: str, title: str) -> str:
     """Stable case-insensitive artist/title cache key for staging metadata."""
     return f"{artist.strip().casefold()}\0{title.strip().casefold()}"
+
+
+def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
+    """Log a song that is missing lyrics."""
+    conn.execute(
+        "INSERT OR IGNORE INTO lyric_gaps (artist, title, created_at) VALUES (?, ?, ?)",
+        (artist, title, time.time())
+    )
+    conn.commit()
 
 
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
