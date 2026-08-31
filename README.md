@@ -66,6 +66,7 @@ karaoke-yt --cache-status                     # show downloaded YouTube audio si
 karaoke-yt --prune-cache 100                  # prune oldest downloads to <= 100 MiB
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
+karaoke --player                              # get current song from any desktop player (MPRIS)
 ```
 
 ## Stats
@@ -206,4 +207,16 @@ The browser spec accepts yt-dlp's full form, e.g. `firefox:PROFILE`,
   Anonymous, metadata-only stays the default.
 
 [yt-dlp]: https://github.com/yt-dlp/yt-dlp
+
+### Desktop player (MPRIS)
+
+`karaoke --player` (or `-p`) gets the current song from any MPRIS-compatible
+desktop media player (Spotify, VLC, web browsers playing media, etc.) via the
+`playerctl` command-line tool.
+
+This is a one-shot lookup; if the song changes, re-run the command. It's a
+convenient way to avoid typing the artist and title for a song already playing
+on your desktop. You may need to `emerge media-sound/playerctl` if it's not
+already installed.
+
 

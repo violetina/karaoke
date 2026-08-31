@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from typing import Optional
 
@@ -40,6 +41,22 @@ def _resolve(args) -> Optional[SongRef]:
         print(f"Spotify: {pb.artist} - {pb.title}", file=sys.stderr)
         return SongRef(artist=pb.artist, title=pb.title,
                        duration=pb.duration_ms / 1000.0, source="spotify")
+    if args.player:
+        try:
+            proc = subprocess.run(
+                ["playerctl", "metadata", "--format", "{{artist}} - {{title}}"],
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+            line = proc.stdout.strip()
+            if not line or " - " not in line:
+                print("No player active or metadata available via playerctl.", file=sys.stderr)
+                return None
+            artist, title = line.split(" - ", 1)
+            print(f"Player: {artist} - {title}", file=sys.stderr)
+            return SongRef(artist=artist, title=title, source="player")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            print("playerctl command failed or not found. Is it installed?", file=sys.stderr)
+            return None
     if args.listen or args.output:
         print(f"Listening ({'output' if args.output else 'mic'})...", file=sys.stderr)
         ref = identify_live(mic=not args.output, timeout=args.timeout)
@@ -74,6 +91,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                          "or 500; 0 disables)")
     ap.add_argument("--spotify", "-s", action="store_true",
                     help="sync lyrics to the track currently playing on Spotify")
+    ap.add_argument("--player", "-p", action="store_true",
+                    help="get current song from any desktop player via playerctl (MPRIS)")
     ap.add_argument("--radio", "-r", action="store_true",
                     help="continuously follow live audio (mic): re-identify + re-sync as songs change")
     ap.add_argument("--reidentify", type=float, default=30.0,
