@@ -65,6 +65,12 @@ CREATE INDEX IF NOT EXISTS idx_play_events_ts ON play_events (ts);
 CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events (artist, title);
 """
 
+
+def _key(artist: str, title: str) -> str:
+    """Stable case-insensitive artist/title cache key for staging metadata."""
+    return f"{artist.strip().casefold()}\0{title.strip().casefold()}"
+
+
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and lazily initialize) the local SQLite database."""
     path = Path(db_path or settings.local_db)
@@ -77,14 +83,24 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional[int]:
-    """Find a track by artist and title, returning its ID."""
+    """Find a track by artist and title, returning its ID.
+
+    Player metadata can vary in case, so cache lookup is case-insensitive while
+    preserving the originally-stored display spelling.
+    """
     cur = conn.cursor()
     cur.execute(
-        "SELECT track_id FROM tracks WHERE artist = ? AND title = ?",
-        (artist, title)
+        """
+        SELECT track_id FROM tracks
+        WHERE lower(artist) = lower(?) AND lower(title) = lower(?)
+        ORDER BY track_id DESC
+        LIMIT 1
+        """,
+        (artist, title),
     )
     row = cur.fetchone()
     return row["track_id"] if row else None
+
 
 def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[Lyrics]:
     """Get approved lyrics for a given track ID."""
@@ -108,6 +124,86 @@ def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[
         source=row["source"] or "lrclib",
         lines=parse_lrc(synced) if synced else [],
     )
+
+def get_cached_lyrics(
+    artist: str,
+    title: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Lyrics]:
+    """Return approved cached lyrics for artist/title, or None on miss.
+
+    Compatibility API kept for older code/tests while the database now stores
+    tracks and lyrics in separate tables.
+    """
+    own = conn is None
+    c = conn or connect()
+    try:
+        track_id = find_track_id(artist, title, c)
+        if not track_id:
+            return None
+        return get_lyrics_by_track_id(track_id, c)
+    finally:
+        if own:
+            c.close()
+
+
+def put_cached_lyrics(
+    artist: str,
+    title: str,
+    lyrics: Lyrics,
+    *,
+    album: str = "",
+    duration: Optional[float] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Upsert approved lyrics for artist/title.
+
+    Empty lyrics are ignored. Existing approved lyrics for the track are replaced
+    so a Whisper/synced result can upgrade an earlier plain LRCLIB/caption entry.
+    """
+    if not (lyrics.synced_raw or lyrics.plain):
+        return
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        track_id = find_track_id(artist, title, c)
+        if track_id is None:
+            cur.execute(
+                "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+                (artist, title, album, duration),
+            )
+            track_id = cur.lastrowid
+            if track_id is None:
+                return
+        else:
+            cur.execute(
+                """
+                UPDATE tracks
+                SET album = COALESCE(NULLIF(?, ''), album),
+                    duration = COALESCE(?, duration)
+                WHERE track_id = ?
+                """,
+                (album, duration, track_id),
+            )
+
+        cur.execute(
+            "DELETE FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+            (track_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
+            VALUES (?, 'approved', ?, ?, ?)
+            """,
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain),
+        )
+        c.commit()
+    finally:
+        if own:
+            c.close()
+
 
 def add_track_and_lyrics(
     artist: str,
