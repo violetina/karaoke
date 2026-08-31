@@ -99,6 +99,7 @@ def lines_to_lrc(lines: list[tuple[float, str]]) -> str:
 def transcribe_to_lrc(
     audio_path: str,
     *,
+    text: Optional[str] = None,
     model_size: str = "small",
     language: Optional[str] = None,
     compute_type: str = "int8",
@@ -117,6 +118,7 @@ def transcribe_to_lrc(
     model = WhisperModel(model_size, device="cpu", compute_type=compute_type)
     segments, _info = model.transcribe(
         audio_path,
+        initial_prompt=text,
         word_timestamps=True,
         language=language,
         vad_filter=vad_filter,

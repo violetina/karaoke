@@ -99,6 +99,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="if no LRCLIB lyrics, transcribe a local --file with Whisper")
     ap.add_argument("--force-transcribe", action="store_true",
                     help="always transcribe --file with Whisper (skip cache + LRCLIB)")
+    ap.add_argument("--lyrics-file", help="with --force-transcribe, use this text file "
+                                           "for the lyrics instead of Whisper's ASR")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     ap.add_argument("--lead", type=float, default=None,
                     help="forward pre-bias (secs) for mic/radio sync to offset the "
@@ -155,6 +157,7 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     audio_path=ref.path,
                     transcribe=args.transcribe or args.force_transcribe,
                     force_transcribe=args.force_transcribe,
+                    lyrics_file=args.lyrics_file,
                     stats_mode=stats_mode)
     tl = timeline_from_lyrics(ly)
 

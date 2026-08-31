@@ -102,6 +102,7 @@ def get_synced(
     audio_path: Optional[str] = None,
     transcribe: bool = False,
     force_transcribe: bool = False,
+    lyrics_file: Optional[str] = None,
     stats_mode: Optional[str] = None,
 ) -> Lyrics:
     """Return synced lyrics, checking caches before going online."""
@@ -119,8 +120,13 @@ def get_synced(
     # Force path: Whisper only, no cache read, no LRCLIB.
     if force_transcribe and audio_path:
         from .whisper_sync import transcribe_to_lrc
+        
+        plain_lyrics = None
+        if lyrics_file:
+            with open(lyrics_file) as f:
+                plain_lyrics = f.read()
 
-        lrc = transcribe_to_lrc(audio_path)
+        lrc = transcribe_to_lrc(audio_path, text=plain_lyrics)
         ly = Lyrics(
             plain="\n".join(t for _, t in parse_lrc(lrc)),
             synced_raw=lrc, source="whisper", lines=parse_lrc(lrc),
