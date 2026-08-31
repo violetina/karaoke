@@ -14,24 +14,8 @@ def _resolve(args) -> Optional[SongRef]:
     if args.file:
         return from_file(args.file)
     if args.youtube:
-        from .youtube import resolve_youtube
-        print("Resolving YouTube video…", file=sys.stderr)
-        try:
-            ref = resolve_youtube(
-                args.youtube, download=args.download,
-                cookies_from_browser=args.cookies_from_browser,
-                cookies_file=args.cookies,
-                cache_max_mb=args.yt_cache_max_mb,
-            )
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            return None
-        if ref:
-            print(f"YouTube: {ref.artist} - {ref.title}"
-                  f"{' (audio downloaded)' if ref.path else ''}", file=sys.stderr)
-        else:
-            print("Could not parse an artist/title from that video.", file=sys.stderr)
-        return ref
+        from . import youtube
+        return youtube.resolve_youtube(args.youtube, download=args.download)
     if args.spotify:
         from .spotify_client import SpotifyClient
         pb = SpotifyClient().current_playback()
