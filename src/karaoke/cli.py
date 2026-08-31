@@ -490,6 +490,7 @@ def player_main(argv: Optional[list[str]] = None) -> int:
         prog="karaoke-player",
         description="Control desktop media players via MPRIS (playerctl)",
     )
+    ap.add_argument("--player", "-p", help="target a specific player by name")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("play", help="send the play command")
@@ -506,10 +507,15 @@ def player_main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     try:
+        cmd = ["playerctl"]
+        if args.player:
+            cmd.extend(["--player", args.player])
+            
         if args.cmd == "seek":
-            subprocess.run(["playerctl", "position", args.position], check=True)
+            cmd.extend(["position", args.position])
         else:
-            subprocess.run(["playerctl", args.cmd], check=True)
+            cmd.append(args.cmd)
+        subprocess.run(cmd, check=True)
     except (subprocess.SubprocessError, FileNotFoundError):
         print("playerctl command failed or not found. Is it installed?", file=sys.stderr)
         return 1
