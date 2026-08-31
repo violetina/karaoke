@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from typing import Optional
 
@@ -42,21 +41,13 @@ def _resolve(args) -> Optional[SongRef]:
         return SongRef(artist=pb.artist, title=pb.title,
                        duration=pb.duration_ms / 1000.0, source="spotify")
     if args.player:
-        try:
-            proc = subprocess.run(
-                ["playerctl", "metadata", "--format", "{{artist}} - {{title}}"],
-                capture_output=True, text=True, timeout=5, check=True,
-            )
-            line = proc.stdout.strip()
-            if not line or " - " not in line:
-                print("No player active or metadata available via playerctl.", file=sys.stderr)
-                return None
-            artist, title = line.split(" - ", 1)
-            print(f"Player: {artist} - {title}", file=sys.stderr)
-            return SongRef(artist=artist, title=title, source="player")
-        except (subprocess.SubprocessError, FileNotFoundError):
-            print("playerctl command failed or not found. Is it installed?", file=sys.stderr)
+        from .playerctl import current_songref
+        ref = current_songref()
+        if ref is None:
+            print("No player active or metadata available via playerctl.", file=sys.stderr)
             return None
+        print(f"Player: {ref.artist} - {ref.title}", file=sys.stderr)
+        return ref
     if args.listen or args.output:
         print(f"Listening ({'output' if args.output else 'mic'})...", file=sys.stderr)
         ref = identify_live(mic=not args.output, timeout=args.timeout)
@@ -388,6 +379,96 @@ def stats_main() -> int:
     if s.total_events == 0:
         print("  (no events yet — play something with `karaoke` first)")
     return 0
+
+
+def stage_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-stage` CLI for unapproved lyrics candidates."""
+    ap = argparse.ArgumentParser(
+        prog="karaoke-stage",
+        description="Stage/review lower-trust lyrics before approving them into the local cache",
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    yt = sub.add_parser("youtube", help="stage YouTube captions as unapproved lyrics")
+    yt.add_argument("url", help="YouTube URL")
+    yt.add_argument("--language", "-l", action="append", dest="languages",
+                    help="caption language preference (repeatable; default en,nl)")
+    yt.add_argument("--cookies-from-browser", metavar="BROWSER",
+                    help="use logged-in browser cookies for caption access")
+    yt.add_argument("--cookies", metavar="FILE", help="cookies.txt for authenticated access")
+
+    ls = sub.add_parser("list", help="list staged lyric candidates")
+    ls.add_argument("--status", default="pending", choices=["pending", "approved", "rejected", "all"])
+    ls.add_argument("-n", "--limit", type=int, default=20)
+
+    show = sub.add_parser("show", help="show one staged candidate")
+    show.add_argument("id", type=int)
+
+    approve = sub.add_parser("approve", help="approve staged lyrics into the local cache")
+    approve.add_argument("id", type=int)
+
+    reject = sub.add_parser("reject", help="reject staged lyrics")
+    reject.add_argument("id", type=int)
+
+    args = ap.parse_args(argv)
+
+    if args.cmd == "youtube":
+        from .stage_sources import stage_youtube_captions
+        result = stage_youtube_captions(
+            args.url,
+            languages=args.languages or ("en", "nl"),
+            cookies_from_browser=args.cookies_from_browser,
+            cookies_file=args.cookies,
+        )
+        print(
+            f"staged #{result.staged_id}: {result.artist} - {result.title} "
+            f"({result.source_kind}, {result.lines} lines)"
+        )
+        print("review with: karaoke-stage show", result.staged_id)
+        print("approve with: karaoke-stage approve", result.staged_id)
+        return 0
+
+    from . import staging
+
+    if args.cmd == "list":
+        items = staging.list_staged(status=args.status, limit=args.limit)
+        if not items:
+            print("no staged lyrics")
+            return 0
+        for item in items:
+            synced = "♪" if item.has_synced else " "
+            print(
+                f"{item.id:4d} {synced} {item.status:8s} "
+                f"{item.source_kind:24s} {item.artist} - {item.title}"
+            )
+        return 0
+
+    if args.cmd == "show":
+        item = staging.get_staged(args.id)
+        if item is None:
+            print(f"no staged lyrics with id {args.id}", file=sys.stderr)
+            return 1
+        print(f"#{item.id} {item.status}: {item.artist} - {item.title}")
+        print(f"source={item.source_kind} confidence={item.confidence:.2f} url={item.source_url}")
+        if item.notes:
+            print(f"notes={item.notes}")
+        print("\n--- synced lyrics ---")
+        print(item.synced_lyrics or "(none)")
+        print("\n--- plain lyrics ---")
+        print(item.plain_lyrics or "(none)")
+        return 0
+
+    if args.cmd == "approve":
+        item = staging.approve_staged(args.id)
+        print(f"approved #{item.id} into local lyrics cache: {item.artist} - {item.title}")
+        return 0
+
+    if args.cmd == "reject":
+        item = staging.reject_staged(args.id)
+        print(f"rejected #{item.id}: {item.artist} - {item.title}")
+        return 0
+
+    return 1
 
 
 if __name__ == "__main__":  # pragma: no cover
