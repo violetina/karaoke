@@ -56,6 +56,7 @@ flowchart LR
 | `search` | Runs semantic, keyword and exact cache lookups. |
 | `localcache` | Cluster-independent SQLite lyrics cache + play/discovery stats. |
 | `identify` | Resolves songs from files, queries or live songrec matches. |
+| `youtube` | Resolves a SongRef from a YouTube URL (yt-dlp metadata + smart title parser). |
 | `whisper_sync` | Transcribes local audio into approximate LRC when LRCLIB has no synced lyrics. |
 | `player` | Converts lyrics to timelines and renders Rich terminal karaoke views. |
 | `beats` | Optional beat detection and fallback lyric-line pulse logic. |
@@ -75,7 +76,7 @@ sequenceDiagram
     participant Whisper
     participant Player as player.py
 
-    User->>CLI: karaoke "Artist - Title" / --file / --spotify / --listen
+    User->>CLI: karaoke "Artist - Title" / --file / --spotify / --listen / --youtube
     CLI->>Identify: resolve SongRef
     Identify-->>CLI: artist, title, optional offset/path
     CLI->>Cache: exact artist/title cache lookup
@@ -126,6 +127,7 @@ flowchart TD
 | Spotify | Spotify Web API `progress_ms` | Polls current playback; moves to next track automatically. | Does not download audio; lyrics are LRCLIB/cache only. |
 | Listen/output | songrec match `offset` + `time.monotonic()` anchor | One-shot lock | `--lead` applies a default forward bias for recognition latency. |
 | Radio | Repeated songrec matches | Re-anchors same track, swaps timeline on new track | Keeps rendering while speech/ad/quiet sections do not match. |
+| YouTube | User presses Enter at music start | None | yt-dlp title → smart parse → LRCLIB; `--download` unlocks Whisper/beats. Live-position sync not available — use `--output`/`--radio` for that. |
 
 ## Ingest and semantic search flow
 

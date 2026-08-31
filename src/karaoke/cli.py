@@ -12,6 +12,20 @@ from .player import DEFAULT_LEAD_S
 def _resolve(args) -> Optional[SongRef]:
     if args.file:
         return from_file(args.file)
+    if args.youtube:
+        from .youtube import resolve_youtube
+        print("Resolving YouTube video…", file=sys.stderr)
+        try:
+            ref = resolve_youtube(args.youtube, download=args.download)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return None
+        if ref:
+            print(f"YouTube: {ref.artist} - {ref.title}"
+                  f"{' (audio downloaded)' if ref.path else ''}", file=sys.stderr)
+        else:
+            print("Could not parse an artist/title from that video.", file=sys.stderr)
+        return ref
     if args.spotify:
         from .spotify_client import SpotifyClient
         pb = SpotifyClient().current_playback()
@@ -39,6 +53,10 @@ def karaoke_main() -> int:
     ap.add_argument("--file", "-f", help="local audio file (read tags)")
     ap.add_argument("--listen", "-l", action="store_true", help="identify room audio via mic")
     ap.add_argument("--output", "-o", action="store_true", help="identify laptop output audio")
+    ap.add_argument("--youtube", "-y", metavar="URL",
+                    help="karaoke a YouTube video URL (yt-dlp metadata -> lyrics)")
+    ap.add_argument("--download", action="store_true",
+                    help="with --youtube: download audio so Whisper/beats can run")
     ap.add_argument("--spotify", "-s", action="store_true",
                     help="sync lyrics to the track currently playing on Spotify")
     ap.add_argument("--radio", "-r", action="store_true",

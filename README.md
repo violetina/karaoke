@@ -58,6 +58,8 @@ karaoke --file song.mp3 --force-transcribe    # always transcribe (skip cache + 
 karaoke --listen                              # identify room audio via mic (songrec), sync once
 karaoke --radio                               # CONTINUOUS: follow live radio, re-lock as songs change
 karaoke --output                              # identify audio playing on this machine
+karaoke --youtube URL                         # karaoke a YouTube video (yt-dlp title -> lyrics)
+karaoke --youtube URL --download              # + fetch audio so Whisper/beats can run
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 ```
@@ -147,4 +149,23 @@ so lines advance in time with the audio — no keypress needed. It reuses the OA
 credentials Hermes already stored in `~/.hermes/auth.json` (no separate login).
 Spotify's API forbids audio download, so these tracks use LRCLIB lyrics only
 (no Whisper); metadata can be indexed for search via the Spotify importer.
+
+### YouTube mode
+
+`karaoke --youtube URL` resolves a YouTube video to its lyrics: [yt-dlp] reads the
+video's title/uploader/duration, a smart parser strips promo decorations
+(`(Official Music Video)`, `[Lyrics]`, `| Label`, VEVO/`- Topic` uploader noise)
+and splits `Artist - Title`, and the result flows through the normal
+LRCLIB → cache → synced-render pipeline. Auto-generated `Art - Topic` channels use
+the uploader as the artist; `music.youtube.com` track/artist tags are used
+verbatim when present. Timing is keypress-started (like `--file`); to sync to
+YouTube actually playing through your speakers, use `--output` or `--radio`.
+
+Requires the optional extra: `pip install -e ".[youtube]"` (or `pip install yt-dlp`).
+Unlike Spotify, YouTube audio *can* be fetched — `--youtube URL --download` saves
+the audio so the Whisper fallback and librosa beat detection work on videos with
+no LRCLIB match. (Downloading is a YouTube ToS gray area; metadata-only is the
+default.)
+
+[yt-dlp]: https://github.com/yt-dlp/yt-dlp
 
