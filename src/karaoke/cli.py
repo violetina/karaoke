@@ -5,8 +5,7 @@ import argparse
 import sys
 from typing import Optional
 
-from .identify import SongRef, from_file, identify_live, parse_query
-from .player import DEFAULT_LEAD_S
+from .identify import from_file, identify_live, parse_query
 
 
 def _resolve(args) -> Optional[SongRef]:
