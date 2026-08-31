@@ -43,21 +43,19 @@ class KaraokeBrowser(App):
             )
             rows = cur.fetchall()
             for row in rows:
-                table.add_row(row["artist"], row["title"], key=row["url"])
+                # Store a tuple of (url, kind) as the key
+                table.add_row(row["artist"], row["title"], key=(row["url"], row["kind"]))
 
     def action_select_song(self) -> None:
         """Called when the user presses Enter on a song."""
         table = self.query_one(DataTable)
-        url = table.get_row_key(table.cursor_row)
+        row_key = table.get_row_key(table.cursor_row)
+        if not row_key:
+            return
+        
+        url, kind = row_key
         if not url:
             return
-
-        # Determine how to open the URL based on its kind
-        with localcache.connect() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT kind FROM sources WHERE url = ?", (url,))
-            row = cur.fetchone()
-            kind = row["kind"] if row else "youtube"
 
         if kind == "spotify":
             subprocess.run(["playerctl", "open", url])
