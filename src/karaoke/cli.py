@@ -46,7 +46,7 @@ def _resolve(args) -> Optional[SongRef]:
     return None
 
 
-def karaoke_main() -> int:
+def karaoke_main(argv: Optional[list[str]] = None) -> int:
     """Run the `karaoke` CLI for lookup, printing, playback and live sync modes."""
     ap = argparse.ArgumentParser(prog="karaoke", description="Terminal karaoke with synced lyrics")
     ap.add_argument("query", nargs="*", help="'Artist - Title' (or a title)")
@@ -77,7 +77,7 @@ def karaoke_main() -> int:
                     help="print lyrics instead of the live player")
     ap.add_argument("--no-beats", action="store_true",
                     help="skip librosa beat detection in --file mode (use per-line pulse)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     # Forward pre-bias for live recognition (mic/radio) modes only. Spotify has an
     # exact position and text/file modes start from a keypress, so no lead there.
@@ -162,6 +162,53 @@ def karaoke_main() -> int:
     play(tl, title=ref.title, artist=ref.artist, offset=args.offset,
          beat_times=beat_times)
     return 0
+
+
+def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-yt` CLI: karaoke a YouTube URL directly.
+
+    A thin, friendlier front-end over ``karaoke --youtube``: the URL is the
+    positional argument (no flag needed) and it translates the download/print/
+    transcribe/offset options into a ``karaoke_main`` invocation, so the whole
+    downstream lyrics -> render pipeline is reused with zero duplication.
+    """
+    ap = argparse.ArgumentParser(
+        prog="karaoke-yt",
+        description="Karaoke a YouTube video URL (yt-dlp metadata -> synced lyrics)",
+    )
+    ap.add_argument("url", help="YouTube video URL")
+    ap.add_argument("--download", "-d", action="store_true",
+                    help="download audio so Whisper/beats can run (unlike Spotify)")
+    ap.add_argument("--transcribe", action="store_true",
+                    help="if no LRCLIB lyrics, transcribe downloaded audio with Whisper "
+                         "(implies --download)")
+    ap.add_argument("--print", dest="print_only", action="store_true",
+                    help="print lyrics instead of the live player")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="skip caches, always fetch fresh")
+    ap.add_argument("--no-beats", action="store_true",
+                    help="skip librosa beat detection on downloaded audio")
+    ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
+    args = ap.parse_args(argv)
+
+    # Transcription needs local audio, so it forces a download.
+    download = args.download or args.transcribe
+
+    forwarded: list[str] = ["--youtube", args.url]
+    if download:
+        forwarded.append("--download")
+    if args.transcribe:
+        forwarded.append("--transcribe")
+    if args.print_only:
+        forwarded.append("--print")
+    if args.no_cache:
+        forwarded.append("--no-cache")
+    if args.no_beats:
+        forwarded.append("--no-beats")
+    if args.offset:
+        forwarded += ["--offset", str(args.offset)]
+
+    return karaoke_main(forwarded)
 
 
 def lyricsearch_main() -> int:

@@ -60,6 +60,8 @@ karaoke --radio                               # CONTINUOUS: follow live radio, r
 karaoke --output                              # identify audio playing on this machine
 karaoke --youtube URL                         # karaoke a YouTube video (yt-dlp title -> lyrics)
 karaoke --youtube URL --download              # + fetch audio so Whisper/beats can run
+karaoke-yt URL                                # shorthand: URL is positional (no flag)
+karaoke-yt URL -d --transcribe                # download + Whisper if no LRCLIB match
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 ```
@@ -160,6 +162,10 @@ LRCLIB → cache → synced-render pipeline. Auto-generated `Art - Topic` channe
 the uploader as the artist; `music.youtube.com` track/artist tags are used
 verbatim when present. Timing is keypress-started (like `--file`); to sync to
 YouTube actually playing through your speakers, use `--output` or `--radio`.
+
+`karaoke-yt URL` is a shorthand console entry for the same flow (the URL is the
+positional argument, no `--youtube` flag needed): `karaoke-yt URL -d --transcribe`,
+`karaoke-yt URL --print`, etc.
 
 Requires the optional extra: `pip install -e ".[youtube]"` (or `pip install yt-dlp`).
 Unlike Spotify, YouTube audio *can* be fetched — `--youtube URL --download` saves
