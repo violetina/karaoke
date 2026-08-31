@@ -16,6 +16,7 @@ dependencies = [
     "rich>=13.7",
     "beautifulsoup4",
     "duckduckgo-search",
+    "textual",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ music-index = "karaoke.cli:index_main"
 karaoke-stage = "karaoke.cli:stage_main"
 karaoke-player = "karaoke.cli:player_main"
 karaoke-backfill = "karaoke.cli:backfill_main"
+karaoke-browse = "karaoke.cli:browse_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
