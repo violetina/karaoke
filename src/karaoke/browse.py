@@ -1,10 +1,8 @@
 """An interactive, terminal-based browser for the karaoke song library."""
 from __future__ import annotations
-
 import subprocess
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, DataTable
-
 from . import localcache
 
 class KaraokeBrowser(App):
@@ -14,6 +12,10 @@ class KaraokeBrowser(App):
         ("q", "quit", "Quit"),
         ("enter", "select_song", "Play Song"),
     ]
+
+    def __init__(self):
+        super().__init__()
+        self._song_data = []
 
     def on_mount(self) -> None:
         """Called when the app is first mounted."""
@@ -34,7 +36,7 @@ class KaraokeBrowser(App):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t.track_id, t.artist, t.title, s.url, s.kind
+                SELECT t.artist, t.title, s.url, s.kind
                 FROM tracks t
                 LEFT JOIN sources s ON t.track_id = s.track_id
                 GROUP BY t.track_id
@@ -43,18 +45,17 @@ class KaraokeBrowser(App):
             )
             rows = cur.fetchall()
             for row in rows:
-                key = (row["url"], row["kind"]) if row["url"] else (f"track_{row['track_id']}", "local")
-                table.add_row(row["artist"], row["title"], key=key)
+                self._song_data.append({'url': row['url'], 'kind': row['kind']})
+                table.add_row(row["artist"], row["title"])
 
     def action_select_song(self) -> None:
         """Called when the user presses Enter on a song."""
         table = self.query_one(DataTable)
-        row_key_obj = table.get_row_key(table.cursor_row)
-        if not row_key_obj:
-            return
+        song = self._song_data[table.cursor_row]
         
-        url, kind = row_key_obj.value
-        if not url or kind == "local":
+        url, kind = song.get('url'), song.get('kind')
+
+        if not url:
             return
 
         if kind == "spotify":
@@ -71,4 +72,3 @@ def browse_main() -> int:
 
 if __name__ == "__main__":
     browse_main()
-
