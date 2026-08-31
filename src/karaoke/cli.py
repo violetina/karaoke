@@ -93,6 +93,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="sync lyrics to the track currently playing on Spotify")
     ap.add_argument("--player", "-p", action="store_true",
                     help="get current song from any desktop player via playerctl (MPRIS)")
+    ap.add_argument("--player-follow", action="store_true",
+                    help="continuously follow desktop player via playerctl (MPRIS)")
     ap.add_argument("--radio", "-r", action="store_true",
                     help="continuously follow live audio (mic): re-identify + re-sync as songs change")
     ap.add_argument("--reidentify", type=float, default=30.0,
@@ -130,6 +132,11 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     if args.spotify and not args.print_only:
         from .player import play_spotify_loop
         play_spotify_loop(offset=args.offset, use_cache=not args.no_cache)
+        return 0
+
+    if args.player_follow:
+        from .player_follow import play_playerctl_follow
+        play_playerctl_follow(use_cache=not args.no_cache)
         return 0
 
     ref = _resolve(args)

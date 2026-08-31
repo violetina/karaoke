@@ -7,6 +7,8 @@ user start keypress (MVP). True audio-position sync is a later upgrade.
 from __future__ import annotations
 
 import time
+import select
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
