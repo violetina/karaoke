@@ -43,11 +43,17 @@ class Settings:
     lrclib_base: str
     kube_context: str
     data_dir: Path
+    yt_cache_max_mb: int
 
     @property
     def local_db(self) -> Path:
         """Path to the cluster-independent local SQLite cache/stats database."""
         return self.data_dir / "karaoke.db"
+
+    @property
+    def youtube_dir(self) -> Path:
+        """Directory holding downloaded YouTube audio (``--youtube --download``)."""
+        return self.data_dir / "youtube"
 
     @classmethod
     def load(cls) -> "Settings":
@@ -65,6 +71,7 @@ class Settings:
             lrclib_base=os.environ.get("LRCLIB_BASE", "https://lrclib.net"),
             kube_context=os.environ.get("KUBE_CONTEXT", "kind-karaoke"),
             data_dir=Path(os.environ.get("KARAOKE_DATA_DIR", str(default_data))).expanduser(),
+            yt_cache_max_mb=int(os.environ.get("KARAOKE_YT_CACHE_MAX_MB", "500")),
         )
 
 

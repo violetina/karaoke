@@ -3,17 +3,23 @@
 The network/yt-dlp layer is faked via a stub injected into sys.modules, so these
 run offline with no yt-dlp installed.
 """
+import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from karaoke.youtube import (
     _cookie_opts,
+    _youtube_audio_files,
     clean_uploader,
+    clear_youtube_cache,
     fetch_metadata,
     parse_youtube_title,
+    prune_youtube_cache,
     resolve_youtube,
+    youtube_cache_summary,
 )
 
 
@@ -246,3 +252,101 @@ def test_fetch_metadata_no_cookie_keys_by_default(monkeypatch):
     fetch_metadata("https://youtu.be/x")
     assert "cookiesfrombrowser" not in ydl.last_opts
     assert "cookiefile" not in ydl.last_opts
+
+# --- YouTube download-cache cleanup ----------------------------------------
+
+def _audio(path: Path, size: int, mtime: int) -> Path:
+    path.write_bytes(b"x" * size)
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_youtube_audio_files_only_known_audio_exts_oldest_first(tmp_path):
+    newer = _audio(tmp_path / "new.webm", 10, 30)
+    older = _audio(tmp_path / "old.m4a", 10, 10)
+    _audio(tmp_path / "notes.txt", 10, 1)
+    assert _youtube_audio_files(tmp_path) == [older, newer]
+
+
+def test_youtube_cache_summary(tmp_path):
+    _audio(tmp_path / "a.webm", 1024, 1)
+    _audio(tmp_path / "b.opus", 2048, 2)
+    s = youtube_cache_summary(tmp_path)
+    assert s.directory == tmp_path
+    assert s.files == 2
+    assert s.bytes == 3072
+
+
+def test_prune_youtube_cache_oldest_first(tmp_path):
+    old = _audio(tmp_path / "old.webm", 2 * 1024 * 1024, 1)
+    mid = _audio(tmp_path / "mid.webm", 2 * 1024 * 1024, 2)
+    new = _audio(tmp_path / "new.webm", 2 * 1024 * 1024, 3)
+
+    s = prune_youtube_cache(4, directory=tmp_path)
+    assert s.removed_files == 1
+    assert s.removed_bytes == old.stat().st_size if old.exists() else 2 * 1024 * 1024
+    assert not old.exists()
+    assert mid.exists()
+    assert new.exists()
+    assert s.files == 2
+    assert s.bytes == 4 * 1024 * 1024
+
+
+def test_prune_youtube_cache_keeps_current_file(tmp_path):
+    old = _audio(tmp_path / "old.webm", 2 * 1024 * 1024, 1)
+    current = _audio(tmp_path / "current.webm", 4 * 1024 * 1024, 2)
+
+    s = prune_youtube_cache(1, keep=current, directory=tmp_path)
+    assert not old.exists()
+    assert current.exists()
+    assert s.files == 1
+    # Above the requested cap, but the protected current download was preserved.
+    assert s.bytes == 4 * 1024 * 1024
+
+
+def test_prune_youtube_cache_zero_disables(tmp_path):
+    f = _audio(tmp_path / "a.webm", 1024, 1)
+    s = prune_youtube_cache(0, directory=tmp_path)
+    assert f.exists()
+    assert s.removed_files == 0
+    assert s.files == 1
+
+
+def test_clear_youtube_cache(tmp_path):
+    _audio(tmp_path / "a.webm", 1024, 1)
+    _audio(tmp_path / "b.m4a", 2048, 2)
+    _audio(tmp_path / "keep.txt", 4096, 3)
+    s = clear_youtube_cache(tmp_path)
+    assert s.removed_files == 2
+    assert s.removed_bytes == 3072
+    assert not (tmp_path / "a.webm").exists()
+    assert not (tmp_path / "b.m4a").exists()
+    assert (tmp_path / "keep.txt").exists()
+
+
+def test_fetch_metadata_prunes_after_download(monkeypatch, tmp_path):
+    downloaded = _audio(tmp_path / "downloaded.webm", 1024, 10)
+
+    class _DownloadingYDL(_FakeYDL):
+        _info = {"title": "x - y", "uploader": "x", "duration": 1}
+
+        def prepare_filename(self, info):
+            return str(downloaded)
+
+    mod = types.ModuleType("yt_dlp")
+    mod.YoutubeDL = _DownloadingYDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", mod)
+
+    # Put old files in the real temp cache dir via monkeypatching the module's
+    # settings object (Settings itself is a frozen dataclass).
+    import karaoke.youtube as ytm
+    monkeypatch.setattr(
+        ytm, "settings",
+        types.SimpleNamespace(youtube_dir=tmp_path, yt_cache_max_mb=500),
+    )
+    old = _audio(tmp_path / "old.webm", 2 * 1024 * 1024, 1)
+
+    meta = fetch_metadata("URL", download=True, cache_max_mb=1)
+    assert meta["path"] == str(downloaded)
+    assert downloaded.exists()
+    assert not old.exists()

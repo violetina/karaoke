@@ -62,6 +62,8 @@ karaoke --youtube URL                         # karaoke a YouTube video (yt-dlp 
 karaoke --youtube URL --download              # + fetch audio so Whisper/beats can run
 karaoke-yt URL                                # shorthand: URL is positional (no flag)
 karaoke-yt URL -d --transcribe                # download + Whisper if no LRCLIB match
+karaoke-yt --cache-status                     # show downloaded YouTube audio size
+karaoke-yt --prune-cache 100                  # prune oldest downloads to <= 100 MiB
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 ```
@@ -170,8 +172,18 @@ positional argument, no `--youtube` flag needed): `karaoke-yt URL -d --transcrib
 Requires the optional extra: `pip install -e ".[youtube]"` (or `pip install yt-dlp`).
 Unlike Spotify, YouTube audio *can* be fetched — `--youtube URL --download` saves
 the audio so the Whisper fallback and librosa beat detection work on videos with
-no LRCLIB match. (Downloading is a YouTube ToS gray area; metadata-only is the
-default.)
+no LRCLIB match. Downloads go to `~/.local/share/karaoke/youtube/` by default and
+are auto-pruned after each download to `KARAOKE_YT_CACHE_MAX_MB` (default 500 MiB;
+set to `0` to disable). You can inspect or clean the cache manually:
+
+```bash
+karaoke-yt --cache-status          # count + MiB + directory
+karaoke-yt --prune-cache 100       # delete oldest audio until <= 100 MiB
+karaoke-yt --clear-cache           # delete all downloaded YouTube audio
+karaoke-yt URL -d --cache-max-mb 50 # per-run cap override
+```
+
+Downloading is a YouTube ToS gray area; metadata-only is the default.
 
 #### YouTube Premium / library access (cookies)
 

@@ -20,6 +20,7 @@ def _resolve(args) -> Optional[SongRef]:
                 args.youtube, download=args.download,
                 cookies_from_browser=args.cookies_from_browser,
                 cookies_file=args.cookies,
+                cache_max_mb=args.yt_cache_max_mb,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -67,6 +68,10 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                          "'firefox:PROFILE')")
     ap.add_argument("--cookies", metavar="FILE",
                     help="with --youtube: cookies.txt for authenticated access")
+    ap.add_argument("--yt-cache-max-mb", type=int, default=None, metavar="MB",
+                    help="with --youtube --download: auto-prune downloaded audio "
+                         "cache after download (default KARAOKE_YT_CACHE_MAX_MB "
+                         "or 500; 0 disables)")
     ap.add_argument("--spotify", "-s", action="store_true",
                     help="sync lyrics to the track currently playing on Spotify")
     ap.add_argument("--radio", "-r", action="store_true",
@@ -186,7 +191,7 @@ def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
         prog="karaoke-yt",
         description="Karaoke a YouTube video URL (yt-dlp metadata -> synced lyrics)",
     )
-    ap.add_argument("url", help="YouTube video URL")
+    ap.add_argument("url", nargs="?", help="YouTube video URL")
     ap.add_argument("--download", "-d", action="store_true",
                     help="download audio so Whisper/beats can run (unlike Spotify)")
     ap.add_argument("--transcribe", action="store_true",
@@ -203,8 +208,38 @@ def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
                          "library access (e.g. firefox, chrome, 'firefox:PROFILE')")
     ap.add_argument("--cookies", metavar="FILE",
                     help="cookies.txt for authenticated (Premium/library) access")
+    ap.add_argument("--cache-status", action="store_true",
+                    help="show YouTube audio download-cache size and exit")
+    ap.add_argument("--clear-cache", action="store_true",
+                    help="delete all downloaded YouTube audio and exit")
+    ap.add_argument("--prune-cache", type=int, metavar="MB",
+                    help="prune downloaded YouTube audio to MB and exit")
+    ap.add_argument("--cache-max-mb", type=int, default=None, metavar="MB",
+                    help="auto-prune downloaded audio after this run (default "
+                         "KARAOKE_YT_CACHE_MAX_MB or 500; 0 disables)")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     args = ap.parse_args(argv)
+
+    from .youtube import clear_youtube_cache, prune_youtube_cache, youtube_cache_summary
+
+    if args.cache_status:
+        s = youtube_cache_summary()
+        print(f"YouTube cache: {s.files} files, {s.mib:.1f} MiB at {s.directory}")
+        return 0
+    if args.clear_cache:
+        s = clear_youtube_cache()
+        print(f"Cleared YouTube cache: removed {s.removed_files} files "
+              f"({s.removed_mib:.1f} MiB) from {s.directory}")
+        return 0
+    if args.prune_cache is not None:
+        s = prune_youtube_cache(args.prune_cache)
+        print(f"Pruned YouTube cache to <= {args.prune_cache} MiB: removed "
+              f"{s.removed_files} files ({s.removed_mib:.1f} MiB); "
+              f"now {s.files} files, {s.mib:.1f} MiB at {s.directory}")
+        return 0
+
+    if not args.url:
+        ap.error("url is required unless using --cache-status/--clear-cache/--prune-cache")
 
     # Transcription needs local audio, so it forces a download.
     download = args.download or args.transcribe
@@ -224,6 +259,8 @@ def karaoke_yt_main(argv: Optional[list[str]] = None) -> int:
         forwarded += ["--cookies-from-browser", args.cookies_from_browser]
     if args.cookies:
         forwarded += ["--cookies", args.cookies]
+    if args.cache_max_mb is not None:
+        forwarded += ["--yt-cache-max-mb", str(args.cache_max_mb)]
     if args.offset:
         forwarded += ["--offset", str(args.offset)]
 

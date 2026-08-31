@@ -4,6 +4,8 @@ These verify karaoke_yt_main forwards its friendlier options to karaoke_main as
 the right `--youtube ...` argv, without touching the network (karaoke_main is
 patched to capture argv).
 """
+from types import SimpleNamespace
+
 import karaoke.cli as cli
 
 
@@ -77,3 +79,42 @@ def test_yt_cookies_file_forwarded(monkeypatch):
     seen = _capture(monkeypatch)
     cli.karaoke_yt_main(["URL", "--cookies", "/tmp/c.txt"])
     assert seen["argv"] == ["--youtube", "URL", "--cookies", "/tmp/c.txt"]
+
+
+def test_yt_cache_max_forwarded(monkeypatch):
+    seen = _capture(monkeypatch)
+    cli.karaoke_yt_main(["URL", "--cache-max-mb", "50"])
+    assert seen["argv"] == ["--youtube", "URL", "--yt-cache-max-mb", "50"]
+
+
+def test_yt_cache_status_does_not_need_url(monkeypatch, capsys):
+    import karaoke.youtube as ytm
+
+    monkeypatch.setattr(ytm, "youtube_cache_summary", lambda: SimpleNamespace(
+        files=3, mib=12.25, directory="/tmp/yt",
+    ))
+    rc = cli.karaoke_yt_main(["--cache-status"])
+    assert rc == 0
+    assert "3 files, 12.2 MiB" in capsys.readouterr().out
+
+
+def test_yt_clear_cache_does_not_need_url(monkeypatch, capsys):
+    import karaoke.youtube as ytm
+
+    monkeypatch.setattr(ytm, "clear_youtube_cache", lambda: SimpleNamespace(
+        removed_files=2, removed_mib=7.5, directory="/tmp/yt",
+    ))
+    rc = cli.karaoke_yt_main(["--clear-cache"])
+    assert rc == 0
+    assert "removed 2 files (7.5 MiB)" in capsys.readouterr().out
+
+
+def test_yt_prune_cache_does_not_need_url(monkeypatch, capsys):
+    import karaoke.youtube as ytm
+
+    monkeypatch.setattr(ytm, "prune_youtube_cache", lambda mb: SimpleNamespace(
+        removed_files=4, removed_mib=20.0, files=1, mib=3.0, directory="/tmp/yt",
+    ))
+    rc = cli.karaoke_yt_main(["--prune-cache", "5"])
+    assert rc == 0
+    assert "Pruned YouTube cache to <= 5 MiB" in capsys.readouterr().out
