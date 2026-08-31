@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from typing import Optional
 
-from .identify import from_file, identify_live, parse_query
+from .identify import SongRef, from_file, identify_live, parse_query
+from .player import DEFAULT_LEAD_S
 
 
 def _resolve(args) -> Optional[SongRef]:
@@ -85,6 +87,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="get current song from any desktop player via playerctl (MPRIS)")
     ap.add_argument("--player-follow", action="store_true",
                     help="continuously follow desktop player via playerctl (MPRIS)")
+    ap.add_argument("--player-sync", action="store_true",
+                    help="continuously sync to desktop player position via playerctl (MPRIS)")
     ap.add_argument("--radio", "-r", action="store_true",
                     help="continuously follow live audio (mic): re-identify + re-sync as songs change")
     ap.add_argument("--reidentify", type=float, default=30.0,
@@ -127,6 +131,11 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     if args.player_follow:
         from .player_follow import play_playerctl_follow
         play_playerctl_follow(use_cache=not args.no_cache)
+        return 0
+
+    if args.player_sync:
+        from .player_sync import play_synced_to_player
+        play_synced_to_player(use_cache=not args.no_cache)
         return 0
 
     ref = _resolve(args)
@@ -473,6 +482,39 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     return 1
+
+
+def player_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-player` CLI to control desktop media players."""
+    ap = argparse.ArgumentParser(
+        prog="karaoke-player",
+        description="Control desktop media players via MPRIS (playerctl)",
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("play", help="send the play command")
+    sub.add_parser("pause", help="send the pause command")
+    sub.add_parser("play-pause", help="toggle play/pause")
+    sub.add_parser("next", help="go to the next track")
+    sub.add_parser("previous", help="go to the previous track")
+    sub.add_parser("stop", help="send the stop command")
+    sub.add_parser("status", help="get the current player status")
+
+    seek = sub.add_parser("seek", help="seek to a position in the current track")
+    seek.add_argument("position", help="position in seconds, or +/- offset")
+
+    args = ap.parse_args(argv)
+
+    try:
+        if args.cmd == "seek":
+            subprocess.run(["playerctl", "position", args.position], check=True)
+        else:
+            subprocess.run(["playerctl", args.cmd], check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("playerctl command failed or not found. Is it installed?", file=sys.stderr)
+        return 1
+        
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
