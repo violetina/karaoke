@@ -4,20 +4,9 @@ The OpenSearch index on the kind cluster is the rich search/index store, but it
 is only available when the cluster is running. This module adds a small, always-
 available SQLite database (``~/.local/share/karaoke/karaoke.db`` by default) that:
 
-- caches lyrics per (artist, title) so a known song is served offline WITHOUT the
-  kind cluster and WITHOUT a fresh LRCLIB request (checked before going online);
-- records every play/identification event so ``karaoke-stats`` can report play
+- Caches lyrics and track metadata.
+- Records every play/identification event so ``karaoke-stats`` can report play
   counts, top artists, and radio-discovery stats.
-
-Design notes:
-
-- Pure standard library (``sqlite3``); no cluster, no extra deps.
-- Keys are normalized (casefolded, stripped) so "R.E.M." and "r.e.m." collide.
-- All writes are best-effort: cache/stats failures must never break playback.
-- This is a lyrics/known-song cache, not an audio fingerprint. True offline audio
-  identification (skipping songrec/Shazam) would need AcoustID/chromaprint; see
-  the module ``README``/docs. What we cache here is the *result* of a recognition
-  (artist/title -> lyrics), which is what makes a repeat play offline-capable.
 """
 from __future__ import annotations
 
@@ -30,20 +19,37 @@ from typing import Optional
 from .config import settings
 from .lyrics import Lyrics, parse_lrc
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS lyrics_cache (
-    key           TEXT PRIMARY KEY,   -- normalized "artist\\ntitle"
-    artist        TEXT NOT NULL,
-    title         TEXT NOT NULL,
-    album         TEXT DEFAULT '',
-    duration      REAL,
-    lyrics_source TEXT DEFAULT 'none', -- lrclib | whisper | none
-    has_synced    INTEGER DEFAULT 0,
-    plain_lyrics  TEXT DEFAULT '',
-    synced_lyrics TEXT DEFAULT '',
-    updated_at    REAL NOT NULL
+_NEW_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tracks (
+    track_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    album       TEXT,
+    duration    REAL,
+    UNIQUE(artist, title)
 );
 
+CREATE TABLE IF NOT EXISTS sources (
+    source_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id    INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    url         TEXT UNIQUE,
+    player_name TEXT,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
+CREATE TABLE IF NOT EXISTS lyrics (
+    lyric_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id        INTEGER NOT NULL,
+    kind            TEXT NOT NULL DEFAULT 'approved', -- approved | staged | rejected
+    source          TEXT, -- lrclib | youtube_caption | whisper | user_submitted
+    synced_lyrics   TEXT,
+    plain_lyrics    TEXT,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+"""
+
+_SCHEMA = """
 CREATE TABLE IF NOT EXISTS play_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     ts         REAL NOT NULL,
@@ -59,93 +65,77 @@ CREATE INDEX IF NOT EXISTS idx_play_events_ts ON play_events (ts);
 CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events (artist, title);
 """
 
-
-def _key(artist: str, title: str) -> str:
-    """Normalized cache key for a track (casefolded, whitespace-stripped)."""
-    return f"{(artist or '').strip().casefold()}\n{(title or '').strip().casefold()}"
-
-
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and lazily initialize) the local SQLite database."""
     path = Path(db_path or settings.local_db)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     return conn
 
 
-# ---------------------------------------------------------------------------
-# Lyrics cache
-# ---------------------------------------------------------------------------
+def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional[int]:
+    """Find a track by artist and title, returning its ID."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT track_id FROM tracks WHERE artist = ? AND title = ?",
+        (artist, title)
+    )
+    row = cur.fetchone()
+    return row["track_id"] if row else None
 
-def get_cached_lyrics(
-    artist: str, title: str, *, conn: Optional[sqlite3.Connection] = None
-) -> Optional[Lyrics]:
-    """Return locally cached lyrics for a track, or None on a miss.
-
-    Only returns a hit when some lyrics text was previously stored (synced or
-    plain); rows that recorded a definitive "no lyrics" result return None so the
-    caller can retry online later.
-    """
-    own = conn is None
-    c = conn or connect()
-    try:
-        row = c.execute(
-            "SELECT * FROM lyrics_cache WHERE key = ?", (_key(artist, title),)
-        ).fetchone()
-    finally:
-        if own:
-            c.close()
+def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[Lyrics]:
+    """Get approved lyrics for a given track ID."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+        (track_id,)
+    )
+    row = cur.fetchone()
     if not row:
         return None
+    
     synced = row["synced_lyrics"] or ""
     plain = row["plain_lyrics"] or ""
     if not synced and not plain:
         return None
+        
     return Lyrics(
         plain=plain,
         synced_raw=synced,
-        source=row["lyrics_source"] or "lrclib",
+        source=row["source"] or "lrclib",
         lines=parse_lrc(synced) if synced else [],
     )
 
-
-def put_cached_lyrics(
+def add_track_and_lyrics(
     artist: str,
     title: str,
     lyrics: Lyrics,
-    *,
     album: str = "",
     duration: Optional[float] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Upsert lyrics for a track into the local cache (best-effort)."""
-    if not (lyrics.synced_raw or lyrics.plain):
-        return
+    """Add a new track and its lyrics to the database."""
     own = conn is None
     c = conn or connect()
     try:
-        c.execute(
+        cur = c.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+            (artist, title, album, duration)
+        )
+        track_id = find_track_id(artist, title, c)
+        if not track_id:
+            return
+
+        cur.execute(
             """
-            INSERT INTO lyrics_cache
-                (key, artist, title, album, duration, lyrics_source,
-                 has_synced, plain_lyrics, synced_lyrics, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                album=excluded.album,
-                duration=excluded.duration,
-                lyrics_source=excluded.lyrics_source,
-                has_synced=excluded.has_synced,
-                plain_lyrics=excluded.plain_lyrics,
-                synced_lyrics=excluded.synced_lyrics,
-                updated_at=excluded.updated_at
+            INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
+            VALUES (?, 'approved', ?, ?, ?)
             """,
-            (
-                _key(artist, title), artist, title, album, duration,
-                lyrics.source, int(lyrics.has_synced), lyrics.plain,
-                lyrics.synced_raw, time.time(),
-            ),
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain)
         )
         c.commit()
     finally:
@@ -154,7 +144,7 @@ def put_cached_lyrics(
 
 
 # ---------------------------------------------------------------------------
-# Play / discovery stats
+# Play / discovery stats (Unchanged from previous implementation)
 # ---------------------------------------------------------------------------
 
 def log_event(
