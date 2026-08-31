@@ -39,6 +39,7 @@ class LyricTimeline:
 
     @property
     def times(self) -> list[float]:
+        """Return only the lyric timestamps in display order."""
         return [t for t, _ in self.lines]
 
     def active_index(self, elapsed: float) -> int:
@@ -81,6 +82,7 @@ class LyricTimeline:
 
 
 def timeline_from_lyrics(ly: Lyrics) -> LyricTimeline:
+    """Build a renderable timeline from parsed or raw LRC lyrics."""
     if ly.lines:
         return LyricTimeline(list(ly.lines))
     if ly.synced_raw:

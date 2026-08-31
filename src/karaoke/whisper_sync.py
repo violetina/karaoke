@@ -18,6 +18,8 @@ _MAX_WORDS = 10         # hard cap on words per line
 
 @dataclass
 class Word:
+    """One word timestamp emitted by faster-whisper."""
+
     start: float
     end: float
     text: str

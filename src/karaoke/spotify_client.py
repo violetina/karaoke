@@ -25,11 +25,15 @@ _API = "https://api.spotify.com/v1"
 
 
 class SpotifyAuthError(RuntimeError):
+    """Raised when Hermes Spotify credentials or Spotify API calls fail."""
+
     pass
 
 
 @dataclass
 class Playback:
+    """Current Spotify playback state normalized for lyric sync."""
+
     is_playing: bool
     progress_ms: int
     duration_ms: int
@@ -39,6 +43,7 @@ class Playback:
 
     @property
     def position_s(self) -> float:
+        """Current Spotify playback position in seconds."""
         return self.progress_ms / 1000.0
 
 
@@ -53,7 +58,10 @@ def _load_creds() -> dict[str, Any]:
 
 
 class SpotifyClient:
+    """Small Spotify Web API client backed by Hermes' stored OAuth refresh token."""
+
     def __init__(self) -> None:
+        """Load credentials and cached token state from Hermes auth storage."""
         self._creds = _load_creds()
         self._access_token: Optional[str] = self._creds.get("access_token")
         # expires_at may be str or number in the file; treat unknown as expired.
@@ -115,6 +123,7 @@ class SpotifyClient:
 
     def play(self, uris: Optional[list[str]] = None,
              device_id: Optional[str] = None) -> None:
+        """Start or resume playback, optionally with a list of Spotify track URIs."""
         params = {"device_id": device_id} if device_id else {}
         body = {"uris": uris} if uris else None
         r = requests.put(f"{_API}/me/player/play", headers=self._headers(),
@@ -123,8 +132,10 @@ class SpotifyClient:
             raise SpotifyAuthError(f"play failed: {r.status_code} {r.text[:200]}")
 
     def pause(self) -> None:
+        """Pause the active Spotify device if one is available."""
         requests.put(f"{_API}/me/player/pause", headers=self._headers(), timeout=10)
 
     def devices(self) -> list[dict[str, Any]]:
+        """Return Spotify Connect devices visible to the authenticated account."""
         r = requests.get(f"{_API}/me/player/devices", headers=self._headers(), timeout=10)
         return r.json().get("devices", []) if r.status_code == 200 else []

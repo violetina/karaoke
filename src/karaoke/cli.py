@@ -33,6 +33,7 @@ def _resolve(args) -> Optional[SongRef]:
 
 
 def karaoke_main() -> int:
+    """Run the `karaoke` CLI for lookup, printing, playback and live sync modes."""
     ap = argparse.ArgumentParser(prog="karaoke", description="Terminal karaoke with synced lyrics")
     ap.add_argument("query", nargs="*", help="'Artist - Title' (or a title)")
     ap.add_argument("--file", "-f", help="local audio file (read tags)")
@@ -132,6 +133,7 @@ def karaoke_main() -> int:
 
 
 def lyricsearch_main() -> int:
+    """Run the `lyricsearch` CLI for semantic or keyword lyric search."""
     ap = argparse.ArgumentParser(prog="lyricsearch",
                                  description="Find a song by what its lyrics mean")
     ap.add_argument("query", nargs="+", help="words / a phrase from the song")
@@ -154,6 +156,7 @@ def lyricsearch_main() -> int:
 
 
 def index_main() -> int:
+    """Run the `music-index` CLI to scan local audio into OpenSearch."""
     ap = argparse.ArgumentParser(prog="music-index",
                                  description="Scan a music library into OpenSearch")
     ap.add_argument("--dir", help="music dir (default MUSIC_DIR)")

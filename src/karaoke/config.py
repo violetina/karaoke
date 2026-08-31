@@ -1,4 +1,4 @@
-"""Environment-driven settings for karaoke-000.
+"""Environment-driven settings for karaoke.
 
 All configuration comes from environment variables (optionally loaded from a
 .env file at the project root) so the same code runs on the host CLI and inside
@@ -28,6 +28,13 @@ def _load_dotenv() -> None:
 
 @dataclass(frozen=True)
 class Settings:
+    """Resolved runtime configuration for CLI, scanner and cache clients.
+
+    Values are loaded once at import time from the environment, with optional
+    project-local `.env` support. Defaults target a localhost OpenSearch service
+    exposed by the local `kind-karaoke` cluster.
+    """
+
     opensearch_url: str
     music_dir: Path
     embed_model: str
@@ -38,6 +45,7 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
+        """Load settings from `.env` plus process environment variables."""
         _load_dotenv()
         return cls(
             opensearch_url=os.environ.get("OPENSEARCH_URL", "http://localhost:9200"),

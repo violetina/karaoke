@@ -10,6 +10,8 @@ AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac"}
 
 @dataclass
 class TrackTags:
+    """Normalized metadata extracted from one local audio file."""
+
     path: str
     title: str
     artist: str
@@ -62,4 +64,5 @@ def extract_tags(path: str | Path) -> TrackTags:
 
 
 def is_audio(path: str | Path) -> bool:
+    """Return true when `path` has a supported audio-file extension."""
     return Path(path).suffix.lower() in AUDIO_EXTS

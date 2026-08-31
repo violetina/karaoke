@@ -55,6 +55,12 @@ def clean_title(title: str) -> str:
 
 @dataclass
 class Lyrics:
+    """Lyrics payload used by fetchers, cache lookups and players.
+
+    `synced_raw` keeps the original LRC text for write-through caching, while
+    `lines` is the parsed `(seconds, text)` representation used by renderers.
+    """
+
     plain: str = ""
     synced_raw: str = ""          # original LRC text (cached verbatim)
     source: str = "none"          # lrclib | whisper | none
@@ -62,6 +68,7 @@ class Lyrics:
 
     @property
     def has_synced(self) -> bool:
+        """Whether timestamped lyric lines are available."""
         return bool(self.lines)
 
 

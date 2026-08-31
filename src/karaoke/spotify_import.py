@@ -22,6 +22,7 @@ from .tags import TrackTags
 
 
 def spotify_id_to_doc_id(track_id: str) -> str:
+    """OpenSearch document id namespace for Spotify metadata-only tracks."""
     return "spotify:" + hashlib.sha1(track_id.encode("utf-8")).hexdigest()
 
 
