@@ -34,7 +34,7 @@ class KaraokeBrowser(App):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t.artist, t.title, s.url, s.kind
+                SELECT t.track_id, t.artist, t.title, s.url, s.kind
                 FROM tracks t
                 LEFT JOIN sources s ON t.track_id = s.track_id
                 GROUP BY t.track_id
@@ -43,8 +43,8 @@ class KaraokeBrowser(App):
             )
             rows = cur.fetchall()
             for row in rows:
-                # Store a tuple of (url, kind) as the key
-                table.add_row(row["artist"], row["title"], key=(row["url"], row["kind"]))
+                key = (row["url"], row["kind"]) if row["url"] else (f"track_{row['track_id']}", "local")
+                table.add_row(row["artist"], row["title"], key=key)
 
     def action_select_song(self) -> None:
         """Called when the user presses Enter on a song."""
@@ -54,7 +54,9 @@ class KaraokeBrowser(App):
             return
         
         url, kind = row_key
-        if not url:
+        if not url or kind == "local":
+            # For local tracks without a URL, we could eventually
+            # try to play them if we have a file path. For now, do nothing.
             return
 
         if kind == "spotify":
