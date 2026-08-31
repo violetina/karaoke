@@ -26,6 +26,10 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.search
 
+## Local cache and stats
+
+::: karaoke.localcache
+
 ## Scanner and document building
 
 ::: karaoke.scanner

@@ -15,7 +15,7 @@ MAKE2GRAPH_REF ?= master
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
-        test clean clean-tools
+        test test-audio mic-test stats clean clean-tools
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -84,6 +84,15 @@ format: ## Run formatters
 
 test: ## Run tests
 	$(PYTHON) -m pytest -v
+
+test-audio: ## Verify the audio + identify + lyrics stack (mic, songrec, LRCLIB)
+	scripts/soundcheck.sh
+
+mic-test: ## Live mic VU meter to confirm capture level (SECS=4)
+	scripts/soundcheck.sh --meter $(or $(SECS),4)
+
+stats: ## Show play + radio-discovery stats from the local cache
+	$(PYTHON) -c "import sys; from karaoke.cli import stats_main; sys.argv=['karaoke-stats']; raise SystemExit(stats_main())"
 
 clean-tools: ## Remove cached helper tools
 	rm -rf "$(TOOLS_DIR)" "$(CACHE_DIR)"

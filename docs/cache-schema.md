@@ -1,6 +1,12 @@
 # Cache schema
 
-Karaoke uses a single OpenSearch index, `tracks` by default, for both search and lyrics cache entries.
+Karaoke has two caches:
+
+- an **OpenSearch** index (`tracks`, on the kind cluster) for search + rich cache, documented here;
+- a **local SQLite** cache (cluster-independent) for offline lyrics + stats, documented in
+  [Local cache and stats](local-cache-and-stats.md).
+
+This page covers the OpenSearch index, used for both search and lyrics cache entries.
 
 The same schema supports:
 

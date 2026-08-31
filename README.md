@@ -8,12 +8,13 @@ A local karaoke + lyric-search platform.
 - **Karaoke** CLI: identify the current song (file / text / live via `songrec`), then render time-synced highlighted lyrics.
 - **lyricsearch**: semantic "find the song that goes '...'" via lyric embeddings (sentence-transformers).
 - **Whisper fallback**: for local files with no LRCLIB match, transcribe to approximate synced lyrics with faster-whisper.
+- **Local cache + stats**: a cluster-independent SQLite store serves known songs' lyrics offline (checked before the cluster/LRCLIB) and records play/discovery stats for `karaoke-stats`.
 
 ## Source model (hybrid)
 
 - `~/Music` = audio + cache source. Karaoke playback and Whisper transcription run here.
 - Spotify (your account) = optional metadata seed (liked songs / playlists). Spotify's API does **not** allow audio download, so no Whisper for Spotify-only tracks; lyrics come from LRCLIB.
-- All lyrics cached in OpenSearch → repeat plays are offline.
+- Lyrics are cached in **two** places: the OpenSearch index (rich, on the kind cluster) and a **local SQLite cache** (`~/.local/share/karaoke/karaoke.db`) that works with no cluster. Lookups check the local cache first, then OpenSearch, then LRCLIB — so a known song replays fully offline.
 
 ## Layout
 
@@ -59,6 +60,41 @@ karaoke --radio                               # CONTINUOUS: follow live radio, r
 karaoke --output                              # identify audio playing on this machine
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
+```
+
+## Stats
+
+Every play/identification is recorded in the local cache. Report it with:
+
+```bash
+karaoke-stats            # plays, discoveries, top tracks/artists, per-mode, cache hit-rate
+karaoke-stats --days 7   # only the last week
+karaoke-stats --json     # machine-readable
+make stats               # same summary via make
+```
+
+In `--radio` mode the stats also track song *discovery*: each new song songrec
+identifies is a `discover` event, drift-corrections are `relock`, and lyrics
+served from the local cache are `cache_hit` — so you can see how often radio
+re-locked known songs offline.
+
+## Offline behaviour and song identification
+
+- **Known song, no cluster**: after a song has been played once, its lyrics live
+  in the local SQLite cache. Radio/live modes replay it with no cluster and no
+  LRCLIB request.
+- **Unknown song**: identification still uses `songrec`, which queries Shazam
+  **online**. There is no offline audio-fingerprint match (that would need
+  AcoustID/Chromaprint); the local cache stores recognition *results*, not
+  fingerprints.
+
+## Sound check
+
+Before a live session, verify the audio + identify + lyrics stack:
+
+```bash
+make test-audio          # pactl devices, songrec, LRCLIB reachability
+make mic-test            # live mic VU meter (SECS=4 to change duration)
 ```
 
 ### Live audio sync (mic / room)

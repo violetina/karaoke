@@ -62,6 +62,7 @@ nav:
   - Overview: index.md
   - Architecture: architecture.md
   - Cache schema: cache-schema.md
+  - Local cache and stats: local-cache-and-stats.md
   - API reference: api.md
   - Workflow poc: workflow.md
   - Makefile targets: makefile-targets.md
