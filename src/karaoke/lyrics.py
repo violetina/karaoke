@@ -19,6 +19,39 @@ from .config import settings
 
 _TS = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
 
+# Suffixes Spotify/streaming titles carry that LRCLIB's exact match chokes on,
+# e.g. "The Wind is Whispering - Live", "Song (Remastered 2011)",
+# "Track - Radio Edit", "Tune (feat. X)". We keep "(feat. ...)" off the title
+# because LRCLIB indexes the primary artist only.
+_TITLE_SUFFIX = re.compile(
+    r"""\s*(?:
+        [-–—]\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?|radio\s+edit|
+                   single\s+version|album\s+version|mono|stereo|
+                   \d{4}\s+remaster(?:ed)?|re-?recorded(?:\s+\d{4})?|
+                   acoustic|demo|edit|extended(?:\s+mix)?|bonus\s+track)
+        |\(\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?|radio\s+edit|
+                 single\s+version|album\s+version|mono|stereo|
+                 \d{4}\s+remaster(?:ed)?|re-?recorded(?:\s+\d{4})?|
+                 acoustic|demo|edit|extended(?:\s+mix)?|bonus\s+track|
+                 feat\.?[^)]*|ft\.?[^)]*|with[^)]*)\s*\)
+    )\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def clean_title(title: str) -> str:
+    """Strip trailing streaming-service suffixes (- Live, (Remastered), etc).
+
+    Applied repeatedly so stacked suffixes like "Song - Live (Remastered 2011)"
+    collapse to "Song". Returns the input unchanged if nothing matches.
+    """
+    prev = None
+    out = title.strip()
+    while out and out != prev:
+        prev = out
+        out = _TITLE_SUFFIX.sub("", out).strip()
+    return out or title.strip()
+
 
 @dataclass
 class Lyrics:
@@ -78,36 +111,47 @@ def fetch_lrclib(
     timeout: float = 10.0,
     session: Optional[Any] = None,
 ) -> Lyrics:
-    """Fetch lyrics for a track. Tries /api/get, then /api/search."""
+    """Fetch lyrics for a track. Tries /api/get, then /api/search.
+
+    If the exact title misses, retries once with a cleaned title (streaming
+    suffixes like "- Live" / "(Remastered)" stripped), which LRCLIB indexes.
+    """
     http: Any = session or requests
     base = settings.lrclib_base.rstrip("/")
-    params: dict[str, str] = {"artist_name": artist, "track_name": title}
-    if album:
-        params["album_name"] = album
-    if duration:
-        params["duration"] = str(int(round(duration)))
 
-    try:
-        r = http.get(f"{base}/api/get", params=params, timeout=timeout)
-        if r.status_code == 200:
-            return _to_lyrics(r.json())
-    except requests.RequestException:
-        pass
+    titles = [title]
+    cleaned = clean_title(title)
+    if cleaned and cleaned != title:
+        titles.append(cleaned)
 
-    # Fallback: search and take the best synced hit, else the first hit.
-    try:
-        r = http.get(
-            f"{base}/api/search",
-            params={"artist_name": artist, "track_name": title},
-            timeout=timeout,
-        )
-        if r.status_code == 200:
-            results = r.json() or []
-            if results:
-                best = next((x for x in results if x.get("syncedLyrics")), results[0])
-                return _to_lyrics(best)
-    except requests.RequestException:
-        pass
+    for t in titles:
+        params: dict[str, str] = {"artist_name": artist, "track_name": t}
+        if album:
+            params["album_name"] = album
+        if duration:
+            params["duration"] = str(int(round(duration)))
+
+        try:
+            r = http.get(f"{base}/api/get", params=params, timeout=timeout)
+            if r.status_code == 200:
+                return _to_lyrics(r.json())
+        except requests.RequestException:
+            pass
+
+        # Fallback: search and take the best synced hit, else the first hit.
+        try:
+            r = http.get(
+                f"{base}/api/search",
+                params={"artist_name": artist, "track_name": t},
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                results = r.json() or []
+                if results:
+                    best = next((x for x in results if x.get("syncedLyrics")), results[0])
+                    return _to_lyrics(best)
+        except requests.RequestException:
+            pass
 
     return Lyrics()
 

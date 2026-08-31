@@ -1,0 +1,4 @@
+# Optional Confluence publishing support. Install only when using docs-confluence-publish.
+# Kept separate because mkdocs-confluence-publisher/md2cf pins older rich/requests
+# versions that conflict with the karaoke runtime dependencies.
+mkdocs-confluence-publisher

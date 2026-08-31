@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "karaoke-000"
-version = "0.0.1"
+name = "karaoke"
+version = "0.1.0"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -19,14 +19,18 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "responses>=0.25"]
 spotify = ["spotipy>=2.24"]
+beats = ["librosa>=0.10", "soundfile>=0.12"]
 
 [project.scripts]
 karaoke = "karaoke.cli:karaoke_main"
 lyricsearch = "karaoke.cli:lyricsearch_main"
 music-index = "karaoke.cli:index_main"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["karaoke*"]
 
 [tool.pytest.ini_options]

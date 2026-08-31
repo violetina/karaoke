@@ -1,5 +1,5 @@
 """Tests for LRC parsing and the LRCLIB client (network mocked)."""
-from karaoke.lyrics import parse_lrc, fetch_lrclib, Lyrics
+from karaoke.lyrics import parse_lrc, fetch_lrclib, clean_title, Lyrics
 
 
 def test_parse_lrc_basic():
@@ -87,3 +87,49 @@ def test_fetch_lrclib_total_miss():
     ly = fetch_lrclib("A", "B", session=sess)
     assert ly.source == "none"
     assert not ly.has_synced
+
+
+def test_clean_title_strips_dash_suffixes():
+    assert clean_title("The Wind is Whispering - Live") == "The Wind is Whispering"
+    assert clean_title("Song - Radio Edit") == "Song"
+    assert clean_title("Track - Remastered 2011") == "Track"
+    assert clean_title("Tune - 2009 Remaster") == "Tune"
+
+
+def test_clean_title_strips_paren_suffixes():
+    assert clean_title("Song (Remastered)") == "Song"
+    assert clean_title("Song (Live)") == "Song"
+    assert clean_title("Song (feat. Someone)") == "Song"
+    assert clean_title("Song (Radio Edit)") == "Song"
+
+
+def test_clean_title_strips_stacked_suffixes():
+    assert clean_title("Song - Live (Remastered 2011)") == "Song"
+
+
+def test_clean_title_leaves_clean_titles_untouched():
+    assert clean_title("No One Knows") == "No One Knows"
+    assert clean_title("A-Punk") == "A-Punk"  # hyphen inside a word, no suffix kw
+    assert clean_title("") == ""
+
+
+def test_fetch_lrclib_retries_with_cleaned_title():
+    # Exact "X - Live" misses (get 404 + empty search); cleaned "X" then hits.
+    sess = _FakeSession([
+        _FakeResp(404, {}),                       # get, exact title
+        _FakeResp(200, []),                       # search, exact title -> empty
+        _FakeResp(200, {"syncedLyrics": "[00:03.00] hey", "plainLyrics": "hey"}),  # get, cleaned
+    ])
+    ly = fetch_lrclib("Ween", "The Wind is Whispering - Live", session=sess)
+    assert ly.has_synced
+    assert ly.lines == [(3.0, "hey")]
+    # Third call used the cleaned title.
+    assert sess.calls[2][1]["track_name"] == "The Wind is Whispering"
+
+
+def test_fetch_lrclib_no_retry_when_title_clean():
+    # A clean title that misses should NOT trigger a second (identical) round.
+    sess = _FakeSession([_FakeResp(404, {}), _FakeResp(200, [])])
+    ly = fetch_lrclib("A", "No One Knows", session=sess)
+    assert ly.source == "none"
+    assert len(sess.calls) == 2

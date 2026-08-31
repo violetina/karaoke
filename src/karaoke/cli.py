@@ -56,6 +56,8 @@ def karaoke_main() -> int:
                          f"~10s recognition window (default {DEFAULT_LEAD_S}; use 0 to disable)")
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="print lyrics instead of the live player")
+    ap.add_argument("--no-beats", action="store_true",
+                    help="skip librosa beat detection in --file mode (use per-line pulse)")
     args = ap.parse_args()
 
     # Forward pre-bias for live recognition (mic/radio) modes only. Spotify has an
@@ -67,6 +69,14 @@ def karaoke_main() -> int:
         from .player import play_radio_synced
         play_radio_synced(mic=not args.output, reidentify_interval=args.reidentify,
                           extra_latency=args.offset + lead, listen_timeout=args.timeout)
+        return 0
+
+    # Continuous Spotify mode: follow playback track-by-track. Tracks with no
+    # synced lyrics are skipped (wait for the next song) instead of exiting.
+    # (--print falls through to the one-shot resolve+dump path below.)
+    if args.spotify and not args.print_only:
+        from .player import play_spotify_loop
+        play_spotify_loop(offset=args.offset, use_cache=not args.no_cache)
         return 0
 
     ref = _resolve(args)
@@ -95,11 +105,6 @@ def karaoke_main() -> int:
             print(f"[{int(t//60):02d}:{t%60:05.2f}] {text}")
         return 0
 
-    if args.spotify:
-        from .player import play_spotify_synced
-        play_spotify_synced(tl, title=ref.title, artist=ref.artist, offset=args.offset)
-        return 0
-
     # Live mic/output identification returns a position offset -> auto-sync to it.
     if ref.offset is not None and ref.offset_mono is not None:
         from .player import play_offset_synced
@@ -108,7 +113,21 @@ def karaoke_main() -> int:
                            extra_latency=args.offset + lead)
         return 0
 
-    play(tl, title=ref.title, artist=ref.artist, offset=args.offset)
+    # File/text mode: if we have a local audio file, detect real beats so the
+    # display flashes on the beat (needs librosa; degrades to per-line pulse).
+    beat_times = None
+    if ref.path and not args.no_beats:
+        from .beats import detect_beats
+        print("Detecting beats (first run may take a moment)…", file=sys.stderr)
+        bpm, beat_times = detect_beats(ref.path)
+        if beat_times:
+            print(f"Beat track: {bpm:.0f} BPM, {len(beat_times)} beats.", file=sys.stderr)
+        else:
+            print("No beats detected (librosa missing or unreadable audio); "
+                  "using per-line pulse.", file=sys.stderr)
+
+    play(tl, title=ref.title, artist=ref.artist, offset=args.offset,
+         beat_times=beat_times)
     return 0
 
 

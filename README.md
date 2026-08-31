@@ -1,4 +1,4 @@
-# karaoke-000
+# karaoke
 
 A local karaoke + lyric-search platform.
 
@@ -18,10 +18,10 @@ A local karaoke + lyric-search platform.
 ## Layout
 
 ```
-src/karaoke-000/
-├── karaoke/        # the package
-├── tests/          # pytest
-deploy/             # kind + opensearch + scanner Job manifests
+src/karaoke/        # the package
+tests/              # pytest
+deploy/             # kind + opensearch manifests
+docs/               # MkDocs project documentation
 ```
 
 ## Safety
@@ -35,8 +35,8 @@ See the implementation plan: `~/.hermes/plans/2026-08-29_173500-local-karaoke-pl
 
 ```bash
 python3.14 -m venv .venv && . .venv/bin/activate
-pip install -e "src/karaoke-000[dev]"
-pytest src/karaoke-000/tests -v
+pip install -e ".[dev]"
+pytest -v
 ```
 
 ## Usage
