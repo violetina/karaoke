@@ -15,7 +15,7 @@ MAKE2GRAPH_REF ?= master
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
-        test test-audio mic-test stats clean clean-tools
+        test test-audio mic-test stats clean clean-tools browse
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -101,6 +101,9 @@ clean: ## Remove build artifacts
 	rm -rf site docs_confluence build dist
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	find . -type d -name '*.egg-info' -prune -exec rm -rf {} +
+	
+browse: ## Launch the interactive song browser TUI
+	$(PYTHON) -m karaoke.browse
 	
 	
 	

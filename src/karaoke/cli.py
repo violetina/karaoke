@@ -543,3 +543,9 @@ def backfill_main(argv: Optional[list[str]] = None) -> int:
     from .backfill import backfill_main as _backfill_main
     return _backfill_main(argv)
 
+def browse_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-browse` TUI."""
+    from .browse import browse_main as _browse_main
+    return _browse_main()
+
+
