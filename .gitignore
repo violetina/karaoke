@@ -17,3 +17,4 @@ docs_confluence/
 .env.*
 !.env.example
 .DS_Store
+*.webm
