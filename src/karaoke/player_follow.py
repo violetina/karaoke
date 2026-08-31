@@ -1,15 +1,15 @@
 from __future__ import annotations
-import time
+
 import select
 import subprocess
-from typing import Any, Optional
+import time
 
-from .lyrics import Lyrics, fetch_lrclib, parse_lrc
-from .player import _build_frame, get_synced, timeline_from_lyrics
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from .identify import parse_query
+
+from .player import _build_frame, get_synced, timeline_from_lyrics
+from .playerctl import normalize_player_track
 
 def play_playerctl_follow(use_cache: bool = True):  # pragma: no cover - interactive
     """Continuously follow the desktop player via playerctl."""
@@ -42,7 +42,7 @@ def play_playerctl_follow(use_cache: bool = True):  # pragma: no cover - interac
             
             last_line = line
 
-            ref = parse_query(line)
+            ref = normalize_player_track("", line)
             console.print(f"[bold cyan]Track changed:[/bold cyan] {ref.artist} - {ref.title}")
             ly = get_synced(ref.artist, ref.title, use_cache=use_cache, stats_mode="player")
             tl = timeline_from_lyrics(ly)

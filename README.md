@@ -64,6 +64,8 @@ karaoke-yt URL                                # shorthand: URL is positional (no
 karaoke-yt URL -d --transcribe                # download + Whisper if no LRCLIB match
 karaoke-yt --cache-status                     # show downloaded YouTube audio size
 karaoke-yt --prune-cache 100                  # prune oldest downloads to <= 100 MiB
+karaoke-stage youtube URL                     # stage YouTube captions for review
+karaoke-stage list                            # review unapproved staged lyrics
 karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
 karaoke --spotify                             # lock lyrics to the LIVE Spotify position
 karaoke --player                              # get current song from any desktop player (MPRIS)
@@ -185,6 +187,24 @@ karaoke-yt URL -d --cache-max-mb 50 # per-run cap override
 ```
 
 Downloading is a YouTube ToS gray area; metadata-only is the default.
+
+#### Staging YouTube captions / crawled lyrics
+
+When LRCLIB has no lyrics but YouTube displays captions/lyrics, keep them out of
+the trusted cache until reviewed:
+
+```bash
+karaoke-stage youtube URL              # fetch captions and stage as pending
+karaoke-stage list                     # list pending candidates
+karaoke-stage show 12                  # inspect raw staged lyrics
+karaoke-stage approve 12               # copy approved candidate to local cache
+karaoke-stage reject 12                # leave it out of the approved cache
+```
+
+This is the review queue for lower-trust sources: YouTube manual/auto captions
+now, and later web crawls or Whisper training/transcription output. Approved rows
+are copied into the normal local lyrics cache; pending/rejected rows remain
+separate and never affect `karaoke` lookup.
 
 #### YouTube Premium / library access (cookies)
 
