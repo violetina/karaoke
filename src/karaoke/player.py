@@ -101,14 +101,34 @@ def get_synced(
     audio_path: Optional[str] = None,
     transcribe: bool = False,
     force_transcribe: bool = False,
+    stats_mode: Optional[str] = None,
 ) -> Lyrics:
-    """Return synced lyrics: OpenSearch cache first, then LRCLIB (and cache it).
+    """Return synced lyrics, checking caches before going online.
 
-    If LRCLIB has no synced lyrics and `transcribe=True` with a local
-    `audio_path`, fall back to Whisper transcription and cache the result.
-    `force_transcribe=True` skips cache + LRCLIB entirely and always uses Whisper.
+    Lookup order when ``use_cache`` is set:
+
+    1. **Local SQLite cache** (always available, no cluster needed) — this is what
+       makes a known song play offline in ``--radio``/live modes.
+    2. **OpenSearch** cache/index on the kind cluster, when reachable.
+    3. **LRCLIB** online fetch.
+
+    If LRCLIB has no synced lyrics and ``transcribe=True`` with a local
+    ``audio_path``, fall back to Whisper transcription. ``force_transcribe=True``
+    skips every cache + LRCLIB and always uses Whisper. Successful results are
+    written through to BOTH caches. ``stats_mode`` (e.g. ``"radio"``) enables
+    cache_hit/cache_miss/no_lyrics event logging for ``karaoke-stats``.
     """
     from .config import settings
+    from . import localcache
+
+    def _log(event: str, ly: Optional[Lyrics] = None) -> None:
+        if not stats_mode:
+            return
+        localcache.log_event(
+            stats_mode, event, artist=artist, title=title,
+            source=(ly.source if ly else ""),
+            has_synced=bool(ly and ly.has_synced),
+        )
 
     # Force path: Whisper only, no cache read, no LRCLIB.
     if force_transcribe and audio_path:
@@ -119,7 +139,22 @@ def get_synced(
             plain="\n".join(t for _, t in parse_lrc(lrc)),
             synced_raw=lrc, source="whisper", lines=parse_lrc(lrc),
         ) if lrc.strip() else Lyrics()
+        if ly.synced_raw or ly.plain:
+            try:
+                localcache.put_cached_lyrics(artist, title, ly, album=album, duration=duration)
+            except Exception:
+                pass
         return ly
+
+    # 1. Local SQLite cache first — offline, cluster-independent.
+    if use_cache:
+        try:
+            cached = localcache.get_cached_lyrics(artist, title)
+        except Exception:
+            cached = None
+        if cached is not None and (cached.synced_raw or cached.plain):
+            _log("cache_hit", cached)
+            return cached
 
     c = None
     if use_cache:
@@ -130,14 +165,24 @@ def get_synced(
             c = os_client or client()
             src = find_track(artist, title, os_client=c)
             if src and src.get("synced_lyrics"):
-                return Lyrics(
+                ly = Lyrics(
                     plain=src.get("plain_lyrics", ""),
                     synced_raw=src["synced_lyrics"],
                     source=src.get("lyrics_source", "lrclib"),
                     lines=parse_lrc(src["synced_lyrics"]),
                 )
+                # Populate the local cache so the next play needs no cluster.
+                try:
+                    localcache.put_cached_lyrics(artist, title, ly, album=album, duration=duration)
+                except Exception:
+                    pass
+                _log("cache_hit", ly)
+                return ly
         except Exception:
             c = None  # cache unavailable -> fall through to live fetch
+
+    if use_cache:
+        _log("cache_miss")
 
     ly = fetch_lrclib(artist, title, album, duration)
 
@@ -154,6 +199,16 @@ def get_synced(
                     source="whisper",
                     lines=parse_lrc(lrc),
                 )
+        except Exception:
+            pass
+
+    if not (ly.synced_raw or ly.plain):
+        _log("no_lyrics", ly)
+
+    # Best-effort write-through to the local SQLite cache (always available).
+    if use_cache and (ly.synced_raw or ly.plain):
+        try:
+            localcache.put_cached_lyrics(artist, title, ly, album=album, duration=duration)
         except Exception:
             pass
 
@@ -554,10 +609,20 @@ def play_radio_synced(
                 state["offset"] = ref.offset
                 state["offset_mono"] = ref.offset_mono
                 state["status"] = "in sync"
+            from . import localcache
+            localcache.log_event("radio", "relock", artist=ref.artist, title=ref.title)
             return
         # New song -> fetch lyrics (slow) OUTSIDE the lock.
-        ly = get_synced(ref.artist, ref.title)
+        from . import localcache
+        localcache.log_event(
+            "radio", "discover", artist=ref.artist, title=ref.title, source="songrec"
+        )
+        ly = get_synced(ref.artist, ref.title, stats_mode="radio")
         tl = timeline_from_lyrics(ly)
+        localcache.log_event(
+            "radio", "play", artist=ref.artist, title=ref.title,
+            source=ly.source, has_synced=bool(tl.lines),
+        )
         with lock:
             state["key"] = key
             state["artist"] = ref.artist
@@ -690,8 +755,14 @@ def play_spotify_loop(
             console.print(f"[bold cyan]{header}[/]  [dim](fetching lyrics…)[/]")
 
             ly = get_synced(pb.artist, pb.title,
-                            duration=pb.duration_ms / 1000.0, use_cache=use_cache)
+                            duration=pb.duration_ms / 1000.0, use_cache=use_cache,
+                            stats_mode="spotify")
             tl = timeline_from_lyrics(ly)
+            from . import localcache
+            localcache.log_event(
+                "spotify", "play", artist=pb.artist, title=pb.title,
+                source=ly.source, has_synced=bool(tl.lines),
+            )
             if not tl.lines:
                 console.print(
                     f"[yellow]No synced lyrics for {header} "

@@ -86,12 +86,26 @@ def karaoke_main() -> int:
 
     from .player import get_synced, timeline_from_lyrics, render_lines, play
 
+    stats_mode = ref.source  # file | query | songrec | spotify
+    if args.listen:
+        stats_mode = "listen"
+    elif args.output:
+        stats_mode = "output"
+
     ly = get_synced(ref.artist, ref.title, ref.album, ref.duration,
                     use_cache=not args.no_cache,
                     audio_path=ref.path,
                     transcribe=args.transcribe or args.force_transcribe,
-                    force_transcribe=args.force_transcribe)
+                    force_transcribe=args.force_transcribe,
+                    stats_mode=stats_mode)
     tl = timeline_from_lyrics(ly)
+
+    if not args.print_only:
+        from . import localcache
+        localcache.log_event(
+            stats_mode, "play", artist=ref.artist, title=ref.title,
+            source=ly.source, has_synced=bool(tl.lines),
+        )
 
     if not tl.lines:
         print(f"No synced lyrics for {ref.artist} - {ref.title} "
@@ -171,6 +185,61 @@ def index_main() -> int:
                  force=args.force, limit=args.limit)
     print(f"\nseen={stats.seen} indexed={stats.indexed} skipped={stats.skipped} "
           f"synced={stats.with_synced} errors={stats.errors}")
+    return 0
+
+
+def stats_main() -> int:
+    """Run the `karaoke-stats` CLI to report play and radio-discovery stats."""
+    ap = argparse.ArgumentParser(
+        prog="karaoke-stats",
+        description="Play counts and radio-discovery stats from the local cache",
+    )
+    ap.add_argument("-n", "--limit", type=int, default=10, help="rows in top lists")
+    ap.add_argument("--days", type=float, default=None,
+                    help="only count events in the last N days")
+    ap.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    args = ap.parse_args()
+
+    import time as _time
+    from . import localcache
+
+    since = _time.time() - args.days * 86400 if args.days else None
+    s = localcache.summarize(limit=args.limit, since=since)
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "total_events": s.total_events, "plays": s.plays,
+            "discoveries": s.discoveries, "cache_hits": s.cache_hits,
+            "cache_misses": s.cache_misses, "cache_hit_rate": round(s.cache_hit_rate, 3),
+            "distinct_tracks": s.distinct_tracks, "distinct_artists": s.distinct_artists,
+            "top_tracks": [{"artist": a, "title": t, "plays": n} for a, t, n in s.top_tracks],
+            "top_artists": [{"artist": a, "plays": n} for a, n in s.top_artists],
+            "by_mode": [{"mode": m, "plays": n} for m, n in s.by_mode],
+        }, indent=2))
+        return 0
+
+    window = f" (last {args.days:g} days)" if args.days else ""
+    print(f"Karaoke stats{window}")
+    print(f"  plays={s.plays}  discoveries={s.discoveries}  "
+          f"tracks={s.distinct_tracks}  artists={s.distinct_artists}")
+    print(f"  local-cache hits={s.cache_hits}  misses={s.cache_misses}  "
+          f"hit-rate={s.cache_hit_rate*100:.0f}%")
+    if s.by_mode:
+        print("\n  by mode:")
+        for mode, n in s.by_mode:
+            print(f"    {mode:10s} {n}")
+    if s.top_tracks:
+        print("\n  top tracks:")
+        for a, t, n in s.top_tracks:
+            label = f"{a} - {t}" if a else t
+            print(f"    {n:4d}  {label}")
+    if s.top_artists:
+        print("\n  top artists:")
+        for a, n in s.top_artists:
+            print(f"    {n:4d}  {a}")
+    if s.total_events == 0:
+        print("  (no events yet — play something with `karaoke` first)")
     return 0
 
 

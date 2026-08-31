@@ -42,11 +42,20 @@ class Settings:
     embed_dim: int
     lrclib_base: str
     kube_context: str
+    data_dir: Path
+
+    @property
+    def local_db(self) -> Path:
+        """Path to the cluster-independent local SQLite cache/stats database."""
+        return self.data_dir / "karaoke.db"
 
     @classmethod
     def load(cls) -> "Settings":
         """Load settings from `.env` plus process environment variables."""
         _load_dotenv()
+        default_data = Path(
+            os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+        ) / "karaoke"
         return cls(
             opensearch_url=os.environ.get("OPENSEARCH_URL", "http://localhost:9200"),
             music_dir=Path(os.environ.get("MUSIC_DIR", str(Path.home() / "Music"))).expanduser(),
@@ -55,6 +64,7 @@ class Settings:
             embed_dim=int(os.environ.get("EMBED_DIM", "384")),
             lrclib_base=os.environ.get("LRCLIB_BASE", "https://lrclib.net"),
             kube_context=os.environ.get("KUBE_CONTEXT", "kind-karaoke"),
+            data_dir=Path(os.environ.get("KARAOKE_DATA_DIR", str(default_data))).expanduser(),
         )
 
 
