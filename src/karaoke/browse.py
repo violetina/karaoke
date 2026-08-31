@@ -70,3 +70,7 @@ def browse_main() -> int:
     app = KaraokeBrowser()
     app.run()
     return 0
+
+if __name__ == "__main__":
+    browse_main()
+
