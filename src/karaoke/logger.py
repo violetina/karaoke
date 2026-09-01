@@ -4,10 +4,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from .config import settings
 
+LOG_DIR = Path(settings.data_dir) / "logs"
+LOG_FILE = LOG_DIR / "karaoke.log"
+OPEN_STDOUT_LOG = LOG_DIR / "xdg-open.stdout.log"
+OPEN_STDERR_LOG = LOG_DIR / "xdg-open.stderr.log"
+
+
 def setup_logging():
-    log_dir = Path(settings.data_dir) / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "karaoke.log"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     
     logger = logging.getLogger("karaoke")
     if logger.hasHandlers():
@@ -16,7 +20,7 @@ def setup_logging():
     logger.setLevel(logging.DEBUG)
     
     handler = RotatingFileHandler(
-        log_file, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"
+        LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"
     )
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
