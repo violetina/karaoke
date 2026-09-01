@@ -12,7 +12,7 @@ from .logger import LOG_FILE, log
 app = FastAPI(
     title="Karaoke TUI Backend API",
     description="REST API for browsing tracks, lyrics, playing media, and monitoring stats.",
-    version="0.1.0",
+    version="0.1.1",
 )
 
 
