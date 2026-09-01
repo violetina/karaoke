@@ -241,6 +241,83 @@ def put_cached_lyrics(
             c.close()
 
 
+def delete_empty_approved_lyrics(conn: Optional[sqlite3.Connection] = None) -> int:
+    """Delete placeholder approved lyrics rows that contain no synced or plain text."""
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        cur.execute(
+            """
+            DELETE FROM lyrics
+            WHERE kind = 'approved'
+              AND COALESCE(synced_lyrics, '') = ''
+              AND COALESCE(plain_lyrics, '') = ''
+            """
+        )
+        deleted = cur.rowcount if cur.rowcount is not None else 0
+        c.commit()
+        return int(deleted)
+    finally:
+        if own:
+            c.close()
+
+
+def add_track_source(
+    artist: str,
+    title: str,
+    *,
+    album: str = "",
+    duration: Optional[float] = None,
+    url: Optional[str] = None,
+    kind: str = "youtube",
+    player_name: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Upsert a track and optional source URL without creating lyrics rows."""
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        track_id = find_track_id(artist, title, c)
+        if track_id is None:
+            cur.execute(
+                "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+                (artist, title, album, duration),
+            )
+            track_id = cur.lastrowid
+            if track_id is None:
+                raise RuntimeError("failed to insert track")
+        else:
+            cur.execute(
+                """
+                UPDATE tracks
+                SET album = COALESCE(NULLIF(?, ''), album),
+                    duration = COALESCE(?, duration)
+                WHERE track_id = ?
+                """,
+                (album, duration, track_id),
+            )
+
+        if url:
+            cur.execute(
+                """
+                INSERT INTO sources (track_id, url, kind, player_name)
+                VALUES (?, ?, ?, NULLIF(?, ''))
+                ON CONFLICT(url) DO UPDATE SET
+                    track_id = excluded.track_id,
+                    kind = excluded.kind,
+                    player_name = COALESCE(excluded.player_name, sources.player_name)
+                """,
+                (track_id, url, kind, player_name),
+            )
+        c.commit()
+        return int(track_id)
+    finally:
+        if own:
+            c.close()
+
+
 def add_track_and_lyrics(
     artist: str,
     title: str,
@@ -251,25 +328,32 @@ def add_track_and_lyrics(
     kind: str = "youtube",
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Add a new track and its lyrics to the database."""
+    """Add or update a track, its optional source URL and approved lyrics."""
+    if not (lyrics.synced_raw or lyrics.plain):
+        add_track_source(
+            artist,
+            title,
+            album=album,
+            duration=duration,
+            url=url,
+            kind=kind,
+            conn=conn,
+        )
+        return
+
     own = conn is None
     c = conn or connect()
     try:
-        cur = c.cursor()
-        cur.execute(
-            "INSERT OR IGNORE INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
-            (artist, title, album, duration)
+        track_id = add_track_source(
+            artist,
+            title,
+            album=album,
+            duration=duration,
+            url=url,
+            kind=kind,
+            conn=c,
         )
-        track_id = find_track_id(artist, title, c)
-        if not track_id:
-            return
-
-        if url:
-            cur.execute(
-                "INSERT OR IGNORE INTO sources (track_id, url, kind) VALUES (?, ?, ?)",
-                (track_id, url, kind)
-            )
-
+        cur = c.cursor()
         cur.execute(
             "DELETE FROM lyrics WHERE track_id = ? AND kind = 'approved'",
             (track_id,),
@@ -279,7 +363,7 @@ def add_track_and_lyrics(
             INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
             VALUES (?, 'approved', ?, ?, ?)
             """,
-            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain)
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain),
         )
         c.commit()
     finally:

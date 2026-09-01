@@ -18,3 +18,4 @@ mkdocs-graphviz>=1.5.3
 mkdocs-mermaid2-plugin
 mkdocs-glightbox>=0.5.2
 cookiecutter>=2.7.1
+ddgs>=9.16.0
