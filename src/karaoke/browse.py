@@ -3,7 +3,10 @@ from __future__ import annotations
 import subprocess
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, DataTable
+from textual import log as textual_log
+
 from . import localcache
+from .logger import log
 
 class KaraokeBrowser(App):
     """A Textual app to browse the karaoke song library."""
@@ -56,23 +59,38 @@ class KaraokeBrowser(App):
     def action_select_song(self) -> None:
         """Called when the user presses Enter on a song."""
         table = self.query_one(DataTable)
-        song = self._song_data[table.cursor_row]
-        
+        try:
+            song = self._song_data[table.cursor_row]
+        except IndexError:
+            log.error(f"action_select_song: No song data at row {table.cursor_row}")
+            return
+            
         url, kind = song.get('url'), song.get('kind')
+        log.info(f"action_select_song: Selected row {table.cursor_row}: url={url}, kind={kind}")
 
         if not url:
             artist = song.get('artist') or ''
             title = song.get('title') or ''
             query = f"{artist} {title}".strip().replace(" ", "+")
             if not query:
+                log.warning("action_select_song: No url, artist, or title available to search.")
                 return
             url = f"https://www.youtube.com/results?search_query={query}"
             kind = "youtube_search"
+            log.info(f"action_select_song: Falling back to youtube search: {url}")
 
-        if kind == "spotify":
-            subprocess.run(["playerctl", "open", url])
-        else:
-            subprocess.run(["xdg-open", url])
+        try:
+            if kind == "spotify":
+                log.debug(f"Executing: playerctl open {url}")
+                subprocess.run(["playerctl", "open", url], check=True)
+            else:
+                log.debug(f"Executing: xdg-open {url}")
+                # xdg-open often detaches, but we don't want to block the TUI
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log.info("action_select_song: Command launched successfully.")
+        except Exception as e:
+            log.exception(f"action_select_song: Failed to launch player for {url}")
+            textual_log(f"Error launching: {e}")
 
 
 def browse_main() -> int:
