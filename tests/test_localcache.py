@@ -98,6 +98,46 @@ def test_summarize_empty(tmp_path):
     assert s.top_tracks == []
 
 
+def test_add_track_source_does_not_create_empty_lyrics(tmp_path):
+    c = _conn(tmp_path)
+    track_id = localcache.add_track_source(
+        "Mr. Bungle",
+        "Violenza Domestica",
+        duration=210.0,
+        url="https://www.youtube.com/watch?v=bXWHf2HH8jY",
+        kind="youtube",
+        conn=c,
+    )
+
+    assert track_id > 0
+    assert localcache.get_cached_lyrics("Mr. Bungle", "Violenza Domestica", conn=c) is None
+    found = localcache.find_track_by_url(
+        "https://www.youtube.com/watch?v=bXWHf2HH8jY", c
+    )
+    assert found == (track_id, "Mr. Bungle", "Violenza Domestica")
+    assert c.execute("SELECT count(*) FROM lyrics").fetchone()[0] == 0
+
+
+def test_delete_empty_approved_lyrics_keeps_real_lyrics(tmp_path):
+    c = _conn(tmp_path)
+    localcache.add_track_and_lyrics("Empty", "Placeholder", Lyrics(), conn=c)
+    localcache.add_track_and_lyrics("Real", "Song", Lyrics(plain="words", source="manual"), conn=c)
+    # Simulate legacy bad rows from the earlier cache indexer.
+    empty_id = localcache.find_track_id("Empty", "Placeholder", c)
+    assert empty_id is not None
+    c.execute(
+        "INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (?, 'approved', 'cache', '', '')",
+        (empty_id,),
+    )
+    c.commit()
+
+    assert localcache.delete_empty_approved_lyrics(conn=c) == 1
+    assert c.execute("SELECT count(*) FROM lyrics").fetchone()[0] == 1
+    got = localcache.get_cached_lyrics("Real", "Song", conn=c)
+    assert got is not None
+    assert got.plain == "words"
+
+
 def test_log_event_ignores_blank_titles_in_top_lists(tmp_path):
     c = _conn(tmp_path)
     localcache.log_event("query", "play", artist="", title="", conn=c)

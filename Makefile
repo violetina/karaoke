@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 VENV ?= .venv
-PYTHON := $(VENV)/bin/python
+PYTHON := PYTHONPATH=src $(VENV)/bin/python
 MKDOCS := $(VENV)/bin/mkdocs
 
 TOOLS_DIR := .tools/bin
@@ -15,8 +15,8 @@ MAKE2GRAPH_REF ?= master
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
-        test test-audio mic-test stats clean clean-tools browse \
-        vector-index vector-index-dry-run
+        test test-audio mic-test stats clean clean-tools browse browse-log \
+        index-youtube-cache vector-index vector-index-dry-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -105,6 +105,12 @@ clean: ## Remove build artifacts
 	
 browse: ## Launch the interactive song browser TUI
 	$(PYTHON) -m karaoke.browse
+
+browse-log: ## Follow TUI/open debug logs
+	tail -f "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/karaoke.log" "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/xdg-open.stderr.log"
+
+index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
+	$(PYTHON) scripts/index_youtube_cache.py
 
 vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without writing
 	$(PYTHON) -m karaoke.vector_index --dry-run --no-embed --lines

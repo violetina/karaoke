@@ -1,10 +1,8 @@
 """Index cached YouTube audio files into the SQLite database."""
-import os
 from pathlib import Path
 from karaoke.config import settings
 from karaoke.youtube import resolve_youtube
 from karaoke import localcache
-from karaoke.lyrics import Lyrics
 
 def main():
     yt_dir = Path(settings.youtube_dir)
@@ -13,6 +11,9 @@ def main():
         return
 
     conn = localcache.connect()
+    removed_empty = localcache.delete_empty_approved_lyrics(conn=conn)
+    if removed_empty:
+        print(f"Removed {removed_empty} empty approved lyrics placeholder rows.")
     
     # First, get already indexed URLs to avoid redundant network calls
     cur = conn.cursor()
@@ -23,12 +24,14 @@ def main():
     print(f"Found {len(files)} files in YouTube cache.")
     
     added = 0
+    skipped = 0
     for i, file_path in enumerate(files):
         # Extract YouTube ID from filename (e.g. "_3tkup9b-iM.webm" -> "_3tkup9b-iM")
         vid_id = file_path.stem
         url = f"https://www.youtube.com/watch?v={vid_id}"
         
         if url in indexed_urls:
+            skipped += 1
             continue
             
         print(f"[{i+1}/{len(files)}] Resolving metadata for {url} ...")
@@ -37,16 +40,17 @@ def main():
             print(f"  -> Could not resolve artist/title for {vid_id}")
             continue
             
-        # Add to localcache with an empty Lyrics object (we just want the track & source)
+        # Add/update track and source only. Cached audio should appear in the TUI
+        # even when lyrics are still missing, but it must not create fake empty
+        # approved lyrics rows.
         try:
-            localcache.add_track_and_lyrics(
+            localcache.add_track_source(
                 artist=ref.artist,
                 title=ref.title,
-                lyrics=Lyrics(),  # empty lyrics
                 duration=ref.duration,
                 url=url,
                 kind="youtube",
-                conn=conn
+                conn=conn,
             )
             print(f"  -> Added: {ref.artist} - {ref.title}")
             added += 1
@@ -55,7 +59,7 @@ def main():
             print(f"  -> DB Error: {e}")
 
     conn.close()
-    print(f"Done. Added {added} new tracks from cache.")
+    print(f"Done. Added {added} new tracks from cache; skipped {skipped} already-indexed files.")
 
 if __name__ == "__main__":
     main()

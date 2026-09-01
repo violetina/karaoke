@@ -34,9 +34,49 @@ flowchart LR
     F --> G["cd ~/karaoke && git pull"]
 ```
 
+## Debugging browse Enter/open behavior
+
+Use these commands when a row appears in the TUI but Enter does not visibly open it:
+
+```bash
+cd ~/karaoke
+source .venv/bin/activate
+make browse
+```
+
+In another terminal:
+
+```bash
+cd ~/karaoke
+make browse-log
+```
+
+The main log is `~/.local/share/karaoke/logs/karaoke.log`. Browser opener stdout/stderr are captured in:
+
+- `~/.local/share/karaoke/logs/xdg-open.stdout.log`
+- `~/.local/share/karaoke/logs/xdg-open.stderr.log`
+
+On every Enter press, the TUI logs the selected row, artist, title, source kind, URL, and spawned `xdg-open` PID. If a cached track has no source URL, the TUI falls back to a YouTube search URL for the selected artist/title.
+
+## Cache indexing for the TUI
+
+Downloaded YouTube cache files are indexed into SQLite source rows with:
+
+```bash
+cd ~/karaoke
+source .venv/bin/activate
+make index-youtube-cache
+```
+
+This adds/updates `tracks` and `sources` only. It does not create fake empty approved lyrics rows; legacy empty placeholder rows are cleaned automatically.
+
 ### Execution Steps
 1. Navigate to the appropriate worktree (`cd ~/karaoke-<feature>`).
-2. Activate the shared virtual environment if necessary (`source ~/.venv/bin/activate` or use the main repo's `.venv`). Note: commands might need to point to `../karaoke/.venv/bin/python`. *Tip: You can symlink the `.venv` or configure tools to use it.*
+2. Activate the shared virtual environment if necessary (`source .venv/bin/activate`). Worktree Makefile targets run Python with `PYTHONPATH=src` so they import the worktree code rather than the editable install from another checkout. For ad-hoc Python commands in a worktree, use:
+   ```bash
+   PYTHONPATH=src python -m pytest
+   PYTHONPATH=src python -m karaoke.browse
+   ```
 3. Write the code and update documentation files.
 4. Run tests within the worktree context.
 5. Commit and push the feature branch (`git push -u origin feat/<feature>`).
