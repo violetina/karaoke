@@ -580,7 +580,7 @@ def play_radio_synced(
         localcache.log_event(
             "radio", "discover", artist=ref.artist, title=ref.title, source="songrec"
         )
-        ly = get_synced(ref.artist, ref.title, stats_mode="radio")
+        ly = get_synced(ref, stats_mode="radio")
         tl = timeline_from_lyrics(ly)
         localcache.log_event(
             "radio", "play", artist=ref.artist, title=ref.title,
@@ -717,9 +717,13 @@ def play_spotify_loop(
             header = f"{pb.artist} - {pb.title}".strip(" -")
             console.print(f"[bold cyan]{header}[/]  [dim](fetching lyrics…)[/]")
 
-            ly = get_synced(pb.artist, pb.title,
-                            duration=pb.duration_ms / 1000.0, use_cache=use_cache,
-                            stats_mode="spotify")
+            ref = SongRef(
+                artist=pb.artist,
+                title=pb.title,
+                duration=pb.duration_ms / 1000.0 if pb.duration_ms else None,
+                source="spotify",
+            )
+            ly = get_synced(ref, use_cache=use_cache, stats_mode="spotify")
             tl = timeline_from_lyrics(ly)
             from . import localcache
             localcache.log_event(
