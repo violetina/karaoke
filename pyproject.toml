@@ -17,6 +17,8 @@ dependencies = [
     "beautifulsoup4",
     "duckduckgo-search",
     "textual",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
 ]
 
 [project.optional-dependencies]
@@ -24,7 +26,6 @@ dev = ["pytest>=8.0", "responses>=0.25"]
 spotify = ["spotipy>=2.24"]
 beats = ["librosa>=0.10", "soundfile>=0.12"]
 youtube = ["yt-dlp>=2024.0"]
-api = ["fastapi>=0.110.0", "uvicorn[standard]>=0.28.0"]
 
 [project.scripts]
 karaoke = "karaoke.cli:karaoke_main"

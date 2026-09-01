@@ -19,3 +19,5 @@ mkdocs-mermaid2-plugin
 mkdocs-glightbox>=0.5.2
 cookiecutter>=2.7.1
 ddgs>=9.16.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
