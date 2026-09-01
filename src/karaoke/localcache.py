@@ -271,6 +271,10 @@ def add_track_and_lyrics(
             )
 
         cur.execute(
+            "DELETE FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+            (track_id,),
+        )
+        cur.execute(
             """
             INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
             VALUES (?, 'approved', ?, ?, ?)
