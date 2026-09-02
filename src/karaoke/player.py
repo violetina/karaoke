@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Optional
 
-from .lyrics import Lyrics, fetch_lrclib, parse_lrc
+from .lyrics import Lyrics, fetch_lrclib, parse_enhanced_lrc, parse_lrc
 from .identify import SongRef
 
 # Word-highlight pacing. LRCLIB gives per-LINE timestamps only, so a line's
@@ -186,11 +186,17 @@ class LyricTimeline:
 
 
 def timeline_from_lyrics(ly: Lyrics) -> LyricTimeline:
-    """Build a renderable timeline from parsed or raw LRC lyrics."""
+    """Build a renderable timeline from parsed or raw LRC lyrics.
+
+    Raw LRC is parsed with the enhanced parser so explicit line ends and
+    Enhanced LRC word timings are carried through when present.
+    """
+    if ly.synced_raw:
+        lines, ends, word_times = parse_enhanced_lrc(ly.synced_raw)
+        if lines:
+            return LyricTimeline(lines, ends=ends, word_times=word_times)
     if ly.lines:
         return LyricTimeline(list(ly.lines))
-    if ly.synced_raw:
-        return LyricTimeline(parse_lrc(ly.synced_raw))
     return LyricTimeline([])
 
 

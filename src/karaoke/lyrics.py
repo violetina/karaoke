@@ -18,6 +18,17 @@ import requests
 from .config import settings
 
 _TS = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
+# Enhanced LRC per-word timestamps: <mm:ss.xx> before each word.
+_WORD_TS = re.compile(r"<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>")
+
+
+def _stamp_seconds(m: "re.Match[str]") -> float:
+    """Convert a matched [mm:ss.xx] / <mm:ss.xx> stamp to seconds."""
+    mm = int(m.group(1))
+    ss = int(m.group(2))
+    frac = m.group(3) or "0"
+    ms = int(frac.ljust(3, "0")[:3])
+    return mm * 60 + ss + ms / 1000.0
 
 # Suffixes Spotify/streaming titles carry that LRCLIB's exact match chokes on,
 # e.g. "The Wind is Whispering - Live", "Song (Remastered 2011)",
@@ -72,29 +83,97 @@ class Lyrics:
         return bool(self.lines)
 
 
-def parse_lrc(lrc: str) -> list[tuple[float, str]]:
-    """Parse LRC text into a time-sorted list of (seconds, text).
+def parse_enhanced_lrc(
+    lrc: str,
+) -> tuple[list[tuple[float, str]], dict[int, float], dict[int, list[float]]]:
+    """Parse LRC text, including Enhanced LRC word timings and end markers.
 
-    Lines with multiple timestamps are expanded. Metadata-only lines (e.g.
-    ``[ar: Artist]``) and empty-text stamps are skipped.
+    Returns ``(lines, ends, word_times)``:
+
+    - ``lines``   — time-sorted ``(seconds, text)``, as :func:`parse_lrc`.
+    - ``ends``    — ``{line_index: end_seconds}`` from empty-text timestamps
+      (``[00:14.00]`` on its own) or a trailing ``<mm:ss.xx>`` word tag. This
+      is how an instrumental break after a line is expressed in plain LRC.
+    - ``word_times`` — ``{line_index: [word_start_seconds, ...]}`` from
+      Enhanced LRC ``<mm:ss.xx>`` tags.
+
+    Enhanced LRC (``[00:12.00]<00:12.00>I <00:12.30>see``) is a widely adopted
+    extension supported by AIMP, foobar2000/ESLyric, Kugou, QQ Music and
+    NetEase. Plain LRC parses through unchanged, with empty ``ends``/
+    ``word_times``.
     """
-    out: list[tuple[float, str]] = []
+    # (start_time, text, word_times) in file order, before sorting.
+    entries: list[tuple[float, str, list[float]]] = []
+    # Pending end markers as absolute times; attached after sorting.
+    end_stamps: list[float] = []
+
     for raw in lrc.splitlines():
         stamps = list(_TS.finditer(raw))
         if not stamps:
             continue
-        text = _TS.sub("", raw).strip()
+        body = _TS.sub("", raw).strip()
+
+        word_stamps = list(_WORD_TS.finditer(body))
+        text = _WORD_TS.sub(" ", body).strip()
+        text = re.sub(r"\s+", " ", text)
+
         if not text:
+            # No lyric text: an end marker for whatever line precedes it.
+            for m in stamps:
+                end_stamps.append(_stamp_seconds(m))
             continue
-        for m in stamps:
-            mm = int(m.group(1))
-            ss = int(m.group(2))
-            frac = m.group(3) or "0"
-            # normalize fractional part to milliseconds
-            ms = int(frac.ljust(3, "0")[:3])
-            out.append((mm * 60 + ss + ms / 1000.0, text))
-    out.sort(key=lambda t: t[0])
-    return out
+
+        times = [_stamp_seconds(m) for m in stamps]
+        words = [_stamp_seconds(m) for m in word_stamps]
+
+        # A trailing word tag with no word after it marks the line's end.
+        trailing_end: Optional[float] = None
+        if word_stamps and not body[word_stamps[-1].end():].strip():
+            trailing_end = words.pop() if words else None
+
+        for t in times:
+            entries.append((t, text, list(words)))
+            if trailing_end is not None:
+                end_stamps.append(trailing_end)
+
+    entries.sort(key=lambda e: e[0])
+    lines = [(t, text) for t, text, _ in entries]
+    word_times = {i: w for i, (_, _, w) in enumerate(entries) if w}
+
+    # Attach each end marker to the last line that starts before it.
+    ends: dict[int, float] = {}
+    for stamp in end_stamps:
+        idx = -1
+        for i, (t, _) in enumerate(lines):
+            if t < stamp:
+                idx = i
+            else:
+                break
+        if idx >= 0:
+            ends[idx] = stamp
+
+    return lines, ends, word_times
+
+
+def parse_lrc_with_ends(
+    lrc: str,
+) -> tuple[list[tuple[float, str]], dict[int, float], dict[int, list[float]]]:
+    """Alias of :func:`parse_enhanced_lrc` (kept for call-site clarity)."""
+    return parse_enhanced_lrc(lrc)
+
+
+def parse_lrc(lrc: str) -> list[tuple[float, str]]:
+    """Parse LRC text into a time-sorted list of (seconds, text).
+
+    Lines with multiple timestamps are expanded. Metadata-only lines (e.g.
+    ``[ar: Artist]``) and empty-text stamps are skipped. Enhanced LRC word
+    tags are stripped from the text.
+
+    Use :func:`parse_enhanced_lrc` when you also need line ends or word
+    timings.
+    """
+    lines, _, _ = parse_enhanced_lrc(lrc)
+    return lines
 
 
 def _to_lyrics(payload: dict) -> Lyrics:
