@@ -61,12 +61,15 @@ def test_save_detected_and_read_back(tmp_path):
     a = track_analysis.save_detected(
         tid, detected_key=Key(9, "minor"), key_confidence=0.8,
         key_agreement="4/6", bpm=95.0, method="essentia-edma-vote",
-        analyzer_version=1, conn=conn,
+        energy=0.72, brightness=0.31, analyzer_version=1, conn=conn,
     )
     assert a.detected_key == Key(9, "minor")
     assert a.bpm == 95.0
+    assert a.energy == 0.72
+    assert a.brightness == 0.31
     got = track_analysis.get_analysis(tid, conn)
     assert got is not None and got.detected_key == Key(9, "minor")
+    assert got.energy == 0.72
 
 
 def test_verify_key_relative_reconciliation(tmp_path):

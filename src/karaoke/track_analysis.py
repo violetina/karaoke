@@ -26,11 +26,20 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     key_relation    TEXT DEFAULT '',   -- exact | relative | parallel | conflict
     bpm             REAL,
     method          TEXT DEFAULT '',
+    energy          REAL,
+    brightness      REAL,
     analyzer_version INTEGER DEFAULT 0,
     updated_at      REAL NOT NULL,
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 """
+
+# Columns added after the initial schema; applied idempotently on connect so
+# existing databases pick them up without a manual migration.
+_ADDED_COLUMNS = {
+    "energy": "REAL",
+    "brightness": "REAL",
+}
 
 
 @dataclass(frozen=True)
@@ -49,15 +58,24 @@ class TrackAnalysis:
     method: str
     analyzer_version: int
     updated_at: float
+    energy: Optional[float] = None
+    brightness: Optional[float] = None
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the analysis table in the existing local cache DB."""
+    """Create the analysis table (and add newer columns) in the local cache DB."""
     conn.executescript(_SCHEMA)
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(track_analysis)")
+    }
+    for col, coltype in _ADDED_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE track_analysis ADD COLUMN {col} {coltype}")
     conn.commit()
 
 
 def _row_to_analysis(row: sqlite3.Row) -> TrackAnalysis:
+    keys = row.keys()
     return TrackAnalysis(
         track_id=int(row["track_id"]),
         detected_key=parse_key(row["detected_key"] or ""),
@@ -71,6 +89,8 @@ def _row_to_analysis(row: sqlite3.Row) -> TrackAnalysis:
         method=row["method"] or "",
         analyzer_version=int(row["analyzer_version"] or 0),
         updated_at=float(row["updated_at"] or 0.0),
+        energy=row["energy"] if "energy" in keys else None,
+        brightness=row["brightness"] if "brightness" in keys else None,
     )
 
 
@@ -96,9 +116,11 @@ def save_detected(
     bpm: Optional[float] = None,
     method: str = "",
     analyzer_version: int = 0,
+    energy: Optional[float] = None,
+    brightness: Optional[float] = None,
     conn: sqlite3.Connection,
 ) -> TrackAnalysis:
-    """Upsert a locally-detected key/tempo analysis and re-reconcile.
+    """Upsert a locally-detected key/tempo/energy analysis and re-reconcile.
 
     Preserves any existing reference key so re-running detection keeps the
     reconciliation up to date.
@@ -113,8 +135,8 @@ def save_detected(
         INSERT INTO track_analysis
             (track_id, detected_key, key_confidence, key_agreement,
              reference_key, reference_src, resolved_key, key_relation,
-             bpm, method, analyzer_version, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bpm, method, energy, brightness, analyzer_version, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(track_id) DO UPDATE SET
             detected_key = excluded.detected_key,
             key_confidence = excluded.key_confidence,
@@ -123,13 +145,16 @@ def save_detected(
             key_relation = excluded.key_relation,
             bpm = COALESCE(excluded.bpm, track_analysis.bpm),
             method = excluded.method,
+            energy = COALESCE(excluded.energy, track_analysis.energy),
+            brightness = COALESCE(excluded.brightness, track_analysis.brightness),
             analyzer_version = excluded.analyzer_version,
             updated_at = excluded.updated_at
         """,
         (
             track_id, _key_name(detected_key), key_confidence, key_agreement,
             _key_name(reference), reference_src, _key_name(rec.resolved),
-            rec.relation, bpm, method, analyzer_version, time.time(),
+            rec.relation, bpm, method, energy, brightness,
+            analyzer_version, time.time(),
         ),
     )
     conn.commit()

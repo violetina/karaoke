@@ -648,6 +648,9 @@ def analyze_main(argv: Optional[list[str]] = None) -> int:
           f"(conf {result.key_confidence:.0%}, {result.key_agreement}, "
           f"{result.method})")
     print(f"bpm: {result.bpm if result.bpm else 'unknown'}")
+    if result.energy is not None:
+        print(f"energy: {result.energy:.2f}  brightness: "
+              f"{result.brightness if result.brightness is not None else '?'}")
 
     if args.artist and args.title:
         with localcache.connect() as conn:
@@ -665,6 +668,8 @@ def analyze_main(argv: Optional[list[str]] = None) -> int:
                     key_agreement=result.key_agreement,
                     bpm=result.bpm,
                     method=result.method,
+                    energy=result.energy,
+                    brightness=result.brightness,
                     analyzer_version=result.version,
                     conn=conn,
                 )

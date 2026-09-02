@@ -89,13 +89,15 @@ class KeyResult:
 
 @dataclass(frozen=True)
 class AudioAnalysis:
-    """Combined key + tempo analysis for one audio file."""
+    """Combined key + tempo + energy analysis for one audio file."""
 
     key: Optional[Key]
     key_confidence: float
     key_agreement: str
     bpm: Optional[float]
     method: str
+    energy: Optional[float] = None      # RMS loudness, normalized 0..1
+    brightness: Optional[float] = None  # spectral centroid, normalized 0..1
     version: int = ANALYZER_VERSION
 
 
@@ -115,6 +117,47 @@ def detect_bpm(audio_path: str) -> Optional[float]:
             return round(bpm, 1) if bpm > 0 else None
         except Exception:
             return None
+
+
+def detect_features(audio_path: str) -> dict[str, Optional[float]]:
+    """Extract tempo + energy + brightness in a single librosa load.
+
+    Returns a dict with ``bpm`` (float), ``energy`` (RMS loudness normalized to
+    0..1) and ``brightness`` (spectral centroid normalized to 0..1 of Nyquist).
+    Values are None when librosa is unavailable or the file can't be read. Used
+    by ``analyze_audio`` so the WAV is decoded once for all librosa features.
+    """
+    out: dict[str, Optional[float]] = {"bpm": None, "energy": None, "brightness": None}
+    try:
+        import librosa
+        import numpy as np
+    except Exception:
+        return out
+    with _as_wav(audio_path) as path:
+        if path is None:
+            return out
+        try:
+            y, sr = librosa.load(path, mono=True)
+        except Exception:
+            return out
+        try:
+            tempo, _ = librosa.beat.beat_track(y=y, sr=sr, units="frames")
+            bpm = float(tempo) if not hasattr(tempo, "__len__") else float(tempo[0])
+            out["bpm"] = round(bpm, 1) if bpm > 0 else None
+        except Exception:
+            pass
+        try:
+            rms = float(np.mean(librosa.feature.rms(y=y)))
+            # Map RMS (typically ~0..0.3 for music) to a friendly 0..1 scale.
+            out["energy"] = round(min(1.0, rms / 0.25), 3)
+        except Exception:
+            pass
+        try:
+            cent = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
+            out["brightness"] = round(min(1.0, cent / (sr / 2.0)), 3)
+        except Exception:
+            pass
+    return out
 
 
 def _essentia_key(audio, es, sample_rate: int) -> Optional[tuple[Key, float]]:
@@ -215,20 +258,23 @@ def _detect_key_wav(audio_path: str, *, sample_rate: int, windows: int,
 
 
 def analyze_audio(audio_path: str) -> AudioAnalysis:
-    """Full local analysis: key (voted) + tempo. Degrades gracefully.
+    """Full local analysis: key (voted) + tempo + energy. Degrades gracefully.
 
-    Transcodes once to WAV (when needed) and reuses it for both key and tempo,
-    so webm/opus downloads analyze without a per-call ffmpeg round-trip.
+    Transcodes once to WAV (when needed) and reuses it for the essentia key
+    detection and all librosa features, so webm/opus downloads analyze without
+    repeated ffmpeg round-trips.
     """
     with _as_wav(audio_path) as path:
         if path is None:
             return AudioAnalysis(None, 0.0, "0/0", None, "unavailable")
         kr = _detect_key_wav(path, sample_rate=44100, windows=6, seed=42)
-        bpm = detect_bpm(path)
+        feats = detect_features(path)
     return AudioAnalysis(
         key=kr.key,
         key_confidence=kr.confidence,
         key_agreement=kr.agreement,
-        bpm=bpm,
+        bpm=feats.get("bpm"),
         method=kr.method,
+        energy=feats.get("energy"),
+        brightness=feats.get("brightness"),
     )
