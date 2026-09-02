@@ -110,3 +110,65 @@ def tempo_word(bpm: float | None) -> str:
     if bpm < 176:
         return "vivace (lively)"
     return "presto (very fast)"
+
+
+_CARTWHEEL_FRAMES = [
+    [
+        "   o   ",
+        "  /|\\  ",
+        "  / \\  "
+    ],
+    [
+        " \\ o / ",
+        "   |   ",
+        "  / \\  "
+    ],
+    [
+        "  _ o  ",
+        "   /\\  ",
+        "  | \\  "
+    ],
+    [
+        "   __\\ ",
+        " ___\\o ",
+        " /)  | "
+    ],
+    [
+        "  __|  ",
+        "  \\o   ",
+        "  ( \\  "
+    ],
+    [
+        "  \\ /  ",
+        "   |   ",
+        "  /o\\  "
+    ],
+    [
+        "  |__  ",
+        "   o/  ",
+        "  / )  "
+    ],
+    [
+        "  o _  ",
+        "  /\\   ",
+        "  / |  "
+    ],
+    [
+        "   o   ",
+        "  /|\\  ",
+        "  / \\  "
+    ]
+]
+
+
+def cartwheel_frame(bpm: float | None, elapsed: float) -> str:
+    """Return an animated ASCII art cartwheel frame driven by the beat."""
+    if not bpm or bpm <= 0:
+        bpm = 120.0  # default to a nice 120 BPM tempo
+    
+    beat_duration = 60.0 / bpm
+    progress = (elapsed % beat_duration) / beat_duration if beat_duration > 0 else 0.0
+    
+    # Map the progress smoothly to our frames
+    frame_idx = int(progress * len(_CARTWHEEL_FRAMES)) % len(_CARTWHEEL_FRAMES)
+    return "\n".join(_CARTWHEEL_FRAMES[frame_idx])

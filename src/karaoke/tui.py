@@ -97,8 +97,8 @@ class KaraokeTui(App):
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
     #now-playing { height: 8; border: round green; padding: 1; margin-bottom: 1; }
-    #library { height: 1fr; margin-bottom: 1; }
-    #lyrics { height: 14; border: round blue; padding: 1; }
+    #lyrics { height: 14; border: round blue; padding: 1; margin-bottom: 1; }
+    #library { height: 1fr; }
     #mood-square {
         height: 8; content-align: center middle; text-style: bold;
         border: heavy white; margin-bottom: 1;
@@ -153,8 +153,8 @@ class KaraokeTui(App):
                 yield Static(f"Logs\n{LOG_FILE}")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
-                yield DataTable(id="library", cursor_type="row")
                 yield Static("Lyrics will render here.", id="lyrics")
+                yield DataTable(id="library", cursor_type="row")
             with Vertical(id="visuals"):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("key: —\nbpm: —", id="keybpm")
@@ -275,6 +275,7 @@ class KaraokeTui(App):
             return
         song = self._selected_song()
         lyrics = self.query_one("#lyrics", Static)
+        lyrics.border_subtitle = None
         if song is None:
             lyrics.update("No songs match this filter yet.")
             self._update_mood("neutral")
@@ -444,7 +445,9 @@ class KaraokeTui(App):
             )
         else:
             self._timeline = LyricTimeline([])
-            self.query_one("#lyrics", Static).update(
+            lyrics_widget = self.query_one("#lyrics", Static)
+            lyrics_widget.border_subtitle = None
+            lyrics_widget.update(
                 f"No synced lyrics for {display_artist} - {display_title}.\n"
                 "Added to the staging/backfill queue — run karaoke-stage or "
                 "karaoke-backfill, then whitelist it in the Staging view."
@@ -470,7 +473,12 @@ class KaraokeTui(App):
         mood = mood_of(tl.lines[active][1]) if active >= 0 else "neutral"
         body = Text()
         _render_body(body, tl, elapsed, mood=mood)
-        self.query_one("#lyrics", Static).update(body)
+        
+        lyrics_widget = self.query_one("#lyrics", Static)
+        lyrics_widget.update(body)
+        
+        nxt = tl.next_time(elapsed)
+        lyrics_widget.border_subtitle = f"next in {nxt - elapsed:0.1f}s" if nxt else "(end)"
         if mood != self._sync_mood:
             self._sync_mood = mood
             self._update_mood(mood)
@@ -546,8 +554,9 @@ class KaraokeTui(App):
         arc = visuals.sentiment_arc(profile)
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)
+        cartwheel = visuals.cartwheel_frame(bpm, elapsed)
         self.query_one("#ascii-visual", Static).update(
-            f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}"
+            f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
         )
 
 
