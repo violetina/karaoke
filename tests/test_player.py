@@ -168,6 +168,61 @@ def test_active_fraction_clamps_and_last_line_uses_tail():
     assert tl.active_fraction(999.0) == 1.0
 
 
+# --- instrumental-gap handling (issue #21) ---
+
+def test_active_fraction_caps_line_duration_over_instrumental():
+    """A long riff must not stretch a line's words across the whole gap.
+
+    Regression for issue #21: 'Ren - Hi Ren' has 21.8s and 51.7s instrumental
+    gaps; the highlight used to crawl one word every ~5s during them.
+    """
+    lines = [
+        # A run of normally-paced lines establishes the song's rhythm...
+        (0.0, "one two three four five six"),
+        (3.0, "seven eight nine ten eleven twelve"),
+        (6.0, "again some more words here now"),
+        (9.0, "and yet more words follow here"),
+        # ...then a line followed by a 51.7s instrumental break.
+        (12.0, "When I was seventeen I shouted out into the void"),
+        (63.7, "after the riff"),
+    ]
+    tl = LyricTimeline(lines)
+    # The singer finishes this line in a few seconds, not 51.7s.
+    assert tl.active_fraction(18.0) == 1.0
+    # And it must not still be near the start well into the gap.
+    assert tl.active_fraction(40.0) == 1.0
+
+
+def test_active_fraction_unaffected_when_lines_are_close():
+    """Densely-timed lyrics keep exact interpolation; the cap only clamps."""
+    tl = LyricTimeline([(10.0, "a b c d"), (14.0, "next line here")])
+    assert tl.active_fraction(12.0) == pytest.approx(0.5, abs=0.01)
+
+
+def test_active_fraction_calibrates_to_slow_songs():
+    """A slow ballad's own pacing sets the cap, so it is not cut short.
+
+    NT lines are 1 word each spaced 10s apart: that IS this song's rhythm,
+    so 15s must still read as halfway through line 0.
+    """
+    tl = LyricTimeline([(t, "x") for t in NT])
+    assert tl.active_fraction(15.0) == pytest.approx(0.5)
+
+
+def test_active_fraction_cap_is_overridable():
+    tl = LyricTimeline([(0.0, "one two"), (100.0, "next")])
+    assert tl.active_fraction(4.0, max_line_s=10.0) < 1.0
+    assert tl.active_fraction(11.0, max_line_s=10.0) == 1.0
+
+
+def test_line_cap_never_exceeds_hard_ceiling():
+    """Even a pathologically slow song cannot hold one line forever."""
+    lines = [(0.0, "a"), (600.0, "b")]
+    tl = LyricTimeline(lines)
+    assert tl.active_fraction(120.0) == 1.0
+
+
+
 # --- active_word_index (per-word purple highlight) ---
 
 def test_active_word_index_spreads_words():

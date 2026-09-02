@@ -10,10 +10,23 @@ import time
 import select
 import subprocess
 from dataclasses import dataclass, field
+from statistics import median
 from typing import Any, Optional
 
 from .lyrics import Lyrics, fetch_lrclib, parse_lrc
 from .identify import SongRef
+
+# Word-highlight pacing. LRCLIB gives per-LINE timestamps only, so a line's
+# words are interpolated across its duration. Without an upper bound, an
+# instrumental break after a line stretches that interpolation across the whole
+# break (issue #21). Songs are calibrated individually (see
+# LyricTimeline.line_pace); these bound the result.
+DEFAULT_WORD_S = 0.7    # fallback s/word when a song offers no usable sample
+MIN_LINE_S = 1.5        # floor: even a one-word line stays visible briefly
+MAX_LINE_S = 12.0       # ceiling: no single line holds the highlight longer
+_PACE_SAMPLE_MAX_S = 15.0  # gaps longer than this are breaks, not sung lines
+# A gap at least this long counts as an instrumental break for `in_gap`.
+GAP_MIN_S = 6.0
 
 # Active-line background per detected mood (see sentiment.mood_of). Word highlight
 # stays magenta on top; neutral keeps the original blue.
@@ -39,6 +52,12 @@ class LyricTimeline:
     """Ordered (time_seconds, text) lines with active-line lookup."""
 
     lines: list[tuple[float, str]] = field(default_factory=list)
+    # Explicit end times per line index (from empty LRC timestamps / learned
+    # timings). Overrides the pace-derived cap when present.
+    ends: dict[int, float] = field(default_factory=dict)
+    # Real per-word start times per line index (Enhanced LRC / captions).
+    word_times: dict[int, list[float]] = field(default_factory=dict)
+    _pace: Optional[float] = field(default=None, repr=False, compare=False)
 
     @property
     def times(self) -> list[float]:
@@ -66,19 +85,69 @@ class LyricTimeline:
                 return t
         return None
 
-    def active_fraction(self, elapsed: float, tail: float = 4.0) -> float:
+    def line_pace(self) -> float:
+        """Median seconds-per-word for this song, from its own normal lines.
+
+        Songs differ a lot (measured across the local cache: ~0.55 s/word for
+        Tom Waits up to ~1.16 s/word for slower material), so the pacing used
+        to bound a line is calibrated per song rather than hard-coded. Lines
+        followed by an unusually long gap are excluded, since those gaps are
+        exactly the instrumental breaks being corrected for.
+        """
+        if self._pace is not None:
+            return self._pace
+        ratios: list[float] = []
+        for i in range(len(self.lines) - 1):
+            gap = self.lines[i + 1][0] - self.lines[i][0]
+            words = len(self.lines[i][1].split())
+            if words and 0.0 < gap <= _PACE_SAMPLE_MAX_S:
+                ratios.append(gap / words)
+        self._pace = median(ratios) if ratios else DEFAULT_WORD_S
+        return self._pace
+
+    def line_end(self, index: int, tail: float = 4.0,
+                 max_line_s: Optional[float] = None) -> float:
+        """Time at which line `index` stops being sung.
+
+        Normally the next line's timestamp, but bounded by how long the line
+        could plausibly take at this song's pace. Without that bound, an
+        instrumental break after a line stretches its words across the whole
+        gap (issue #21).
+        """
+        start, text = self.lines[index]
+        nxt = (
+            self.lines[index + 1][0]
+            if index + 1 < len(self.lines)
+            else start + tail
+        )
+        # An explicitly recorded end wins over any heuristic.
+        explicit = self.ends.get(index)
+        if explicit is not None and explicit > start:
+            return min(nxt, explicit)
+        if max_line_s is not None:
+            cap = max_line_s
+        else:
+            words = len(text.split()) or 1
+            cap = min(MAX_LINE_S, max(MIN_LINE_S, words * self.line_pace()))
+        return min(nxt, start + cap)
+
+    def active_fraction(self, elapsed: float, tail: float = 4.0,
+                        max_line_s: Optional[float] = None) -> float:
         """Progress (0..1) through the currently-active line.
 
         Used to interpolate a word-level highlight: LRCLIB gives only per-LINE
         timestamps, so we spread the line's on-screen duration across its words.
         Returns 0.0 in the intro (no active line). For the last line (no next
         timestamp) assumes a `tail`-second duration.
+
+        The line's duration is capped (see `line_end`) so a following
+        instrumental break does not drag the word highlight across it.
         """
         a = self.active_index(elapsed)
         if a < 0:
             return 0.0
         start = self.lines[a][0]
-        end = self.lines[a + 1][0] if a + 1 < len(self.lines) else start + tail
+        end = self.line_end(a, tail=tail, max_line_s=max_line_s)
         if end <= start:
             return 0.0
         return max(0.0, min(1.0, (elapsed - start) / (end - start)))
