@@ -7,7 +7,12 @@ from typing import Any, Iterable, Optional
 
 import requests
 
-from .caption_sync import CaptionAvailability, json3_to_lrc, probe_captions
+from .caption_sync import (
+    CaptionAvailability,
+    json3_to_enhanced_lrc,
+    json3_to_lrc,
+    probe_captions,
+)
 from .lyrics import Lyrics, parse_lrc
 from .staging import stage_lyrics
 from .youtube import fetch_metadata, parse_youtube_title
@@ -150,9 +155,15 @@ def stage_youtube_captions(
         )
 
     synced = ""
+    enhanced = False
     if track.ext == "json3":
         try:
-            synced = json3_to_lrc(response.text)
+            # json3 carries per-word offsets: prefer Enhanced LRC so the
+            # renderer gets real word timings instead of interpolating.
+            synced = json3_to_enhanced_lrc(response.text)
+            enhanced = bool(synced)
+            if not synced:
+                synced = json3_to_lrc(response.text)
         except ValueError:
             synced = ""
 
@@ -170,21 +181,32 @@ def stage_youtube_captions(
         raise RuntimeError("caption track was empty after cleanup")
 
     sync_tag = "synced" if synced else "plain"
+    if enhanced:
+        sync_tag = "enhanced"
     kind = f"youtube_caption_{track.kind}_{track.language}_{sync_tag}"
     lyrics.source = kind
 
-    # Manual captions are usually the real lyrics; synced timing adds value.
+    # Manual captions are usually the real lyrics; synced timing adds value,
+    # and real per-word timing adds a little more.
     confidence = 0.65 if track.kind == "manual" else 0.45
     if synced:
         confidence += 0.1
+    if enhanced:
+        confidence += 0.05
+
+    if enhanced:
+        detail = "Enhanced LRC with per-word timings"
+    elif synced:
+        detail = "synced LRC from cue timings"
+    else:
+        detail = "plain text"
 
     staged_id = stage_lyrics(
         artist, title, lyrics,
         duration=meta.get("duration"), source_kind=kind, source_url=url,
         confidence=round(confidence, 2),
         notes=(
-            f"Staged from {track.kind} YouTube captions "
-            f"({'synced LRC from cue timings' if synced else 'plain text'}); "
+            f"Staged from {track.kind} YouTube captions ({detail}); "
             "review before approving."
         ),
     )

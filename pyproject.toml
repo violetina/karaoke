@@ -41,6 +41,7 @@ karaoke-ctrl-api = "karaoke.ctrl_api:main"
 karaoke-vector-index = "karaoke.vector_index:vector_index_main"
 karaoke-tui = "karaoke.cli:tui_main"
 karaoke-analyze = "karaoke.cli:analyze_main"
+karaoke-upgrade-timings = "karaoke.upgrade_timings:upgrade_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

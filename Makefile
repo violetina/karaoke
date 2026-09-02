@@ -26,6 +26,7 @@ K8S_NAMESPACE ?= karaoke
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
         install-audio analyze api ctrl-api \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
+        upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache vector-index vector-index-dry-run
 
 help: ## Show available targets
@@ -168,6 +169,12 @@ k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 
 index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
+
+upgrade-timings-dry-run: ## Preview which cached tracks can gain word-level timing
+	$(PYTHON) -m karaoke.upgrade_timings --dry-run
+
+upgrade-timings: ## Upgrade cached lyrics to word-level timing via YouTube captions
+	$(PYTHON) -m karaoke.upgrade_timings
 
 vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without writing
 	$(PYTHON) -m karaoke.vector_index --dry-run --no-embed --lines
