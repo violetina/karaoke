@@ -558,3 +558,117 @@ def browse_main(argv: Optional[list[str]] = None) -> int:
     return _browse_main()
 
 
+def tui_main(argv: Optional[list[str]] = None) -> int:
+    """Run the player-aware `karaoke-tui` interface."""
+    from .tui import tui_main as _tui_main
+    return _tui_main()
+
+
+def analyze_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-analyze` CLI: detect + store key/BPM, verify keys.
+
+    Examples:
+      karaoke-analyze --file song.webm --artist Ren --title "Hi Ren"
+      karaoke-analyze --verify --artist Ren --title "Hi Ren" --key "C major"
+      karaoke-analyze --list
+    """
+    from .logger import stream_logs
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-analyze",
+        description="Detect/store musical key + tempo and verify keys online",
+    )
+    ap.add_argument("--file", "-f", help="local audio file to analyse")
+    ap.add_argument("--artist", default="", help="track artist (for DB storage)")
+    ap.add_argument("--title", default="", help="track title (for DB storage)")
+    ap.add_argument("--verify", action="store_true",
+                    help="reconcile the stored detected key with --key")
+    ap.add_argument("--key", help="reference/online key for --verify (e.g. 'C major')")
+    ap.add_argument("--reference-source", default="online",
+                    help="where --key came from (default: online)")
+    ap.add_argument("--list", action="store_true", help="list stored analyses")
+    ap.add_argument("--log", default="info",
+                    help="console log level: off|err|info|full (default info)")
+    args = ap.parse_args(argv)
+
+    stream_logs(args.log)
+
+    from . import localcache, track_analysis
+
+    if args.list:
+        with localcache.connect() as conn:
+            track_analysis.ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT t.artist, t.title, a.detected_key, a.reference_key,
+                       a.resolved_key, a.key_relation, a.bpm, a.key_confidence
+                FROM track_analysis a JOIN tracks t ON t.track_id = a.track_id
+                ORDER BY t.artist, t.title
+                """
+            ).fetchall()
+        if not rows:
+            print("no analyses stored yet")
+            return 0
+        for r in rows:
+            print(
+                f"{r['artist']} - {r['title']}: "
+                f"detected={r['detected_key'] or '?'} "
+                f"ref={r['reference_key'] or '-'} "
+                f"resolved={r['resolved_key'] or '?'} "
+                f"[{r['key_relation'] or '-'}] "
+                f"bpm={r['bpm'] or '?'} conf={r['key_confidence'] or 0:.0%}"
+            )
+        return 0
+
+    if args.verify:
+        if not args.key or not (args.artist and args.title):
+            ap.error("--verify needs --key, --artist and --title")
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is None:
+                print(f"track not found: {args.artist} - {args.title}", file=sys.stderr)
+                return 1
+            rec = track_analysis.verify_key(
+                track_id, args.key, reference_src=args.reference_source, conn=conn
+            )
+        print(rec.note)
+        print(f"relation={rec.relation} agree={rec.agree} "
+              f"resolved={rec.resolved.name if rec.resolved else '?'}")
+        return 0
+
+    if not args.file:
+        ap.error("give --file to analyse, or use --verify / --list")
+
+    from .analyze import analyze_audio
+
+    print(f"Analysing {args.file} …", file=sys.stderr)
+    result = analyze_audio(args.file)
+    key = result.key
+    print(f"key: {key.name if key else 'unknown'} "
+          f"(conf {result.key_confidence:.0%}, {result.key_agreement}, "
+          f"{result.method})")
+    print(f"bpm: {result.bpm if result.bpm else 'unknown'}")
+
+    if args.artist and args.title:
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is None:
+                from .lyrics import Lyrics
+                localcache.add_track_and_lyrics(args.artist, args.title, Lyrics(),
+                                                conn=conn)
+                track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is not None:
+                track_analysis.save_detected(
+                    track_id,
+                    detected_key=key,
+                    key_confidence=result.key_confidence,
+                    key_agreement=result.key_agreement,
+                    bpm=result.bpm,
+                    method=result.method,
+                    analyzer_version=result.version,
+                    conn=conn,
+                )
+                print(f"stored analysis for track_id={track_id}", file=sys.stderr)
+    return 0
+
+

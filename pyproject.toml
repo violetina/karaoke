@@ -39,6 +39,8 @@ karaoke-browse = "karaoke.cli:browse_main"
 karaoke-api = "karaoke.api:main"
 karaoke-ctrl-api = "karaoke.ctrl_api:main"
 karaoke-vector-index = "karaoke.vector_index:vector_index_main"
+karaoke-tui = "karaoke.cli:tui_main"
+karaoke-analyze = "karaoke.cli:analyze_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

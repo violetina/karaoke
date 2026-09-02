@@ -6,6 +6,7 @@ players, browsers, VLC and Spotify.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
@@ -29,23 +30,82 @@ def _clean_piece(text: str) -> str:
     return (text or "").strip().strip('"\u201c\u201d\u2018\u2019')
 
 
+# Site suffixes browsers append to the tab title, e.g. " - YouTube".
+_SITE_SUFFIX = re.compile(
+    r"\s*[-–—|]\s*(?:youtube(?:\s+music)?|vimeo|soundcloud|dailymotion|"
+    r"bandcamp)\s*$",
+    re.IGNORECASE,
+)
+
+# Video-descriptor parentheticals/brackets that aren't part of the song title,
+# e.g. "(Official Video)", "[Official Music Video]", "(Lyric Video)", "(HD)".
+_VIDEO_DESCRIPTOR = re.compile(
+    r"""\s*[\(\[]\s*
+        (?:
+            official\s+(?:music\s+)?(?:video|audio|lyric[s]?\s*video|visualizer|
+                                     hd\s+video)
+            | official\s+(?:audio|video|visualizer|lyrics?)
+            | (?:full\s+)?(?:music\s+)?video
+            | lyrics?(?:\s+video)?
+            | visuali[sz]er
+            | audio(?:\s+only)?
+            | m/?v
+            | hd | 4k | hq
+            | color\s+coded\s+lyrics?[^\)\]]*
+        )
+        \s*[\)\]]\s*""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Trailing view-count / metadata fragments some browsers append after a bullet.
+_TRAILING_BULLET = re.compile(r"\s*[•·]\s*.*$")
+
+
+def clean_browser_title(title: str) -> str:
+    """Strip browser/video cruft from an MPRIS tab title.
+
+    Browsers report a tab title, not clean metadata: e.g.
+    ``"Jain - Come (Official Video) - YouTube"``. This removes the site suffix
+    (" - YouTube"), video-descriptor parentheticals ("(Official Video)",
+    "[Lyric Video]", "(HD)"), and trailing bullet fragments, so downstream
+    artist/title parsing and lyric lookup have a chance. Applied repeatedly so
+    stacked descriptors collapse. Returns the input unchanged if nothing matches.
+    """
+    out = _clean_piece(title)
+    if not out:
+        return ""
+    prev = None
+    while out and out != prev:
+        prev = out
+        out = _SITE_SUFFIX.sub("", out).strip()
+        out = _TRAILING_BULLET.sub("", out).strip()
+        out = _VIDEO_DESCRIPTOR.sub(" ", out).strip()
+        out = re.sub(r"\s{2,}", " ", out).strip()
+    # Never return empty from over-eager stripping; fall back to the original.
+    return out or _clean_piece(title)
+
+
 def normalize_player_track(artist: str, title: str, album: str = "", url: str = "") -> SongRef:
     """Normalize noisy MPRIS metadata into a SongRef.
 
     Some players (notably VLC for files with imperfect tags) expose artist in
     both artist and title, e.g. artist="Tom Waits" and title='Tom Waits - "Watch
     Her Disappear"'. Strip that duplicated artist before doing lyric lookup.
+
+    Browser tabs report a page title rather than clean metadata, so the title is
+    first run through ``clean_browser_title`` to drop "- YouTube" and
+    "(Official Video)"-style cruft.
     """
     a = _clean_piece(artist)
-    t = _clean_piece(title)
+    t = clean_browser_title(title)
     if a and t.casefold().startswith((a + " - ").casefold()):
         t = _clean_piece(t[len(a) + 3:])
     elif a and t.casefold().startswith((a + " – ").casefold()):
         t = _clean_piece(t[len(a) + 3:])
     elif a and t.casefold().startswith((a + " — ").casefold()):
         t = _clean_piece(t[len(a) + 3:])
-    elif not a and " - " in t:
-        parsed = parse_query(t)
+    elif not a and (" - " in t or " – " in t or " — " in t):
+        parsed = parse_query(t.replace(" – ", " - ").replace(" — ", " - "))
         a, t = parsed.artist, parsed.title
     return SongRef(artist=a, title=t, album=_clean_piece(album), url=url, source="player")
 
@@ -89,3 +149,58 @@ def current_songref() -> Optional[SongRef]:
     if not ref.title:
         return None
     return ref
+
+
+def _run(cmd: list[str], *, timeout: float = 5.0) -> Optional[str]:
+    """Run a playerctl command, returning stdout or None on failure."""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=True
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    return proc.stdout.strip()
+
+
+def _base_cmd(player: str = "") -> list[str]:
+    cmd = ["playerctl"]
+    if player:
+        cmd += ["--player", player]
+    return cmd
+
+
+def position(player: str = "") -> Optional[float]:
+    """Current playback position in seconds for the (targeted) player."""
+    out = _run(_base_cmd(player) + ["position"])
+    if out is None:
+        return None
+    try:
+        return float(out)
+    except ValueError:
+        return None
+
+
+def status(player: str = "") -> Optional[str]:
+    """Playback status string (Playing/Paused/Stopped) or None."""
+    return _run(_base_cmd(player) + ["status"])
+
+
+def play_pause(player: str = "") -> bool:
+    """Toggle play/pause on the (targeted) player. Returns success."""
+    return _run(_base_cmd(player) + ["play-pause"]) is not None
+
+
+def next_track(player: str = "") -> bool:
+    """Skip to the next track. Returns success."""
+    return _run(_base_cmd(player) + ["next"]) is not None
+
+
+def previous_track(player: str = "") -> bool:
+    """Skip to the previous track. Returns success."""
+    return _run(_base_cmd(player) + ["previous"]) is not None
+
+
+def seek(offset_s: float, player: str = "") -> bool:
+    """Seek by a relative offset (seconds; may be negative). Returns success."""
+    arg = f"{offset_s:+g}" if offset_s < 0 else f"{offset_s:g}+"
+    return _run(_base_cmd(player) + ["position", arg]) is not None

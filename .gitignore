@@ -19,3 +19,4 @@ docs_confluence/
 .DS_Store
 *.webm
 .venv
+.venv-audio/
