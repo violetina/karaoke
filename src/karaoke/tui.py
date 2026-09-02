@@ -436,11 +436,14 @@ class KaraokeTui(App):
                     log.info("no lyrics; queued gap: %s - %s", det.artist, det.title)
         display_artist = artist or det.artist
         display_title = title or det.title
+        current_song = {"artist": display_artist, "title": display_title}
+        keybpm_line = self._format_keybpm_line(current_song)
         if lyrics is not None and lyrics.has_synced:
             self._timeline = timeline_from_lyrics(lyrics)
             now.update(
                 f"♪ {display_artist} - {display_title}\n"
                 f"mode: {det.mode}  player: {det.player or '—'}\n"
+                f"{keybpm_line}\n"
                 f"synced lyrics · {lyrics.source}"
             )
         else:
@@ -455,6 +458,7 @@ class KaraokeTui(App):
             now.update(
                 f"♪ {display_artist} - {display_title}\n"
                 f"mode: {det.mode}  player: {det.player or '—'}\n"
+                f"{keybpm_line}\n"
                 "no lyrics — queued for staging"
             )
 
@@ -542,6 +546,16 @@ class KaraokeTui(App):
                 return track_analysis.get_analysis(int(resolved), conn)
         except Exception:
             return None
+
+    def _format_keybpm_line(self, song: SongMapping | None) -> str:
+        """Compact key/BPM line for the now-playing panel."""
+        analysis = self._lookup_analysis(song) if song else None
+        if analysis is None:
+            return "key: not analysed  bpm: —"
+        key = analysis.resolved_key or analysis.detected_key
+        key_text = key.name if key else "unknown"
+        bpm_text = f"{analysis.bpm:.0f}" if analysis.bpm else "—"
+        return f"key: {key_text}  bpm: {bpm_text}"
 
     def _render_visuals(self, song: SongMapping | None, preview: str,
                         elapsed: float) -> None:
