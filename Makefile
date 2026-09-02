@@ -15,7 +15,7 @@ MAKE2GRAPH_REF ?= master
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
-        test test-audio mic-test stats clean clean-tools browse browse-log \
+        test test-audio mic-test stats clean clean-tools browse tui browse-log \
         index-youtube-cache vector-index vector-index-dry-run
 
 help: ## Show available targets
@@ -105,6 +105,9 @@ clean: ## Remove build artifacts
 	
 browse: ## Launch the interactive song browser TUI
 	$(PYTHON) -m karaoke.browse
+
+tui: ## Launch the clean karaoke control-surface TUI prototype
+	$(PYTHON) -m karaoke.tui
 
 browse-log: ## Follow TUI/open debug logs
 	tail -f "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/karaoke.log" "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/xdg-open.stderr.log"
