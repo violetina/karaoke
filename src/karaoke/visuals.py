@@ -161,14 +161,33 @@ _CARTWHEEL_FRAMES = [
 ]
 
 
-def cartwheel_frame(bpm: float | None, elapsed: float) -> str:
-    """Return an animated ASCII art cartwheel frame driven by the beat."""
+def cartwheel_frame(bpm: float | None, elapsed: float, max_width: int = 24) -> str:
+    """Return an animated ASCII art cartwheel frame driven by the beat.
+
+    The figure rolls from left to right over a 4-beat cycle.
+    """
     if not bpm or bpm <= 0:
         bpm = 120.0  # default to a nice 120 BPM tempo
     
     beat_duration = 60.0 / bpm
-    progress = (elapsed % beat_duration) / beat_duration if beat_duration > 0 else 0.0
+    if beat_duration <= 0:
+        beat_duration = 0.5
     
-    # Map the progress smoothly to our frames
+    # Progress through a single beat (drives the 9-frame cartwheel rotation)
+    progress = (elapsed % beat_duration) / beat_duration
     frame_idx = int(progress * len(_CARTWHEEL_FRAMES)) % len(_CARTWHEEL_FRAMES)
-    return "\n".join(_CARTWHEEL_FRAMES[frame_idx])
+    
+    # Progress through a 4-beat cycle (drives the left-to-right travel)
+    cycle_duration = 4.0 * beat_duration
+    cycle_progress = (elapsed % cycle_duration) / cycle_duration
+    
+    # Calculate horizontal displacement (padding)
+    # The figure itself is 7 chars wide. With max_width=24, max padding is 24 - 7 = 17.
+    figure_width = 7
+    max_padding = max(0, max_width - figure_width)
+    padding_size = int(cycle_progress * max_padding)
+    padding = " " * padding_size
+    
+    # Prepend padding to each line of the selected frame
+    lines = [padding + line for line in _CARTWHEEL_FRAMES[frame_idx]]
+    return "\n".join(lines)
