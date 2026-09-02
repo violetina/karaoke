@@ -45,18 +45,28 @@ def main():
         try:
             result = analyze_audio(str(file_path))
             key = result.key
-            track_analysis.save_detected(
-                track_id,
-                detected_key=key,
-                key_confidence=result.key_confidence,
-                key_agreement=result.key_agreement,
-                bpm=result.bpm,
-                method=result.method,
-                energy=result.energy,
-                brightness=result.brightness,
-                analyzer_version=result.version,
-                conn=conn,
-            )
+            
+            kwargs = {
+                "detected_key": key,
+                "key_confidence": result.key_confidence,
+                "key_agreement": result.key_agreement,
+                "bpm": result.bpm,
+                "method": result.method,
+                "analyzer_version": result.version,
+                "conn": conn,
+            }
+            if hasattr(result, "energy"):
+                kwargs["energy"] = getattr(result, "energy", None)
+            if hasattr(result, "brightness"):
+                kwargs["brightness"] = getattr(result, "brightness", None)
+                
+            import inspect
+            sig = inspect.signature(track_analysis.save_detected)
+            for k in list(kwargs.keys()):
+                if k not in sig.parameters:
+                    del kwargs[k]
+                    
+            track_analysis.save_detected(track_id, **kwargs)
             print(f"  -> key: {key.name if key else 'unknown'}, bpm: {result.bpm if result.bpm else 'unknown'}")
             analyzed += 1
         except Exception as e:
