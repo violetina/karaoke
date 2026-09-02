@@ -131,6 +131,38 @@ class LyricTimeline:
             cap = min(MAX_LINE_S, max(MIN_LINE_S, words * self.line_pace()))
         return min(nxt, start + cap)
 
+    def in_gap(self, elapsed: float, min_gap: float = GAP_MIN_S) -> bool:
+        """True when `elapsed` falls in an instrumental break.
+
+        A break is the stretch between the (capped) end of the active line and
+        the start of the next one, when that stretch is at least `min_gap`
+        seconds. Ordinary line spacing is excluded so the rest marker does not
+        flicker between normal lines.
+        """
+        a = self.active_index(elapsed)
+        if a < 0 or a + 1 >= len(self.lines):
+            return False
+        nxt = self.lines[a + 1][0]
+        end = self.line_end(a)
+        if nxt - end < min_gap:
+            return False
+        return end <= elapsed < nxt
+
+    def gap_progress(self, elapsed: float, min_gap: float = GAP_MIN_S) -> float:
+        """Progress (0..1) through the current instrumental break.
+
+        Returns 0.0 when not in a break. Lets the UI show how long is left
+        before the next line arrives.
+        """
+        if not self.in_gap(elapsed, min_gap=min_gap):
+            return 0.0
+        a = self.active_index(elapsed)
+        end = self.line_end(a)
+        nxt = self.lines[a + 1][0]
+        if nxt <= end:
+            return 0.0
+        return max(0.0, min(1.0, (elapsed - end) / (nxt - end)))
+
     def active_fraction(self, elapsed: float, tail: float = 4.0,
                         max_line_s: Optional[float] = None) -> float:
         """Progress (0..1) through the currently-active line.
@@ -390,21 +422,43 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
         body.append(" " if j < len(words) - 1 else "\n", style=base)
 
 
+def _gap_marker(progress: float, width: int = 24) -> str:
+    """Rest indicator shown during an instrumental break.
+
+    A musical note plus a progress bar counting down to the next lyric line,
+    so it is obvious the song is playing and nothing is meant to be sung yet.
+    """
+    filled = max(0, min(width, int(round(progress * width))))
+    return "♪ " + "─" * filled + "•" + " " * (width - filled)
+
+
 def _render_body(body, tl: "LyricTimeline", elapsed: float,
                  *, before: int = 3, after: int = 5, mood: str = "neutral") -> None:
     """Fill a Rich Text `body` with the window around the active line.
 
     `mood` tints the active line's background (from sentiment.mood_of on the
     active line's text); pass "neutral" to keep the original blue.
+
+    During an instrumental break the active line is dimmed and a rest marker
+    is shown, rather than leaving a stale line highlighted as if it were still
+    being sung.
     """
     active = tl.active_index(elapsed)
     frac = tl.active_fraction(elapsed)
+    in_gap = tl.in_gap(elapsed)
     lo = max(0, active - before)
     hi = min(len(tl.lines), active + after)
     for i in range(lo, hi):
         line = tl.lines[i][1]
         if i == active:
-            _append_lyric_line(body, line, kind="active", frac=frac, mood=mood)
+            if in_gap:
+                # Break in progress: the line is finished, so show it as past
+                # and mark the rest until the next line.
+                _append_lyric_line(body, line, kind="past")
+                body.append(_gap_marker(tl.gap_progress(elapsed)) + "\n",
+                            style="cyan")
+            else:
+                _append_lyric_line(body, line, kind="active", frac=frac, mood=mood)
         elif i < active:
             _append_lyric_line(body, line, kind="past")
         else:

@@ -222,6 +222,76 @@ def test_line_cap_never_exceeds_hard_ceiling():
     assert tl.active_fraction(120.0) == 1.0
 
 
+# --- in_gap (instrumental rest marker) ---
+
+def _gap_timeline():
+    return LyricTimeline([
+        (0.0, "one two three four five six"),
+        (3.0, "seven eight nine ten eleven twelve"),
+        (6.0, "again some more words here now"),
+        (9.0, "and yet more words follow here"),
+        (12.0, "When I was seventeen I shouted out into the void"),
+        (63.7, "after the riff"),
+    ])
+
+
+def test_in_gap_false_while_line_is_being_sung():
+    assert _gap_timeline().in_gap(13.0) is False
+
+
+def test_in_gap_true_during_instrumental_break():
+    assert _gap_timeline().in_gap(40.0) is True
+
+
+def test_in_gap_false_once_next_line_starts():
+    assert _gap_timeline().in_gap(64.0) is False
+
+
+def test_in_gap_false_for_short_pauses():
+    """Ordinary line spacing must not flicker the rest marker."""
+    tl = LyricTimeline([(0.0, "a b c"), (4.0, "d e f"), (8.0, "g h i")])
+    assert tl.in_gap(3.5) is False
+
+
+def test_in_gap_false_in_intro():
+    assert _gap_timeline().in_gap(-1.0) is False
+
+
+def test_in_gap_false_after_last_line():
+    tl = LyricTimeline([(0.0, "only line")])
+    assert tl.in_gap(500.0) is False
+
+
+def test_gap_progress_runs_zero_to_one():
+    tl = _gap_timeline()
+    assert tl.gap_progress(13.0) == 0.0          # not in a gap yet
+    mid = tl.gap_progress(40.0)
+    assert 0.0 < mid < 1.0
+    assert tl.gap_progress(63.6) == pytest.approx(1.0, abs=0.05)
+
+
+def test_gap_marker_shows_note_and_progress():
+    from karaoke.player import _gap_marker
+
+    assert _gap_marker(0.0).startswith("♪ ")
+    early, late = _gap_marker(0.1), _gap_marker(0.9)
+    # The bar fills as the break elapses.
+    assert early.index("•") < late.index("•")
+
+
+def test_render_body_marks_gap_instead_of_stale_highlight():
+    """During a riff the finished line must not stay actively highlighted."""
+    from rich.text import Text
+    from karaoke.player import _render_body
+
+    tl = _gap_timeline()
+    body = Text()
+    _render_body(body, tl, 40.0)
+    assert "♪" in body.plain
+
+
+
+
 
 # --- active_word_index (per-word purple highlight) ---
 
