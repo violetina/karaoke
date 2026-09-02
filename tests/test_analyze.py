@@ -22,3 +22,15 @@ def test_key_result_ambiguous_flag():
     low = analyze.KeyResult(Key(0, "major"), 0.3, "2/6", None, "x")
     assert high.ambiguous is False
     assert low.ambiguous is True
+
+
+def test_detect_features_missing_file_degrades():
+    feats = analyze.detect_features("/nonexistent/song.webm")
+    assert feats == {"bpm": None, "energy": None, "brightness": None}
+
+
+def test_analyze_audio_has_energy_fields():
+    # On a missing file everything is None, but the fields must exist.
+    result = analyze.analyze_audio("/nonexistent/song.webm")
+    assert result.energy is None
+    assert result.brightness is None
