@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: karaoke-data
+  namespace: karaoke
+  labels:
+    app.kubernetes.io/name: karaoke-api
+    app.kubernetes.io/part-of: karaoke
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # kind ships the local-path provisioner as the default StorageClass.
+  resources:
+    requests:
+      storage: 1Gi

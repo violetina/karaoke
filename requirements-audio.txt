@@ -1,0 +1,8 @@
+# Optional heavy DSP stack for local key + tempo analysis (karaoke.analyze).
+# Isolated from the main requirements: install into a sibling venv with
+#   make install-audio
+# essentia only ships a dev/beta wheel for Python 3.14 — pin it exactly.
+# ffmpeg is a system dependency (not pip-installable).
+essentia==2.1b6.dev1438
+librosa>=0.10
+soundfile>=0.12

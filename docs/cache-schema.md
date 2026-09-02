@@ -1,12 +1,11 @@
 # Cache schema
 
-Karaoke has two caches:
+Karaoke now has one operational database and one optional derived index:
 
-- an **OpenSearch** index (`tracks`, on the kind cluster) for search + rich cache, documented here;
-- a **local SQLite** cache (cluster-independent) for offline lyrics + stats, documented in
-  [Local cache and stats](local-cache-and-stats.md).
+- **SQLite** (`~/.local/share/karaoke/karaoke.db`) is the source of truth for playback, source URLs, lyrics cache, stats, and backfill gaps.
+- **OpenSearch** (`tracks`, on the kind cluster) is a rebuildable derived index for semantic/vector search and future training features.
 
-This page covers the OpenSearch index, used for both search and lyrics cache entries.
+This page covers the OpenSearch index. For the SQLite schema see [Local cache and stats](local-cache-and-stats.md). For the re-index/training direction see [Vector search and training plan](vector-search-plan.md).
 
 The same schema supports:
 

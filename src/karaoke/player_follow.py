@@ -44,7 +44,7 @@ def play_playerctl_follow(use_cache: bool = True):  # pragma: no cover - interac
 
             ref = normalize_player_track("", line)
             console.print(f"[bold cyan]Track changed:[/bold cyan] {ref.artist} - {ref.title}")
-            ly = get_synced(ref.artist, ref.title, use_cache=use_cache, stats_mode="player")
+            ly = get_synced(ref, use_cache=use_cache, stats_mode="player")
             tl = timeline_from_lyrics(ly)
 
             if not tl.lines:

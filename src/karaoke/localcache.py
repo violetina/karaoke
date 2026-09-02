@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS lyrics (
     plain_lyrics    TEXT,
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
+
+CREATE TABLE IF NOT EXISTS lyric_gaps (
+    gap_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist          TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending | processed | failed
+    created_at      REAL NOT NULL,
+    processed_at    REAL,
+    UNIQUE(artist, title)
+);
 """
 
 _SCHEMA = """
@@ -65,6 +75,21 @@ CREATE INDEX IF NOT EXISTS idx_play_events_ts ON play_events (ts);
 CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events (artist, title);
 """
 
+
+def _key(artist: str, title: str) -> str:
+    """Stable case-insensitive artist/title cache key for staging metadata."""
+    return f"{artist.strip().casefold()}\0{title.strip().casefold()}"
+
+
+def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
+    """Log a song that is missing lyrics."""
+    conn.execute(
+        "INSERT OR IGNORE INTO lyric_gaps (artist, title, created_at) VALUES (?, ?, ?)",
+        (artist, title, time.time())
+    )
+    conn.commit()
+
+
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and lazily initialize) the local SQLite database."""
     path = Path(db_path or settings.local_db)
@@ -77,14 +102,41 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional[int]:
-    """Find a track by artist and title, returning its ID."""
+    """Find a track by artist and title, returning its ID.
+
+    Player metadata can vary in case, so cache lookup is case-insensitive while
+    preserving the originally-stored display spelling.
+    """
     cur = conn.cursor()
     cur.execute(
-        "SELECT track_id FROM tracks WHERE artist = ? AND title = ?",
-        (artist, title)
+        """
+        SELECT track_id FROM tracks
+        WHERE lower(artist) = lower(?) AND lower(title) = lower(?)
+        ORDER BY track_id DESC
+        LIMIT 1
+        """,
+        (artist, title),
     )
     row = cur.fetchone()
     return row["track_id"] if row else None
+
+
+def find_track_by_url(url: str, conn: sqlite3.Connection) -> Optional[tuple[int, str, str]]:
+    """Find a track by source URL, returning (track_id, artist, title)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT t.track_id, t.artist, t.title
+        FROM tracks t JOIN sources s ON t.track_id = s.track_id
+        WHERE s.url = ?
+        """,
+        (url,)
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return row["track_id"], row["artist"], row["title"]
+
 
 def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[Lyrics]:
     """Get approved lyrics for a given track ID."""
@@ -109,33 +161,209 @@ def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[
         lines=parse_lrc(synced) if synced else [],
     )
 
+def get_cached_lyrics(
+    artist: str,
+    title: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Lyrics]:
+    """Return approved cached lyrics for artist/title, or None on miss.
+
+    Compatibility API kept for older code/tests while the database now stores
+    tracks and lyrics in separate tables.
+    """
+    own = conn is None
+    c = conn or connect()
+    try:
+        track_id = find_track_id(artist, title, c)
+        if not track_id:
+            return None
+        return get_lyrics_by_track_id(track_id, c)
+    finally:
+        if own:
+            c.close()
+
+
+def put_cached_lyrics(
+    artist: str,
+    title: str,
+    lyrics: Lyrics,
+    *,
+    album: str = "",
+    duration: Optional[float] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Upsert approved lyrics for artist/title.
+
+    Empty lyrics are ignored. Existing approved lyrics for the track are replaced
+    so a Whisper/synced result can upgrade an earlier plain LRCLIB/caption entry.
+    """
+    if not (lyrics.synced_raw or lyrics.plain):
+        return
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        track_id = find_track_id(artist, title, c)
+        if track_id is None:
+            cur.execute(
+                "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+                (artist, title, album, duration),
+            )
+            track_id = cur.lastrowid
+            if track_id is None:
+                return
+        else:
+            cur.execute(
+                """
+                UPDATE tracks
+                SET album = COALESCE(NULLIF(?, ''), album),
+                    duration = COALESCE(?, duration)
+                WHERE track_id = ?
+                """,
+                (album, duration, track_id),
+            )
+
+        cur.execute(
+            "DELETE FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+            (track_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
+            VALUES (?, 'approved', ?, ?, ?)
+            """,
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain),
+        )
+        c.commit()
+    finally:
+        if own:
+            c.close()
+
+
+def delete_empty_approved_lyrics(conn: Optional[sqlite3.Connection] = None) -> int:
+    """Delete placeholder approved lyrics rows that contain no synced or plain text."""
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        cur.execute(
+            """
+            DELETE FROM lyrics
+            WHERE kind = 'approved'
+              AND COALESCE(synced_lyrics, '') = ''
+              AND COALESCE(plain_lyrics, '') = ''
+            """
+        )
+        deleted = cur.rowcount if cur.rowcount is not None else 0
+        c.commit()
+        return int(deleted)
+    finally:
+        if own:
+            c.close()
+
+
+def add_track_source(
+    artist: str,
+    title: str,
+    *,
+    album: str = "",
+    duration: Optional[float] = None,
+    url: Optional[str] = None,
+    kind: str = "youtube",
+    player_name: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Upsert a track and optional source URL without creating lyrics rows."""
+    own = conn is None
+    c = conn or connect()
+    try:
+        cur = c.cursor()
+        track_id = find_track_id(artist, title, c)
+        if track_id is None:
+            cur.execute(
+                "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+                (artist, title, album, duration),
+            )
+            track_id = cur.lastrowid
+            if track_id is None:
+                raise RuntimeError("failed to insert track")
+        else:
+            cur.execute(
+                """
+                UPDATE tracks
+                SET album = COALESCE(NULLIF(?, ''), album),
+                    duration = COALESCE(?, duration)
+                WHERE track_id = ?
+                """,
+                (album, duration, track_id),
+            )
+
+        if url:
+            cur.execute(
+                """
+                INSERT INTO sources (track_id, url, kind, player_name)
+                VALUES (?, ?, ?, NULLIF(?, ''))
+                ON CONFLICT(url) DO UPDATE SET
+                    track_id = excluded.track_id,
+                    kind = excluded.kind,
+                    player_name = COALESCE(excluded.player_name, sources.player_name)
+                """,
+                (track_id, url, kind, player_name),
+            )
+        c.commit()
+        return int(track_id)
+    finally:
+        if own:
+            c.close()
+
+
 def add_track_and_lyrics(
     artist: str,
     title: str,
     lyrics: Lyrics,
     album: str = "",
     duration: Optional[float] = None,
+    url: Optional[str] = None,
+    kind: str = "youtube",
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Add a new track and its lyrics to the database."""
+    """Add or update a track, its optional source URL and approved lyrics."""
+    if not (lyrics.synced_raw or lyrics.plain):
+        add_track_source(
+            artist,
+            title,
+            album=album,
+            duration=duration,
+            url=url,
+            kind=kind,
+            conn=conn,
+        )
+        return
+
     own = conn is None
     c = conn or connect()
     try:
+        track_id = add_track_source(
+            artist,
+            title,
+            album=album,
+            duration=duration,
+            url=url,
+            kind=kind,
+            conn=c,
+        )
         cur = c.cursor()
         cur.execute(
-            "INSERT OR IGNORE INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
-            (artist, title, album, duration)
+            "DELETE FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+            (track_id,),
         )
-        track_id = find_track_id(artist, title, c)
-        if not track_id:
-            return
-
         cur.execute(
             """
             INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
             VALUES (?, 'approved', ?, ?, ?)
             """,
-            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain)
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain),
         )
         c.commit()
     finally:

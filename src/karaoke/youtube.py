@@ -290,6 +290,36 @@ def clear_youtube_cache(directory: Optional[Path] = None) -> YouTubeCacheSummary
     return YouTubeCacheSummary(root, 0, 0, removed_files, removed_bytes)
 
 
+def search(query: str, limit: int = 1) -> list[dict]:
+    """Search YouTube and return lightweight result dicts for backfill."""
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("YouTube search needs yt-dlp installed.") from exc
+
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    entries = (info or {}).get("entries") or []
+    results: list[dict] = []
+    for entry in entries:
+        video_id = entry.get("id") or entry.get("url")
+        if not video_id:
+            continue
+        url = entry.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}"
+        results.append({"url": url, "title": entry.get("title") or ""})
+    return results
+
+
+def download(url: str, **kwargs) -> str:
+    """Download YouTube audio and return the cached local path."""
+    meta = fetch_metadata(url, download=True, **kwargs)
+    path = meta.get("path")
+    if not path:
+        raise RuntimeError("yt-dlp did not produce an audio file")
+    return str(path)
+
+
 def fetch_metadata(
     url: str,
     *,
@@ -396,4 +426,5 @@ def resolve_youtube(
         duration=meta["duration"],
         path=meta["path"],
         source="youtube",
+        url=url,
     )

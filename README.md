@@ -2,19 +2,20 @@
 
 A local karaoke + lyric-search platform.
 
-- **Scan** a music library (`~/Music`) and/or import your **Spotify** library as metadata.
-- **Index** track metadata + lyrics into **OpenSearch** (with kNN vector search) on a local **kind** cluster.
-- **Fetch** synced (timestamped) lyrics from **LRCLIB** (free, no key), cached in OpenSearch.
+- **Drive** playback/cache/history from local **SQLite**: known tracks, source URLs/URIs, approved lyrics, radio stats and backfill gaps.
+- **Fetch** synced (timestamped) lyrics from **LRCLIB** (free, no key), cached in SQLite.
+- **Index** SQLite + local library data into optional **OpenSearch** vector indexes when semantic search/training features are wanted.
 - **Karaoke** CLI: identify the current song (file / text / live via `songrec`), then render time-synced highlighted lyrics.
-- **lyricsearch**: semantic "find the song that goes '...'" via lyric embeddings (sentence-transformers).
+- **lyricsearch**: semantic "find the song that goes '...'" via lyric embeddings (OpenSearch-derived index).
 - **Whisper fallback**: for local files with no LRCLIB match, transcribe to approximate synced lyrics with faster-whisper.
-- **Local cache + stats**: a cluster-independent SQLite store serves known songs' lyrics offline (checked before the cluster/LRCLIB) and records play/discovery stats for `karaoke-stats`.
+- **Backfill**: log missing radio/player lyrics into SQLite and process them later with `karaoke-backfill`.
 
 ## Source model (hybrid)
 
-- `~/Music` = audio + cache source. Karaoke playback and Whisper transcription run here.
-- Spotify (your account) = optional metadata seed (liked songs / playlists). Spotify's API does **not** allow audio download, so no Whisper for Spotify-only tracks; lyrics come from LRCLIB.
-- Lyrics are cached in **two** places: the OpenSearch index (rich, on the kind cluster) and a **local SQLite cache** (`~/.local/share/karaoke/karaoke.db`) that works with no cluster. Lookups check the local cache first, then OpenSearch, then LRCLIB — so a known song replays fully offline.
+- `~/Music` = optional audio source for scanning and Whisper transcription.
+- Spotify (your account) = optional metadata/source seed (liked songs / playlists). Spotify's API does **not** allow audio download, so no Whisper for Spotify-only tracks unless a matching audio source is found elsewhere.
+- SQLite (`~/.local/share/karaoke/karaoke.db`) is the operational database: tracks, sources, lyrics, stats and backfill gaps.
+- OpenSearch is optional and derived from SQLite/local files for semantic search, sentiment and training experiments; playback must not require the cluster.
 
 ## Layout
 

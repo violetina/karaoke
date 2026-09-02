@@ -1,0 +1,64 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Karaoke TUI concept</title><style>body{margin:0;background:#eee;display:grid;place-items:start center;font-family:sans-serif}.wrap{background:#fff;margin:20px;padding:10px;box-shadow:0 2px 18px #999}p{max-width:1000px}</style></head><body><div class="wrap"><p><b>Karaoke TUI concept preview.</b> Edit the source drawing in <code>karaoke-tui-first-concept.excalidraw</code>; this SVG is a quick review preview.</p><svg xmlns="http://www.w3.org/2000/svg" width="1320" height="1180" viewBox="0 0 1320 1180">
+  <style>
+    .title{font:700 34px sans-serif;fill:#1e1e1e}.sub{font:18px sans-serif;fill:#495057}
+    .h{font:700 24px sans-serif;fill:#1e1e1e}.body{font:18px monospace;fill:#343a40}.small{font:16px sans-serif;fill:#495057}
+    .box{stroke:#1e1e1e;stroke-width:2;rx:18;ry:18}.terminal{fill:#f8f9fa;stroke:#343a40;stroke-width:3;rx:20;ry:20}
+    .arrow{stroke:#495057;stroke-width:2;fill:none;marker-end:url(#arrow)}
+  </style>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#495057"/></marker></defs>
+  <rect width="1320" height="1180" fill="#fff"/>
+  <text x="60" y="60" class="title">Karaoke TUI — clean-start editable concept</text>
+  <text x="62" y="95" class="sub">Review drawing before code: settings/config, mode select, player, scrolling lyrics, mood square, ASCII/vector visuals.</text>
+
+  <rect x="45" y="125" width="1220" height="780" class="terminal"/>
+  <text x="72" y="162" class="small">Terminal / Textual app shell</text>
+  <rect x="80" y="180" width="1150" height="70" class="box" fill="#d0bfff"/>
+  <text x="115" y="225" class="h">KARAOKE     Library | Live | Radio | Player | Visuals | Settings</text>
+
+  <rect x="80" y="280" width="265" height="570" class="box" fill="#fff3bf" stroke="#e67700"/>
+  <text x="105" y="325" class="h">Settings / Config</text>
+  <text x="105" y="365" class="body"><tspan x="105" dy="0">• Mode select</tspan><tspan x="125" dy="25">- Browse library</tspan><tspan x="125" dy="25">- Follow player</tspan><tspan x="125" dy="25">- Radio/listen/output</tspan><tspan x="125" dy="25">- YouTube URL</tspan><tspan x="105" dy="38">• Player target</tspan><tspan x="125" dy="25">Spotify / VLC / Firefox</tspan><tspan x="105" dy="38">• Sync controls</tspan><tspan x="125" dy="25">lead, offset, nudge</tspan><tspan x="105" dy="38">• Visual profile</tspan><tspan x="125" dy="25">calm / party / glitch / ascii</tspan><tspan x="105" dy="38">• Sources</tspan><tspan x="125" dy="25">SQLite first</tspan><tspan x="125" dy="25">Vector store optional</tspan></text>
+  <rect x="105" y="750" width="215" height="52" class="box" fill="#a5d8ff" stroke="#1971c2"/>
+  <text x="124" y="783" class="body">mode: PLAYER</text>
+
+  <rect x="380" y="280" width="515" height="145" class="box" fill="#c3fae8" stroke="#087f5b"/>
+  <text x="405" y="325" class="h">Player / now playing</text>
+  <text x="405" y="365" class="body"><tspan x="405" dy="0">Artist - Title</tspan><tspan x="405" dy="25">source: spotify/firefox/youtube/local file</tspan><tspan x="405" dy="25">position: 01:23 / 03:45    cache: synced</tspan></text>
+  <rect x="780" y="315" width="90" height="80" class="box" fill="#b2f2bb" stroke="#2b8a3e"/>
+  <text x="802" y="345" class="body"><tspan x="802" dy="0">play</tspan><tspan x="802" dy="22">pause</tspan><tspan x="802" dy="22">seek</tspan></text>
+
+  <rect x="380" y="455" width="515" height="395" class="box" fill="#fff" stroke="#1971c2"/>
+  <text x="405" y="500" class="h">Actual scrolling lyric text</text>
+  <text x="420" y="560" class="body" opacity="0.65">previous line fades up</text>
+  <rect x="405" y="592" width="465" height="52" class="box" fill="#a5d8ff" stroke="#1864ab"/>
+  <text x="425" y="626" class="body">current lyric line is highlighted</text>
+  <text x="420" y="680" class="body">word playhead moves left to right</text>
+  <text x="420" y="730" class="body" opacity="0.65">next line is visible</text>
+  <text x="420" y="780" class="body" opacity="0.45">next+1 is dim</text>
+  <text x="420" y="825" class="small">footer: b/v nudge, 0 reset, q quit</text>
+
+  <rect x="935" y="280" width="295" height="260" class="box" fill="#ffc9c9" stroke="#c92a2a"/>
+  <text x="958" y="325" class="h">Mood square</text>
+  <text x="958" y="365" class="body"><tspan x="958" dy="0">Changes colour from lyric mood:</tspan><tspan x="958" dy="25">happy=green sad=blue</tspan><tspan x="958" dy="25">angry=red tender=magenta</tspan><tspan x="958" dy="25">neutral=cyan</tspan><tspan x="958" dy="40">anchor: sentiment.py</tspan></text>
+  <path d="M895 610 C930 585 945 515 955 465" stroke="#c92a2a" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="910" y="570" class="small" fill="#c92a2a">mood</text>
+
+  <rect x="935" y="570" width="295" height="280" class="box" fill="#f1f3f5" stroke="#495057"/>
+  <text x="958" y="615" class="h">Text visuals / ASCII later</text>
+  <text x="958" y="655" class="body"><tspan x="958" dy="0">Prompt → image idea → ASCII</tspan><tspan x="958" dy="35">Vector store suggests visuals:</tspan><tspan x="978" dy="25">• semantic theme lookup</tspan><tspan x="978" dy="25">• cached motif per song</tspan><tspan x="978" dy="25">• beat/mood blocks</tspan><tspan x="958" dy="38">optional/offline-safe</tspan></text>
+
+  <rect x="80" y="940" width="1150" height="175" class="box" fill="#e7f5ff" stroke="#1971c2"/>
+  <text x="105" y="985" class="h">Implementation lanes</text>
+  <g class="body" font-size="16">
+    <rect x="110" y="1015" width="170" height="70" class="box" fill="#c3fae8"/><text x="130" y="1044">SQLite cache</text><text x="130" y="1067">tracks/sources/lyrics</text>
+    <path d="M280 1050 L325 1050" class="arrow"/>
+    <rect x="325" y="1015" width="170" height="70" class="box" fill="#a5d8ff"/><text x="345" y="1044">Mode controller</text><text x="345" y="1067">Browse/Player/Radio</text>
+    <path d="M495 1050 L540 1050" class="arrow"/>
+    <rect x="540" y="1015" width="170" height="70" class="box" fill="#d0bfff"/><text x="560" y="1044">Textual screens</text><text x="560" y="1067">settings + panels</text>
+    <path d="M710 1050 L755 1050" class="arrow"/>
+    <rect x="755" y="1015" width="170" height="70" class="box" fill="#b2f2bb"/><text x="775" y="1044">Renderer</text><text x="775" y="1067">scrolling lyrics</text>
+    <path d="M925 1050 L970 1050" class="arrow"/>
+    <rect x="970" y="1015" width="170" height="70" class="box" fill="#ffd8a8"/><text x="990" y="1044">Visual plugins</text><text x="990" y="1067">sentiment/ascii/vector</text>
+  </g>
+  <text x="80" y="1150" class="sub">First build slice: static Textual layout prototype only. Then wire settings, then player/lyrics, then sentiment, then ASCII/vector visuals.</text>
+</svg></div></body></html>

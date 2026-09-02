@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from typing import Optional
 
@@ -13,24 +14,8 @@ def _resolve(args) -> Optional[SongRef]:
     if args.file:
         return from_file(args.file)
     if args.youtube:
-        from .youtube import resolve_youtube
-        print("Resolving YouTube video…", file=sys.stderr)
-        try:
-            ref = resolve_youtube(
-                args.youtube, download=args.download,
-                cookies_from_browser=args.cookies_from_browser,
-                cookies_file=args.cookies,
-                cache_max_mb=args.yt_cache_max_mb,
-            )
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            return None
-        if ref:
-            print(f"YouTube: {ref.artist} - {ref.title}"
-                  f"{' (audio downloaded)' if ref.path else ''}", file=sys.stderr)
-        else:
-            print("Could not parse an artist/title from that video.", file=sys.stderr)
-        return ref
+        from . import youtube
+        return youtube.resolve_youtube(args.youtube, download=args.download)
     if args.spotify:
         from .spotify_client import SpotifyClient
         pb = SpotifyClient().current_playback()
@@ -86,6 +71,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="get current song from any desktop player via playerctl (MPRIS)")
     ap.add_argument("--player-follow", action="store_true",
                     help="continuously follow desktop player via playerctl (MPRIS)")
+    ap.add_argument("--player-sync", action="store_true",
+                    help="continuously sync to desktop player position via playerctl (MPRIS)")
     ap.add_argument("--radio", "-r", action="store_true",
                     help="continuously follow live audio (mic): re-identify + re-sync as songs change")
     ap.add_argument("--reidentify", type=float, default=30.0,
@@ -96,6 +83,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="if no LRCLIB lyrics, transcribe a local --file with Whisper")
     ap.add_argument("--force-transcribe", action="store_true",
                     help="always transcribe --file with Whisper (skip cache + LRCLIB)")
+    ap.add_argument("--lyrics-file", help="with --force-transcribe, use this text file "
+                                           "for the lyrics instead of Whisper's ASR")
     ap.add_argument("--offset", type=float, default=0.0, help="lyric clock offset secs")
     ap.add_argument("--lead", type=float, default=None,
                     help="forward pre-bias (secs) for mic/radio sync to offset the "
@@ -130,6 +119,11 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
         play_playerctl_follow(use_cache=not args.no_cache)
         return 0
 
+    if args.player_sync:
+        from .player_sync import play_synced_to_player
+        play_synced_to_player(use_cache=not args.no_cache)
+        return 0
+
     ref = _resolve(args)
     if not ref or not ref.title:
         ap.error("no song given. Use --file, --listen, or 'Artist - Title'.")
@@ -142,11 +136,11 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     elif args.output:
         stats_mode = "output"
 
-    ly = get_synced(ref.artist, ref.title, ref.album, ref.duration,
+    ly = get_synced(ref,
                     use_cache=not args.no_cache,
-                    audio_path=ref.path,
                     transcribe=args.transcribe or args.force_transcribe,
                     force_transcribe=args.force_transcribe,
+                    lyrics_file=args.lyrics_file,
                     stats_mode=stats_mode)
     tl = timeline_from_lyrics(ly)
 
@@ -165,6 +159,15 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
             print(f"  karaoke-stage youtube '{player_url}'", file=sys.stderr)
             return 2
         print(f"No synced lyrics for {ref.artist} - {ref.title} (source={ly.source}).", file=sys.stderr)
+        
+        if stats_mode in ("radio", "player", "query"):
+            from . import localcache
+            try:
+                with localcache.connect() as conn:
+                    localcache.log_lyric_gap(ref.artist, ref.title, conn)
+            except Exception:
+                pass
+
         if ly.plain:
             print("\n--- plain lyrics ---\n" + ly.plain)
             return 0
@@ -402,6 +405,15 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
                     help="use logged-in browser cookies for caption access")
     yt.add_argument("--cookies", metavar="FILE", help="cookies.txt for authenticated access")
 
+    cap = sub.add_parser("captions",
+                         help="check whether a YouTube video has lyric captions")
+    cap.add_argument("url", help="YouTube URL")
+    cap.add_argument("--language", "-l", action="append", dest="languages",
+                     help="caption language preference (repeatable; default en,en-orig,nl)")
+    cap.add_argument("--cookies-from-browser", metavar="BROWSER",
+                     help="use logged-in browser cookies for caption access")
+    cap.add_argument("--cookies", metavar="FILE", help="cookies.txt for authenticated access")
+
     ls = sub.add_parser("list", help="list staged lyric candidates")
     ls.add_argument("--status", default="pending", choices=["pending", "approved", "rejected", "all"])
     ls.add_argument("-n", "--limit", type=int, default=20)
@@ -416,6 +428,23 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
     reject.add_argument("id", type=int)
 
     args = ap.parse_args(argv)
+
+    if args.cmd == "captions":
+        from .stage_sources import check_youtube_captions
+        avail = check_youtube_captions(
+            args.url,
+            languages=args.languages or ("en", "en-orig", "nl"),
+            cookies_from_browser=args.cookies_from_browser,
+            cookies_file=args.cookies,
+        )
+        print(f"captions: {avail.describe()}")
+        print(f"  manual   : {', '.join(avail.manual_languages) or '-'}")
+        print(f"  automatic: {', '.join(avail.automatic_languages[:8]) or '-'}")
+        if avail.best is not None and avail.best.ext == "json3":
+            print("  -> json3 available: can produce SYNCED lyrics from cue timings")
+        elif avail.available:
+            print("  -> no json3 track: would produce PLAIN lyrics only")
+        return 0 if avail.available else 1
 
     if args.cmd == "youtube":
         from .stage_sources import stage_youtube_captions
@@ -476,5 +505,170 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
     return 1
 
 
+def player_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-player` CLI to control desktop media players."""
+    ap = argparse.ArgumentParser(
+        prog="karaoke-player",
+        description="Control desktop media players via MPRIS (playerctl)",
+    )
+    ap.add_argument("--player", "-p", help="target a specific player by name")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("play", help="send the play command")
+    sub.add_parser("pause", help="send the pause command")
+    sub.add_parser("play-pause", help="toggle play/pause")
+    sub.add_parser("next", help="go to the next track")
+    sub.add_parser("previous", help="go to the previous track")
+    sub.add_parser("stop", help="send the stop command")
+    sub.add_parser("status", help="get the current player status")
+
+    seek = sub.add_parser("seek", help="seek to a position in the current track")
+    seek.add_argument("position", help="position in seconds, or +/- offset")
+
+    args = ap.parse_args(argv)
+
+    try:
+        cmd = ["playerctl"]
+        if args.player:
+            cmd.extend(["--player", args.player])
+            
+        if args.cmd == "seek":
+            cmd.extend(["position", args.position])
+        else:
+            cmd.append(args.cmd)
+        subprocess.run(cmd, check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("playerctl command failed or not found. Is it installed?", file=sys.stderr)
+        return 1
+        
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(karaoke_main())
+
+def backfill_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-backfill` CLI to fill lyric gaps."""
+    from .backfill import backfill_main as _backfill_main
+    return _backfill_main(argv)
+
+def browse_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-browse` TUI."""
+    from .browse import browse_main as _browse_main
+    return _browse_main()
+
+
+def tui_main(argv: Optional[list[str]] = None) -> int:
+    """Run the player-aware `karaoke-tui` interface."""
+    from .tui import tui_main as _tui_main
+    return _tui_main()
+
+
+def analyze_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-analyze` CLI: detect + store key/BPM, verify keys.
+
+    Examples:
+      karaoke-analyze --file song.webm --artist Ren --title "Hi Ren"
+      karaoke-analyze --verify --artist Ren --title "Hi Ren" --key "C major"
+      karaoke-analyze --list
+    """
+    from .logger import stream_logs
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-analyze",
+        description="Detect/store musical key + tempo and verify keys online",
+    )
+    ap.add_argument("--file", "-f", help="local audio file to analyse")
+    ap.add_argument("--artist", default="", help="track artist (for DB storage)")
+    ap.add_argument("--title", default="", help="track title (for DB storage)")
+    ap.add_argument("--verify", action="store_true",
+                    help="reconcile the stored detected key with --key")
+    ap.add_argument("--key", help="reference/online key for --verify (e.g. 'C major')")
+    ap.add_argument("--reference-source", default="online",
+                    help="where --key came from (default: online)")
+    ap.add_argument("--list", action="store_true", help="list stored analyses")
+    ap.add_argument("--log", default="info",
+                    help="console log level: off|err|info|full (default info)")
+    args = ap.parse_args(argv)
+
+    stream_logs(args.log)
+
+    from . import localcache, track_analysis
+
+    if args.list:
+        with localcache.connect() as conn:
+            track_analysis.ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT t.artist, t.title, a.detected_key, a.reference_key,
+                       a.resolved_key, a.key_relation, a.bpm, a.key_confidence
+                FROM track_analysis a JOIN tracks t ON t.track_id = a.track_id
+                ORDER BY t.artist, t.title
+                """
+            ).fetchall()
+        if not rows:
+            print("no analyses stored yet")
+            return 0
+        for r in rows:
+            print(
+                f"{r['artist']} - {r['title']}: "
+                f"detected={r['detected_key'] or '?'} "
+                f"ref={r['reference_key'] or '-'} "
+                f"resolved={r['resolved_key'] or '?'} "
+                f"[{r['key_relation'] or '-'}] "
+                f"bpm={r['bpm'] or '?'} conf={r['key_confidence'] or 0:.0%}"
+            )
+        return 0
+
+    if args.verify:
+        if not args.key or not (args.artist and args.title):
+            ap.error("--verify needs --key, --artist and --title")
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is None:
+                print(f"track not found: {args.artist} - {args.title}", file=sys.stderr)
+                return 1
+            rec = track_analysis.verify_key(
+                track_id, args.key, reference_src=args.reference_source, conn=conn
+            )
+        print(rec.note)
+        print(f"relation={rec.relation} agree={rec.agree} "
+              f"resolved={rec.resolved.name if rec.resolved else '?'}")
+        return 0
+
+    if not args.file:
+        ap.error("give --file to analyse, or use --verify / --list")
+
+    from .analyze import analyze_audio
+
+    print(f"Analysing {args.file} …", file=sys.stderr)
+    result = analyze_audio(args.file)
+    key = result.key
+    print(f"key: {key.name if key else 'unknown'} "
+          f"(conf {result.key_confidence:.0%}, {result.key_agreement}, "
+          f"{result.method})")
+    print(f"bpm: {result.bpm if result.bpm else 'unknown'}")
+
+    if args.artist and args.title:
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is None:
+                from .lyrics import Lyrics
+                localcache.add_track_and_lyrics(args.artist, args.title, Lyrics(),
+                                                conn=conn)
+                track_id = localcache.find_track_id(args.artist, args.title, conn)
+            if track_id is not None:
+                track_analysis.save_detected(
+                    track_id,
+                    detected_key=key,
+                    key_confidence=result.key_confidence,
+                    key_agreement=result.key_agreement,
+                    bpm=result.bpm,
+                    method=result.method,
+                    analyzer_version=result.version,
+                    conn=conn,
+                )
+                print(f"stored analysis for track_id={track_id}", file=sys.stderr)
+    return 0
+
+

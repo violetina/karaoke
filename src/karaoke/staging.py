@@ -222,3 +222,35 @@ def reject_staged(item_id: int, *, conn: Optional[sqlite3.Connection] = None) ->
     finally:
         if own:
             c.close()
+
+
+def whitelist_staged(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> StagedLyrics:
+    """Whitelist a staged candidate: approve it into the working lyrics cache.
+
+    Alias for :func:`approve_staged` with the domain term the TUI uses — once
+    whitelisted, the track carries approved lyrics and shows in the working list.
+    """
+    return approve_staged(item_id, conn=conn)
+
+
+def find_pending_by_track(
+    artist: str, title: str, *, conn: Optional[sqlite3.Connection] = None
+) -> Optional[StagedLyrics]:
+    """Return the newest non-rejected staged candidate for a track, if any."""
+    own = conn is None
+    c = conn or localcache.connect()
+    ensure_schema(c)
+    try:
+        row = c.execute(
+            """
+            SELECT * FROM staged_lyrics
+            WHERE key = ? AND status != 'rejected'
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (localcache._key(artist, title),),
+        ).fetchone()
+        return _row_to_item(row) if row else None
+    finally:
+        if own:
+            c.close()

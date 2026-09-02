@@ -13,7 +13,15 @@ from pathlib import Path
 
 def _load_dotenv() -> None:
     """Minimal .env loader (no external dep). Does not override real env vars."""
-    for candidate in (Path.cwd() / ".env", Path(__file__).resolve().parents[3] / ".env"):
+    candidates = [Path.cwd() / ".env"]
+    # Project root relative to src/karaoke/config.py, when running from a source
+    # checkout. Guard the index: in an installed/containerised layout the
+    # package is not necessarily three levels below a project root.
+    parents = Path(__file__).resolve().parents
+    if len(parents) > 3:
+        candidates.append(parents[3] / ".env")
+
+    for candidate in candidates:
         if not candidate.is_file():
             continue
         for line in candidate.read_text().splitlines():

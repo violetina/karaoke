@@ -11,33 +11,29 @@ OpenSearch/kind cluster. It has two jobs:
 Default location: `~/.local/share/karaoke/karaoke.db`
 (override with `KARAOKE_DATA_DIR`).
 
-## Why a second cache
+## Why SQLite is the operational database
 
-The OpenSearch index (on the kind cluster) is the rich search/index store, but it
-is only available when that cluster is running. Live modes (`--radio`, `--listen`,
-`--output`, `--spotify`) should keep working — and keep known songs offline — even
-with no cluster. The local SQLite cache fills that gap.
+SQLite is now the source of truth for normal playback and automation. OpenSearch is optional and derived: useful for semantic/vector search and future training features, but not required for exact lyric lookup or player control.
+
+Live modes (`--radio`, `--listen`, `--output`, `--spotify`, player/browser modes) should keep working — and keep known songs offline — even with no cluster. The local SQLite database provides that stable base.
 
 ## Lyrics lookup order
 
-`player.get_synced()` now checks caches cheapest-first:
+`player.get_synced()` now checks local state first:
 
 ```mermaid
 flowchart TD
-    A[Need lyrics for artist/title] --> B{use_cache?}
-    B -- yes --> L[1. Local SQLite cache]
+    A[Need lyrics for artist/title or URL] --> B{use_cache?}
+    B -- yes --> L[1. Local SQLite tracks/sources/lyrics]
     L -- hit --> Z[Return lyrics offline]
-    L -- miss --> O[2. OpenSearch cluster cache]
-    O -- hit --> W[Write-through to local cache] --> Z
-    O -- miss/unreachable --> F[3. LRCLIB online]
-    F -- found --> W2[Write-through to local + OpenSearch] --> Z
-    F -- none + local file + --transcribe --> WH[Whisper transcription] --> W2
+    L -- miss --> F[2. LRCLIB online]
+    F -- found --> W[Write-through to SQLite] --> Z
+    F -- none + local file + --transcribe --> WH[Whisper transcription] --> W
+    F -- none --> G[Log lyric_gaps row for backfill]
     B -- no --> F
 ```
 
-This is what fixes radio mode: once a song has been recognised and its lyrics
-fetched, the **next** time radio re-discovers that same song, the lyrics come
-straight from the local cache — no LRCLIB call, no cluster needed.
+OpenSearch is deliberately not in this hot path. Reintroducing vector search should happen as a separate indexing command that learns from SQLite and writes derived documents to OpenSearch. See [Vector search and training plan](vector-search-plan.md).
 
 ## Offline song identification (limitation)
 
@@ -82,21 +78,56 @@ can show discovery counts, per-mode activity, and local-cache hit rate.
 ## Schema
 
 ```sql
-CREATE TABLE lyrics_cache (
-    key           TEXT PRIMARY KEY,   -- normalized "artist\ntitle" (casefolded)
-    artist        TEXT, title TEXT, album TEXT, duration REAL,
-    lyrics_source TEXT,               -- lrclib | whisper | none
-    has_synced    INTEGER,
-    plain_lyrics  TEXT, synced_lyrics TEXT,
-    updated_at    REAL
+CREATE TABLE tracks (
+    track_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist   TEXT NOT NULL,
+    title    TEXT NOT NULL,
+    album    TEXT,
+    duration REAL,
+    UNIQUE(artist, title)
+);
+
+CREATE TABLE sources (
+    source_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id    INTEGER NOT NULL,
+    kind        TEXT NOT NULL,      -- youtube | spotify | local | player URL source
+    url         TEXT UNIQUE,
+    player_name TEXT,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
+CREATE TABLE lyrics (
+    lyric_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id      INTEGER NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'approved', -- approved | staged | rejected
+    source        TEXT,              -- lrclib | whisper | youtube_caption | user_submitted
+    synced_lyrics TEXT,
+    plain_lyrics  TEXT,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
+CREATE TABLE lyric_gaps (
+    gap_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist       TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending', -- pending | processed | failed
+    created_at   REAL NOT NULL,
+    processed_at REAL,
+    UNIQUE(artist, title)
 );
 
 CREATE TABLE play_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts REAL, mode TEXT, artist TEXT, title TEXT,
-    event TEXT,                        -- play | discover | relock | cache_hit | cache_miss | no_lyrics
-    source TEXT, has_synced INTEGER
+    ts REAL NOT NULL,
+    mode TEXT NOT NULL,
+    artist TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    event TEXT NOT NULL,
+    source TEXT DEFAULT '',
+    has_synced INTEGER DEFAULT 0
 );
 ```
+
+The `tracks` table owns identity. `sources` links tracks to YouTube URLs, Spotify URIs, local paths or player sources. `lyrics` stores approved synced/plain lyric text. `lyric_gaps` is the work queue for later backfill.
 
 All writes are best-effort: a cache or stats failure never interrupts playback.
