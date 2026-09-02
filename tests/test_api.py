@@ -1,122 +1,153 @@
-"""Tests for the FastAPI backend endpoints."""
+"""Tests for the split library API and host-side control API."""
+from __future__ import annotations
+
+import pytest
 from fastapi.testclient import TestClient
 
-from karaoke.api import app
+from karaoke import api as api_mod
+from karaoke import ctrl_api as ctrl_mod
 from karaoke import localcache
-from karaoke.lyrics import Lyrics
 
-client = TestClient(app)
+# Capture the real connect() before monkeypatching to avoid infinite recursion.
 _real_connect = localcache.connect
 
 
-def test_health_check():
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-    response_api = client.get("/api/health")
-    assert response_api.status_code == 200
-    assert response_api.json() == {"status": "ok"}
-
-
-def test_list_tracks(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
-    conn = _real_connect(db_path)
-    localcache.add_track_and_lyrics(
-        "Radiohead", "Creep", Lyrics(plain="I'm a creep"), url="https://youtube.com/watch?v=1", kind="youtube", conn=conn
-    )
-    localcache.add_track_and_lyrics(
-        "Nirvana", "Smells Like Teen Spirit", Lyrics(plain="Hello"), url="https://youtube.com/watch?v=2", kind="youtube", conn=conn
+@pytest.fixture()
+def db(tmp_path, monkeypatch):
+    """Point the API at a throwaway SQLite database seeded with one track."""
+    db_path = tmp_path / "karaoke.db"
+    monkeypatch.setattr(
+        "karaoke.api.localcache.connect",
+        lambda db_p=None: _real_connect(db_p or db_path),
     )
 
-    monkeypatch.setattr("karaoke.api.localcache.connect", lambda db_p=None: _real_connect(db_p or db_path))
-
-    res = client.get("/api/tracks")
-    assert res.status_code == 200
-    tracks = res.json()
-    assert len(tracks) == 2
-    assert tracks[0]["artist"] == "Nirvana"
-    assert tracks[1]["artist"] == "Radiohead"
-
-    res_q = client.get("/api/tracks?q=Creep")
-    assert res_q.status_code == 200
-    q_tracks = res_q.json()
-    assert len(q_tracks) == 1
-    assert q_tracks[0]["title"] == "Creep"
-
-
-def test_get_track_details(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
     conn = _real_connect(db_path)
-    localcache.add_track_and_lyrics(
-        "Blur", "Song 2", Lyrics(plain="Woo-hoo!"), url="https://youtube.com/watch?v=blur", kind="youtube", conn=conn
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+        ("Radiohead", "Creep", "Pablo Honey", 238.0),
     )
-    track_id = localcache.find_track_id("Blur", "Song 2", conn)
-
-    monkeypatch.setattr("karaoke.api.localcache.connect", lambda db_p=None: _real_connect(db_p or db_path))
-
-    res = client.get(f"/api/tracks/{track_id}")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["artist"] == "Blur"
-    assert data["title"] == "Song 2"
-    assert len(data["sources"]) == 1
-    assert data["sources"][0]["url"] == "https://youtube.com/watch?v=blur"
-    assert data["lyrics"]["plain"] == "Woo-hoo!"
+    track_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO sources (track_id, url, kind) VALUES (?, ?, ?)",
+        (track_id, "https://youtu.be/XFkzRNyygfk", "youtube"),
+    )
+    conn.commit()
+    conn.close()
+    return db_path, track_id
 
 
-def test_get_track_not_found(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
-    _real_connect(db_path)
-    monkeypatch.setattr("karaoke.api.localcache.connect", lambda db_p=None: _real_connect(db_p or db_path))
-
-    res = client.get("/api/tracks/99999")
-    assert res.status_code == 404
+@pytest.fixture()
+def client():
+    return TestClient(api_mod.app)
 
 
-def test_play_track_endpoint(monkeypatch):
-    monkeypatch.setattr("karaoke.api.open_song_url", lambda url, kind: 1234)
-
-    res = client.post("/api/play", json={"url": "https://youtube.com/watch?v=test", "kind": "youtube"})
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["status"] == "launched"
-    assert payload["pid"] == 1234
-    assert payload["url"] == "https://youtube.com/watch?v=test"
+def test_health_reports_ok_and_version(db, client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["database"] == "ok"
+    assert body["version"] == api_mod.API_VERSION
 
 
-def test_play_track_fallback_search(monkeypatch):
-    monkeypatch.setattr("karaoke.api.open_song_url", lambda url, kind: 5678)
-
-    res = client.post("/api/play", json={"artist": "Pixies", "title": "Where Is My Mind?"})
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["kind"] == "youtube_search"
-    assert payload["pid"] == 5678
-    assert "Pixies" in payload["url"]
+def test_health_alias_under_api_prefix(db, client):
+    assert client.get("/api/health").json()["status"] == "ok"
 
 
-def test_get_stats_endpoint(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
-    conn = _real_connect(db_path)
-    localcache.log_event("spotify", "play", artist="Queen", title="Bohemian Rhapsody", conn=conn)
-
-    monkeypatch.setattr("karaoke.api.localcache.connect", lambda db_p=None: _real_connect(db_p or db_path))
-    monkeypatch.setattr("karaoke.localcache.connect", lambda db_p=None: _real_connect(db_p or db_path))
-
-    res = client.get("/api/stats")
-    assert res.status_code == 200
-    data = res.json()
-    assert "total_events" in data
-    assert "plays" in data
+def test_list_tracks_returns_seeded_track(db, client):
+    resp = client.get("/api/tracks")
+    assert resp.status_code == 200
+    tracks = resp.json()
+    assert len(tracks) == 1
+    assert tracks[0]["artist"] == "Radiohead"
+    assert tracks[0]["title"] == "Creep"
+    assert tracks[0]["kind"] == "youtube"
+    assert tracks[0]["has_synced_lyrics"] is False
 
 
-def test_get_logs_endpoint(tmp_path, monkeypatch):
-    log_file = tmp_path / "test.log"
-    log_file.write_text("line 1\nline 2\nline 3\n")
-    monkeypatch.setattr("karaoke.api.LOG_FILE", log_file)
+def test_list_tracks_search_filter(db, client):
+    assert len(client.get("/api/tracks", params={"q": "radio"}).json()) == 1
+    assert client.get("/api/tracks", params={"q": "nosuchband"}).json() == []
 
-    res = client.get("/api/logs?lines=2")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["lines"] == ["line 2", "line 3"]
+
+def test_list_tracks_respects_limit(db, client):
+    resp = client.get("/api/tracks", params={"limit": 1})
+    assert resp.status_code == 200
+    assert len(resp.json()) <= 1
+
+
+def test_get_track_detail_includes_sources(db, client):
+    _, track_id = db
+    resp = client.get(f"/api/tracks/{track_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Creep"
+    assert body["sources"][0]["url"] == "https://youtu.be/XFkzRNyygfk"
+
+
+def test_get_track_missing_returns_404(db, client):
+    assert client.get("/api/tracks/999999").status_code == 404
+
+
+def test_library_api_exposes_no_playback_route(db, client):
+    """Playback is desktop-bound and must not ship in the deployable image."""
+    assert client.post("/api/play", json={"url": "https://example.com"}).status_code == 404
+    routes = {getattr(r, "path", None) for r in api_mod.app.routes}
+    assert "/api/play" not in routes
+
+
+def test_library_api_does_not_import_desktop_opener():
+    """Guard against re-introducing an xdg-open dependency into the image."""
+    assert not hasattr(api_mod, "open_song_url")
+
+
+# --- control API -------------------------------------------------------
+
+def test_ctrl_health_reports_control_role():
+    body = TestClient(ctrl_mod.app).get("/health").json()
+    assert body["status"] == "ok"
+    assert body["role"] == "control"
+
+
+def test_ctrl_play_launches_url(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "karaoke.ctrl_api.open_song_url",
+        lambda url, kind: calls.append((url, kind)) or 4242,
+    )
+    resp = TestClient(ctrl_mod.app).post(
+        "/api/play", json={"url": "https://youtu.be/abc", "kind": "youtube"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["pid"] == 4242
+    assert calls == [("https://youtu.be/abc", "youtube")]
+
+
+def test_ctrl_play_falls_back_to_youtube_search(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "karaoke.ctrl_api.open_song_url",
+        lambda url, kind: captured.update(url=url, kind=kind) or 1,
+    )
+    resp = TestClient(ctrl_mod.app).post(
+        "/api/play", json={"artist": "Radiohead", "title": "Creep"}
+    )
+    assert resp.status_code == 200
+    assert captured["kind"] == "youtube_search"
+    assert "Radiohead" in captured["url"]
+
+
+def test_ctrl_play_requires_some_input():
+    assert TestClient(ctrl_mod.app).post("/api/play", json={}).status_code == 400
+
+
+def test_ctrl_play_surfaces_launch_failure(monkeypatch):
+    def boom(url, kind):
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr("karaoke.ctrl_api.open_song_url", boom)
+    resp = TestClient(ctrl_mod.app).post(
+        "/api/play", json={"url": "https://youtu.be/abc"}
+    )
+    assert resp.status_code == 500

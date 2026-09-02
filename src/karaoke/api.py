@@ -1,26 +1,34 @@
-"""FastAPI backend service for the karaoke song library and TUI."""
+"""FastAPI library backend for the karaoke song library.
+
+This service is deployment-safe: it only reads the SQLite library database and
+the application log file. It deliberately contains **no** desktop-bound
+behaviour (``xdg-open``/``playerctl``), so it can run inside a container where
+no display or media player exists.
+
+Playback control lives in :mod:`karaoke.ctrl_api`, which runs on the host
+alongside the user's desktop session.
+"""
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from . import localcache
-from .browse import open_song_url
-from .logger import LOG_FILE, log
+from .logger import LOG_FILE
+
+API_VERSION = "0.2.0"
 
 app = FastAPI(
-    title="Karaoke TUI Backend API",
-    description="REST API for browsing tracks, lyrics, playing media, and monitoring stats.",
-    version="0.1.1",
+    title="Karaoke Library API",
+    description=(
+        "Read-only REST API over the karaoke SQLite library: tracks, lyrics, "
+        "stats and logs. Playback is handled by the host-side control API."
+    ),
+    version=API_VERSION,
 )
-
-
-class PlayRequest(BaseModel):
-    url: Optional[str] = None
-    kind: Optional[str] = None
-    artist: Optional[str] = None
-    title: Optional[str] = None
 
 
 class TrackResponse(BaseModel):
@@ -36,42 +44,70 @@ class TrackResponse(BaseModel):
 
 @app.get("/health")
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    """Liveness/readiness probe.
+
+    Reports whether the configured SQLite database is reachable so that a
+    misconfigured volume mount surfaces as an unhealthy pod rather than as
+    empty track listings.
+    """
+    db_ok = True
+    detail = None
+    try:
+        with localcache.connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as exc:  # pragma: no cover - defensive
+        db_ok = False
+        detail = str(exc)
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "version": API_VERSION,
+        "database": "ok" if db_ok else "unavailable",
+        "detail": detail,
+    }
 
 
 @app.get("/api/tracks", response_model=list[TrackResponse])
-def list_tracks(q: Optional[str] = Query(None, description="Search query for artist or title")) -> list[dict[str, Any]]:
+def list_tracks(
+    q: Optional[str] = Query(None, description="Search query for artist or title"),
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+) -> list[dict[str, Any]]:
     """List tracks in the local library with optional search filtering."""
     with localcache.connect() as conn:
         cur = conn.cursor()
+        base = """
+            SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
+                   EXISTS(
+                       SELECT 1 FROM lyrics l
+                       WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
+                   ) AS has_synced
+            FROM tracks t
+            LEFT JOIN sources s ON t.track_id = s.track_id
+        """
         if q:
             pattern = f"%{q.strip()}%"
             cur.execute(
-                """
-                SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
-                       EXISTS(SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id AND l.synced_lyrics != '') as has_synced
-                FROM tracks t
-                LEFT JOIN sources s ON t.track_id = s.track_id
+                base
+                + """
                 WHERE t.artist LIKE ? OR t.title LIKE ?
                 GROUP BY t.track_id
                 ORDER BY t.artist, t.title
+                LIMIT ? OFFSET ?
                 """,
-                (pattern, pattern),
+                (pattern, pattern, limit, offset),
             )
         else:
             cur.execute(
-                """
-                SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
-                       EXISTS(SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id AND l.synced_lyrics != '') as has_synced
-                FROM tracks t
-                LEFT JOIN sources s ON t.track_id = s.track_id
+                base
+                + """
                 GROUP BY t.track_id
                 ORDER BY t.artist, t.title
-                """
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
             )
-        rows = cur.fetchall()
         return [
             {
                 "track_id": row["track_id"],
@@ -83,13 +119,13 @@ def list_tracks(q: Optional[str] = Query(None, description="Search query for art
                 "kind": row["kind"],
                 "has_synced_lyrics": bool(row["has_synced"]),
             }
-            for row in rows
+            for row in cur.fetchall()
         ]
 
 
 @app.get("/api/tracks/{track_id}")
 def get_track(track_id: int) -> dict[str, Any]:
-    """Get detailed information for a specific track including lyrics and sources."""
+    """Get detailed information for a track including lyrics and sources."""
     with localcache.connect() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -100,7 +136,10 @@ def get_track(track_id: int) -> dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail="Track not found")
 
-        cur.execute("SELECT url, kind, player_name FROM sources WHERE track_id = ?", (track_id,))
+        cur.execute(
+            "SELECT url, kind, player_name FROM sources WHERE track_id = ?",
+            (track_id,),
+        )
         sources = [dict(s) for s in cur.fetchall()]
 
         lyrics = localcache.get_lyrics_by_track_id(track_id, conn)
@@ -123,37 +162,6 @@ def get_track(track_id: int) -> dict[str, Any]:
             "sources": sources,
             "lyrics": lyrics_data,
         }
-
-
-@app.post("/api/play")
-def play_track(req: PlayRequest) -> dict[str, Any]:
-    """Open/play a song URL or search query using the player opener."""
-    url = req.url
-    kind = req.kind
-    artist = req.artist or ""
-    title = req.title or ""
-
-    if not url:
-        from urllib.parse import quote_plus
-        query = quote_plus(f"{artist} {title}".strip())
-        if not query:
-            raise HTTPException(status_code=400, detail="No URL or artist/title provided")
-        url = f"https://www.youtube.com/results?search_query={query}"
-        kind = "youtube_search"
-
-    try:
-        pid = open_song_url(url, kind)
-        return {
-            "status": "launched",
-            "url": url,
-            "kind": kind,
-            "pid": pid,
-            "artist": artist,
-            "title": title,
-        }
-    except Exception as e:
-        log.exception("API play error for %s", url)
-        raise HTTPException(status_code=500, detail=f"Failed to launch player: {e}")
 
 
 @app.get("/api/stats")
@@ -183,14 +191,24 @@ def get_logs(lines: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
     try:
         content = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
         return {"file": str(LOG_FILE), "lines": content[-lines:]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
 
 
 def main() -> None:
-    """Entrypoint for starting the API server."""
+    """Entrypoint for starting the library API server.
+
+    Binds 0.0.0.0 by default so the process is reachable inside a container;
+    override with ``KARAOKE_API_HOST``/``KARAOKE_API_PORT``.
+    """
     import uvicorn
-    uvicorn.run("karaoke.api:app", host="127.0.0.1", port=8000, reload=True)
+
+    uvicorn.run(
+        "karaoke.api:app",
+        host=os.environ.get("KARAOKE_API_HOST", "0.0.0.0"),
+        port=int(os.environ.get("KARAOKE_API_PORT", "8000")),
+        reload=bool(os.environ.get("KARAOKE_API_RELOAD")),
+    )
 
 
 if __name__ == "__main__":
