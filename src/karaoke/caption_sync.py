@@ -140,6 +140,11 @@ def _format_lrc_timestamp(ms: int) -> str:
     return f"[{minutes:02d}:{seconds:02d}.{centis:02d}]"
 
 
+def _format_word_timestamp(ms: int) -> str:
+    """Render milliseconds as an Enhanced LRC word tag ``<mm:ss.cc>``."""
+    return "<" + _format_lrc_timestamp(ms)[1:-1] + ">"
+
+
 def _cue_text(event: dict) -> str:
     """Join a cue's word segments into a single cleaned line.
 
@@ -161,12 +166,15 @@ def _clean_token(raw: str) -> str:
     return text
 
 
-def _split_event(event: dict, start_ms: int, max_words: int) -> list[tuple[int, str]]:
+def _split_event(
+    event: dict, start_ms: int, max_words: int
+) -> list[tuple[int, str, list[int]]]:
     """Turn one cue into timed lines, splitting long cues on word offsets.
 
     json3 gives each word a ``tOffsetMs`` relative to the cue start, so a long
     cue can be broken into shorter karaoke lines at genuine word times rather
-    than interpolated guesses.
+    than interpolated guesses. Returns ``(start_ms, text, word_start_ms)`` so
+    callers can emit either plain or Enhanced LRC.
     """
     words: list[tuple[int, str]] = []
     for seg in event.get("segs") or []:
@@ -193,25 +201,32 @@ def _split_event(event: dict, start_ms: int, max_words: int) -> list[tuple[int, 
         return []
 
     if max_words <= 0 or len(cleaned) <= max_words:
-        text = _SPEAKER_RE.sub("", " ".join(t for _, t in cleaned)).strip()
-        return [(cleaned[0][0], text)] if text else []
+        chunks = [cleaned]
+    else:
+        chunks = [
+            cleaned[i : i + max_words]
+            for i in range(0, len(cleaned), max_words)
+        ]
 
-    out: list[tuple[int, str]] = []
-    for i in range(0, len(cleaned), max_words):
-        chunk = cleaned[i : i + max_words]
+    out: list[tuple[int, str, list[int]]] = []
+    for chunk in chunks:
         text = _SPEAKER_RE.sub("", " ".join(t for _, t in chunk)).strip()
-        if text:
-            out.append((chunk[0][0], text))
+        if not text:
+            continue
+        # Speaker-marker stripping can drop leading tokens; keep one timestamp
+        # per surviving word so word tags line up with the text.
+        times = [ts for ts, _ in chunk][-len(text.split()):]
+        out.append((chunk[0][0], text, times))
     return out
 
 
-def json3_to_lrc(payload: str | dict, *, max_words: int = 10) -> str:
-    """Convert a YouTube ``json3`` caption payload into LRC text.
+def _caption_rows(
+    payload: str | dict, max_words: int
+) -> list[tuple[int, str, list[int]]]:
+    """Parse a json3 payload into deduped ``(start_ms, text, word_ms)`` rows.
 
-    Each caption cue becomes one or more timed lines. Cues longer than
-    ``max_words`` are split on the per-word ``tOffsetMs`` timings json3
-    provides, so long uploader-supplied cues stay readable on screen without
-    inventing timestamps. Pass ``max_words=0`` to disable splitting.
+    Shared by the plain and Enhanced LRC writers so both agree exactly on line
+    splitting, ordering and de-duplication.
 
     Raises ``ValueError`` when the payload is not valid json3.
     """
@@ -225,7 +240,7 @@ def json3_to_lrc(payload: str | dict, *, max_words: int = 10) -> str:
     if not isinstance(data, dict):
         raise ValueError("json3 caption payload must be an object")
 
-    rows: list[tuple[int, str]] = []
+    rows: list[tuple[int, str, list[int]]] = []
     for event in data.get("events") or []:
         if not isinstance(event, dict) or not event.get("segs"):
             continue
@@ -236,12 +251,57 @@ def json3_to_lrc(payload: str | dict, *, max_words: int = 10) -> str:
 
     rows.sort(key=lambda r: r[0])
 
-    out: list[str] = []
+    deduped: list[tuple[int, str, list[int]]] = []
     previous: Optional[str] = None
-    for start_ms, text in rows:
+    for start_ms, text, word_ms in rows:
         # Rolling auto-captions repeat the same text as it grows; keep changes.
         if text == previous:
             continue
         previous = text
-        out.append(f"{_format_lrc_timestamp(start_ms)}{text}")
+        deduped.append((start_ms, text, word_ms))
+    return deduped
+
+
+def json3_to_lrc(payload: str | dict, *, max_words: int = 10) -> str:
+    """Convert a YouTube ``json3`` caption payload into LRC text.
+
+    Each caption cue becomes one or more timed lines. Cues longer than
+    ``max_words`` are split on the per-word ``tOffsetMs`` timings json3
+    provides, so long uploader-supplied cues stay readable on screen without
+    inventing timestamps. Pass ``max_words=0`` to disable splitting.
+
+    Raises ``ValueError`` when the payload is not valid json3.
+    """
+    return "\n".join(
+        f"{_format_lrc_timestamp(start_ms)}{text}"
+        for start_ms, text, _ in _caption_rows(payload, max_words)
+    )
+
+
+def json3_to_enhanced_lrc(payload: str | dict, *, max_words: int = 10) -> str:
+    """Convert a ``json3`` caption payload into **Enhanced** LRC.
+
+    json3 carries a start time for every word, so the output keeps them as
+    ``<mm:ss.xx>`` word tags:
+
+    ``[00:12.00]<00:12.00>I <00:12.30>see <00:12.60>trees``
+
+    That gives real word-level highlighting with no interpolation and no
+    manual tapping. Per the Enhanced LRC convention the first word tag matches
+    the line timestamp. Falls back to a bare line stamp when a row somehow has
+    no word timings.
+
+    Raises ``ValueError`` when the payload is not valid json3.
+    """
+    out: list[str] = []
+    for start_ms, text, word_ms in _caption_rows(payload, max_words):
+        stamp = _format_lrc_timestamp(start_ms)
+        words = text.split()
+        if len(word_ms) != len(words):
+            out.append(f"{stamp}{text}")
+            continue
+        tagged = " ".join(
+            f"{_format_word_timestamp(ts)}{w}" for ts, w in zip(word_ms, words)
+        )
+        out.append(f"{stamp}{tagged}")
     return "\n".join(out)
