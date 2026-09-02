@@ -17,8 +17,8 @@ from urllib.parse import quote_plus
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .browse import open_song_url
 from .logger import log
+from .player_open import open_song_url
 
 CTRL_API_VERSION = "0.2.0"
 

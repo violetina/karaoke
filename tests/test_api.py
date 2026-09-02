@@ -102,6 +102,32 @@ def test_library_api_does_not_import_desktop_opener():
     assert not hasattr(api_mod, "open_song_url")
 
 
+def test_deployable_modules_do_not_require_textual():
+    """api/ctrl_api must import without the TUI stack installed.
+
+    Regression: ctrl_api imported open_song_url from browse.py, which pulls in
+    textual at module level, so CI (no textual) failed at collection while a
+    dev machine with textual passed.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    script = (
+        "import sys;"
+        "sys.modules['textual'] = None;"
+        "import karaoke.api, karaoke.ctrl_api;"
+        "print('OK')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, env={"PYTHONPATH": str(src), "PATH": ""},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
 # --- control API -------------------------------------------------------
 
 def test_ctrl_health_reports_control_role():
