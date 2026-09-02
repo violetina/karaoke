@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karaoke"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,8 @@ dependencies = [
     "beautifulsoup4",
     "duckduckgo-search",
     "textual",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +36,8 @@ karaoke-stage = "karaoke.cli:stage_main"
 karaoke-player = "karaoke.cli:player_main"
 karaoke-backfill = "karaoke.cli:backfill_main"
 karaoke-browse = "karaoke.cli:browse_main"
+karaoke-api = "karaoke.api:main"
+karaoke-ctrl-api = "karaoke.ctrl_api:main"
 karaoke-vector-index = "karaoke.vector_index:vector_index_main"
 karaoke-tui = "karaoke.cli:tui_main"
 karaoke-analyze = "karaoke.cli:analyze_main"

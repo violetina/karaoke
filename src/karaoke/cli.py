@@ -405,6 +405,15 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
                     help="use logged-in browser cookies for caption access")
     yt.add_argument("--cookies", metavar="FILE", help="cookies.txt for authenticated access")
 
+    cap = sub.add_parser("captions",
+                         help="check whether a YouTube video has lyric captions")
+    cap.add_argument("url", help="YouTube URL")
+    cap.add_argument("--language", "-l", action="append", dest="languages",
+                     help="caption language preference (repeatable; default en,en-orig,nl)")
+    cap.add_argument("--cookies-from-browser", metavar="BROWSER",
+                     help="use logged-in browser cookies for caption access")
+    cap.add_argument("--cookies", metavar="FILE", help="cookies.txt for authenticated access")
+
     ls = sub.add_parser("list", help="list staged lyric candidates")
     ls.add_argument("--status", default="pending", choices=["pending", "approved", "rejected", "all"])
     ls.add_argument("-n", "--limit", type=int, default=20)
@@ -419,6 +428,23 @@ def stage_main(argv: Optional[list[str]] = None) -> int:
     reject.add_argument("id", type=int)
 
     args = ap.parse_args(argv)
+
+    if args.cmd == "captions":
+        from .stage_sources import check_youtube_captions
+        avail = check_youtube_captions(
+            args.url,
+            languages=args.languages or ("en", "en-orig", "nl"),
+            cookies_from_browser=args.cookies_from_browser,
+            cookies_file=args.cookies,
+        )
+        print(f"captions: {avail.describe()}")
+        print(f"  manual   : {', '.join(avail.manual_languages) or '-'}")
+        print(f"  automatic: {', '.join(avail.automatic_languages[:8]) or '-'}")
+        if avail.best is not None and avail.best.ext == "json3":
+            print("  -> json3 available: can produce SYNCED lyrics from cue timings")
+        elif avail.available:
+            print("  -> no json3 track: would produce PLAIN lyrics only")
+        return 0 if avail.available else 1
 
     if args.cmd == "youtube":
         from .stage_sources import stage_youtube_captions

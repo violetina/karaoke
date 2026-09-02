@@ -8,3 +8,9 @@ nodes:
       - containerPort: 30920
         hostPort: 9200
         protocol: TCP
+      # Karaoke library API NodePort -> localhost:8080 on the host.
+      # Only takes effect on a freshly created cluster; for an existing cluster
+      # use `make k8s-port-forward` instead of recreating it.
+      - containerPort: 30800
+        hostPort: 8080
+        protocol: TCP
