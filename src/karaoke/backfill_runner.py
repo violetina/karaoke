@@ -1,11 +1,11 @@
 """The business logic for the automated lyric backfill system."""
 from __future__ import annotations
-import re
 import time
 from . import localcache
 from . import youtube
 from . import web
 from .identify import SongRef
+from .lyrics import clean_title, fetch_lrclib
 from .player import get_synced
 
 def run() -> None:
@@ -24,9 +24,48 @@ def run() -> None:
             print(f"  Failed: {e}")
             _update_gap_status(gap['gap_id'], 'failed')
 
+
+def _find_lyrics_text(artist: str, title: str) -> str:
+    """Find plain lyrics text for a track: LRCLIB first, then Genius scrape.
+
+    LRCLIB is the primary, reliable source (no scraping); Genius is the
+    fallback. Returns "" when nothing usable is found.
+    """
+    # 1. LRCLIB (also try a cleaned title without "- Remastered" etc.)
+    for t in {title, clean_title(title)}:
+        ly = fetch_lrclib(artist, t)
+        if ly.plain:
+            print(f"    LRCLIB hit for '{artist} - {t}'")
+            return ly.plain
+        if ly.synced_raw:
+            # strip timestamps to plain text
+            from .lyrics import parse_lrc
+            plain = "\n".join(txt for _, txt in parse_lrc(ly.synced_raw))
+            if plain:
+                print(f"    LRCLIB synced hit for '{artist} - {t}'")
+                return plain
+
+    # 2. Genius fallback via web search + container parse
+    print("  LRCLIB miss; searching Genius...")
+    web_results = web.search(f"{artist} {title} lyrics genius")
+    for result in web_results:
+        if "genius.com" in result["url"]:
+            print(f"    Trying Genius link: {result['url']}")
+            text = web.fetch_genius_lyrics(result["url"])
+            if text:
+                return text
+    return ""
+
+
 def _process_gap(gap_id: int, artist: str, title: str) -> None:
-    """Process a single lyric gap."""
-    # 1. Find on YouTube
+    """Process a single lyric gap: find lyrics, then sync to downloaded audio."""
+    # 1. Find lyrics FIRST (cheap) — no point downloading audio without them.
+    print("  Searching for lyrics...")
+    lyrics_text = _find_lyrics_text(artist, title)
+    if not lyrics_text:
+        raise RuntimeError("No lyrics found (LRCLIB or Genius)")
+
+    # 2. Find + download audio on YouTube
     print(f"  Searching YouTube for '{artist} - {title}'...")
     yt_results = youtube.search(f"{artist} - {title}", limit=1)
     if not yt_results:
@@ -34,40 +73,18 @@ def _process_gap(gap_id: int, artist: str, title: str) -> None:
     yt_url = yt_results[0]['url']
     print(f"    Found: {yt_url}")
 
-    # 2. Download audio
     print("  Downloading audio...")
     audio_path = youtube.download(yt_url)
     print(f"    Downloaded to: {audio_path}")
 
-    # 3. Find lyrics
-    print("  Searching for lyrics...")
-    web_results = web.search(f"lyrics for '{artist} - {title}'")
-    if not web_results:
-        raise RuntimeError("No web results for lyrics found")
-    
-    lyrics_text = None
-    for result in web_results:
-        if 'genius.com' in result['url']:
-            print(f"    Found Genius link: {result['url']}")
-            page = web.extract([result['url']])[0]
-            
-            # More robust Genius lyric extraction
-            match = re.search(r'## .*? Lyrics(.*?)(##|More on Genius)', page['content'], re.DOTALL)
-            if match:
-                lyrics_text = match.group(1).strip()
-            
-            break
-    
-    if not lyrics_text:
-        raise RuntimeError("Could not find lyrics on Genius")
-
-    # 4. Generate synced lyrics
+    # 3. Generate synced lyrics by aligning the plain text to the audio.
     print("  Generating synced lyrics...")
+    import os
     import tempfile
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".txt") as f:
         f.write(lyrics_text)
         lyrics_file_path = f.name
-    
+
     try:
         ref = SongRef(
             artist=artist,
@@ -82,9 +99,8 @@ def _process_gap(gap_id: int, artist: str, title: str) -> None:
             lyrics_file=lyrics_file_path,
         )
     finally:
-        import os
         os.remove(lyrics_file_path)
-    
+
     print("    Done.")
 
 
