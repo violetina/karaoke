@@ -290,6 +290,47 @@ def test_render_body_marks_gap_instead_of_stale_highlight():
     assert "♪" in body.plain
 
 
+# --- real word timings (Enhanced LRC / captions) ---
+
+def test_word_index_at_uses_real_timings():
+    from karaoke.player import word_index_at
+
+    times = [10.0, 10.5, 11.2, 12.0]
+    assert word_index_at(times, 9.0) == 0     # before the first word
+    assert word_index_at(times, 10.1) == 0
+    assert word_index_at(times, 10.6) == 1
+    assert word_index_at(times, 11.9) == 2
+    assert word_index_at(times, 99.0) == 3    # clamps to last
+
+
+def test_word_index_at_empty_returns_minus_one():
+    from karaoke.player import word_index_at
+
+    assert word_index_at([], 5.0) == -1
+
+
+def test_timeline_word_index_prefers_real_timings_over_interpolation():
+    """With real timings the highlight must not depend on line fraction."""
+    tl = LyricTimeline(
+        [(10.0, "one two three four"), (30.0, "next")],
+        word_times={0: [10.0, 10.4, 10.8, 11.2]},
+    )
+    # Interpolation across 10..30s would still be on word 0 at 11.3s;
+    # real timings put us on the last word.
+    assert tl.word_index(11.3) == 3
+
+
+def test_timeline_word_index_falls_back_to_interpolation():
+    tl = LyricTimeline([(10.0, "one two three four"), (14.0, "next")])
+    assert tl.word_index(13.9) == 3
+
+
+def test_timeline_word_index_intro_returns_minus_one():
+    tl = LyricTimeline([(10.0, "a b")])
+    assert tl.word_index(1.0) == -1
+
+
+
 
 
 

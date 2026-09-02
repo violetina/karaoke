@@ -163,6 +163,21 @@ class LyricTimeline:
             return 0.0
         return max(0.0, min(1.0, (elapsed - end) / (nxt - end)))
 
+    def word_index(self, elapsed: float) -> int:
+        """Index of the word to highlight on the active line.
+
+        Prefers real per-word timings (Enhanced LRC / YouTube captions) when
+        available for the line; otherwise falls back to interpolating across
+        the line's capped duration.
+        """
+        a = self.active_index(elapsed)
+        if a < 0:
+            return -1
+        times = self.word_times.get(a)
+        if times:
+            return word_index_at(times, elapsed)
+        return active_word_index(self.lines[a][1], self.active_fraction(elapsed))
+
     def active_fraction(self, elapsed: float, tail: float = 4.0,
                         max_line_s: Optional[float] = None) -> float:
         """Progress (0..1) through the currently-active line.
@@ -382,6 +397,24 @@ _NUDGE_HINT = "[v]-line [b]+line [0]reset [q]quit"
 DEFAULT_LEAD_S = 13.0
 
 
+def word_index_at(word_times: list[float], elapsed: float) -> int:
+    """Index of the word under the playhead given REAL per-word start times.
+
+    Unlike :func:`active_word_index`, this needs no interpolation: Enhanced LRC
+    and YouTube json3 captions carry a start time per word. Clamps to the first
+    word before the line starts and to the last word after it ends.
+    """
+    if not word_times:
+        return -1
+    idx = 0
+    for i, t in enumerate(word_times):
+        if t <= elapsed:
+            idx = i
+        else:
+            break
+    return idx
+
+
 def active_word_index(text: str, frac: float) -> int:
     """Index of the word to highlight given progress `frac` (0..1) through a line.
 
@@ -397,12 +430,13 @@ def active_word_index(text: str, frac: float) -> int:
 
 
 def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
-                       mood: str = "neutral") -> None:
+                       mood: str = "neutral", word: Optional[int] = None) -> None:
     """Append one lyric line to a Rich Text body.
 
     kind: 'active' (current line — highlight the current word in purple over a
     mood-tinted background), 'past' (dim) or 'future' (grey). `frac` drives the
-    word highlight; `mood` (from sentiment.mood_of) picks the active-line
+    word highlight unless an explicit `word` index is supplied (real per-word
+    timings); `mood` (from sentiment.mood_of) picks the active-line
     background. Imports Rich lazily so pure/tested code needn't depend on it.
     """
     if kind == "past":
@@ -414,7 +448,7 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
     # active line: word-level purple highlight over a mood-tinted background
     bg = _MOOD_BG.get(mood, "on blue")
     base = f"bold white {bg}"
-    wi = active_word_index(line, frac)
+    wi = active_word_index(line, frac) if word is None else word
     body.append("♪ ", style=base)
     if wi < 0:
         body.append(line + "\n", style=base)
@@ -464,7 +498,8 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
                 body.append(_gap_marker(tl.gap_progress(elapsed)) + "\n",
                             style="cyan")
             else:
-                _append_lyric_line(body, line, kind="active", frac=frac, mood=mood)
+                _append_lyric_line(body, line, kind="active", frac=frac,
+                                   mood=mood, word=tl.word_index(elapsed))
         elif i < active:
             _append_lyric_line(body, line, kind="past")
         else:
