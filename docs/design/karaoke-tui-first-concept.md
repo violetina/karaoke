@@ -57,3 +57,26 @@ Current scope:
 - footer key bindings
 
 Then move one behavior at a time from `player.py`, `playerctl.py`, and the SQLite cache into widgets. Avoid depending on the older broken `browse.py` code path.
+
+## Implemented so far
+
+- `src/karaoke/detect.py` — auto player detection + mode (spotify / scan / browse),
+  URL-based lyric resolution, `launch_spotify()`, gap recording.
+- `src/karaoke/tui.py` — player-aware TUI: `m` cycles the mode override (auto →
+  browse → spotify → scan; forcing spotify launches the app), `space/n/p/[/]`
+  controls, `l` cycles console log level, staging-view Enter whitelists a
+  candidate (confirm modal), library filter (working / all / staging).
+- `src/karaoke/musictheory.py` — pure keys/relatives/Camelot + `reconcile_key`
+  (detected Am vs online C major are recognised as relative = same tonality).
+- `src/karaoke/analyze.py` — Essentia `edma` multi-window voted key + librosa
+  BPM, ffmpeg transcode for webm/opus. Benchmarked 4/4 exact on the vetted
+  ground-truth pop set (a smoke test, not a full benchmark).
+- `src/karaoke/track_analysis.py` — stores detected/reference/resolved key + BPM;
+  `verify_key()` reconciles an online key and persists the outcome.
+- `src/karaoke/visuals.py` — sentiment arc/bars + rhythm bar shown in the free
+  visual space, alongside detected key / BPM / tempo word.
+
+CLI: `karaoke-tui`, `karaoke-analyze` (`--file`, `--verify --key`, `--list`).
+Audio stack is isolated: `make install-audio` (or `pip install -r
+requirements-audio.txt`). Console logs: `KARAOKE_LOG=off|err|info|full`.
+

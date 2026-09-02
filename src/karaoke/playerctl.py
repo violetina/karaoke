@@ -89,3 +89,58 @@ def current_songref() -> Optional[SongRef]:
     if not ref.title:
         return None
     return ref
+
+
+def _run(cmd: list[str], *, timeout: float = 5.0) -> Optional[str]:
+    """Run a playerctl command, returning stdout or None on failure."""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=True
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    return proc.stdout.strip()
+
+
+def _base_cmd(player: str = "") -> list[str]:
+    cmd = ["playerctl"]
+    if player:
+        cmd += ["--player", player]
+    return cmd
+
+
+def position(player: str = "") -> Optional[float]:
+    """Current playback position in seconds for the (targeted) player."""
+    out = _run(_base_cmd(player) + ["position"])
+    if out is None:
+        return None
+    try:
+        return float(out)
+    except ValueError:
+        return None
+
+
+def status(player: str = "") -> Optional[str]:
+    """Playback status string (Playing/Paused/Stopped) or None."""
+    return _run(_base_cmd(player) + ["status"])
+
+
+def play_pause(player: str = "") -> bool:
+    """Toggle play/pause on the (targeted) player. Returns success."""
+    return _run(_base_cmd(player) + ["play-pause"]) is not None
+
+
+def next_track(player: str = "") -> bool:
+    """Skip to the next track. Returns success."""
+    return _run(_base_cmd(player) + ["next"]) is not None
+
+
+def previous_track(player: str = "") -> bool:
+    """Skip to the previous track. Returns success."""
+    return _run(_base_cmd(player) + ["previous"]) is not None
+
+
+def seek(offset_s: float, player: str = "") -> bool:
+    """Seek by a relative offset (seconds; may be negative). Returns success."""
+    arg = f"{offset_s:+g}" if offset_s < 0 else f"{offset_s:g}+"
+    return _run(_base_cmd(player) + ["position", arg]) is not None

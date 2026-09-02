@@ -3,6 +3,8 @@ SHELL := /bin/bash
 VENV ?= .venv
 PYTHON := PYTHONPATH=src $(VENV)/bin/python
 MKDOCS := $(VENV)/bin/mkdocs
+AUDIO_VENV ?= .venv-audio
+AUDIO_PY := $(AUDIO_VENV)/bin/python
 
 TOOLS_DIR := .tools/bin
 CACHE_DIR := .cache
@@ -16,6 +18,7 @@ MAKE2GRAPH_REF ?= master
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
+        install-audio analyze \
         index-youtube-cache vector-index vector-index-dry-run
 
 help: ## Show available targets
@@ -32,6 +35,12 @@ install: venv ## Install dependencies and the karaoke package
 
 install-confluence: install ## Install optional Confluence publishing dependencies
 	$(PYTHON) -m pip install -r requirements-confluence.txt
+
+install-audio: ## Install the isolated key/tempo analysis stack (essentia, librosa) into $(AUDIO_VENV)
+	python3 -m venv $(AUDIO_VENV)
+	$(AUDIO_PY) -m pip install --upgrade pip
+	$(AUDIO_PY) -m pip install -r requirements-audio.txt
+	@echo "[ok] audio stack ready in $(AUDIO_VENV) — set KARAOKE_AUDIO_PYTHON=$(PWD)/$(AUDIO_PY)"
 
 deps-make2graph: ## Fetch and build makefile2graph locally
 	@mkdir -p "$(TOOLS_DIR)" "$(CACHE_DIR)"
@@ -108,6 +117,9 @@ browse: ## Launch the interactive song browser TUI
 
 tui: ## Launch the clean karaoke control-surface TUI prototype
 	$(PYTHON) -m karaoke.tui
+
+analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
+	$(PYTHON) -c "import sys; from karaoke.cli import analyze_main; sys.exit(analyze_main(['--file','$(FILE)','--artist','$(ARTIST)','--title','$(TITLE)']))"
 
 browse-log: ## Follow TUI/open debug logs
 	tail -f "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/karaoke.log" "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/xdg-open.stderr.log"
