@@ -118,6 +118,24 @@ def resolve_lyrics(
                 det.title,
                 localcache.get_lyrics_by_track_id(track_id, conn),
             )
+        # Browser/player titles often carry decorations the cached track lacks
+        # (e.g. "(2019 Remastered)", "(Official Video)"). Retry with a cleaned
+        # title before giving up so remaster/live tabs still resolve.
+        from .lyrics import clean_title
+
+        cleaned = clean_title(det.title)
+        if cleaned and cleaned != det.title:
+            track_id = localcache.find_track_id(det.artist, cleaned, conn)
+            if track_id is not None:
+                row = conn.execute(
+                    "SELECT artist, title FROM tracks WHERE track_id = ?",
+                    (track_id,),
+                ).fetchone()
+                return (
+                    row["artist"] if row else det.artist,
+                    row["title"] if row else cleaned,
+                    localcache.get_lyrics_by_track_id(track_id, conn),
+                )
         # Fallback for empty artist (e.g. browser tab playing YouTube Music without artist tag)
         if not det.artist and det.title:
             cur = conn.cursor()

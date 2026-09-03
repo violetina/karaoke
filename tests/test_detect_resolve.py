@@ -26,6 +26,23 @@ def test_resolve_lyrics_miss_returns_none(tmp_path):
     assert lyrics is None
 
 
+def test_resolve_lyrics_strips_remaster_suffix(tmp_path):
+    # The cached track has a plain title; the browser reports a decorated one.
+    conn = localcache.connect(tmp_path / "k.db")
+    localcache.add_track_and_lyrics(
+        "Brant Bjork", "Too Many Chiefs... Not Enough Indians",
+        Lyrics(synced_raw="[00:01.00] hey", source="lrclib", lines=[(1.0, "hey")]),
+        conn=conn,
+    )
+    det = Detection(
+        "scan", "chromium", "Brant Bjork",
+        "Too Many Chiefs... Not Enough Indians (2019 Remastered)", "",
+    )
+    artist, title, lyrics = detect.resolve_lyrics(det, conn)
+    assert title == "Too Many Chiefs... Not Enough Indians"
+    assert lyrics is not None and lyrics.has_synced
+
+
 def test_record_gap_logs_gap_and_source(tmp_path):
     conn = localcache.connect(tmp_path / "k.db")
     det = Detection("scan", "firefox", "New", "Song", "https://youtu.be/new")
