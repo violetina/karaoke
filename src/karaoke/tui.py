@@ -22,6 +22,7 @@ sentiment + rhythm read-out for the current lyrics.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from urllib.parse import quote_plus
 
@@ -57,6 +58,19 @@ FILTER_OPTIONS = [
 
 # Manual mode override cycle. None == auto-detect.
 MODE_CYCLE = [None, "browse", "scan"]
+
+# Browser MPRIS position typically runs slightly AHEAD of audible output (output
+# buffering/latency), so lyrics lead the sound. This positive offset (seconds) is
+# subtracted from the reported position to pull the highlight back into sync.
+# Override the default with KARAOKE_SYNC_OFFSET; nudge live with , / . keys.
+def _default_sync_offset() -> float:
+    try:
+        return float(os.environ.get("KARAOKE_SYNC_OFFSET", "1.3"))
+    except ValueError:
+        return 1.3
+
+
+SYNC_OFFSET_STEP = 0.1
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -111,6 +125,8 @@ class KaraokeTui(App):
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("s", "resync", "Resync"),
+        ("comma", "sync_earlier", "Lyrics -0.1s"),
+        ("full_stop", "sync_later", "Lyrics +0.1s"),
         ("m", "cycle_mode", "Mode"),
         ("enter", "select", "Open/Whitelist"),
         ("space", "play_pause", "Play/Pause"),
@@ -132,6 +148,7 @@ class KaraokeTui(App):
         self._sync_mood = "neutral"
         self._gap_logged: set[tuple[str, str]] = set()
         self._elapsed = 0.0
+        self._sync_offset = _default_sync_offset()
         self._log_level = log_level
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
@@ -277,6 +294,21 @@ class KaraokeTui(App):
         self._sync_key = None
         self._poll_detection()
         self.notify("Resynced playhead")
+
+    def action_sync_earlier(self) -> None:
+        # Show lyrics earlier: increase the offset we subtract from position.
+        self._sync_offset = round(self._sync_offset + SYNC_OFFSET_STEP, 2)
+        self._nudge_sync()
+
+    def action_sync_later(self) -> None:
+        # Show lyrics later: decrease the offset (can go negative to delay).
+        self._sync_offset = round(self._sync_offset - SYNC_OFFSET_STEP, 2)
+        self._nudge_sync()
+
+    def _nudge_sync(self) -> None:
+        self.notify(f"Lyric sync offset: {self._sync_offset:+.1f}s")
+        if self._det.is_active and self._timeline.lines:
+            self._tick_lyrics()
 
     def action_cycle_log(self) -> None:
         order = ["off", "err", "info", "full"]
@@ -493,7 +525,7 @@ class KaraokeTui(App):
                 f"♪ {display_artist} - {display_title}\n"
                 f"mode: {det.mode}  player: {det.player or '—'}\n"
                 f"{keybpm_line}\n"
-                f"synced lyrics · {lyrics.source}"
+                f"synced lyrics · {lyrics.source} · offset {self._sync_offset:+.1f}s (, / .)"
             )
         else:
             self._timeline = LyricTimeline([])
@@ -517,8 +549,11 @@ class KaraokeTui(App):
         pos = playerctl.position(self._control_player())
         if pos is None:
             return
-        self._elapsed = pos
-        self._render_synced(pos)
+        # Pull the highlight back by the sync offset: browser MPRIS position runs
+        # ahead of audible output, so lyrics would otherwise lead the sound.
+        elapsed = max(0.0, pos - self._sync_offset)
+        self._elapsed = elapsed
+        self._render_synced(elapsed)
 
     def _render_synced(self, elapsed: float) -> None:
         tl = self._timeline

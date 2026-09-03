@@ -91,6 +91,14 @@ When a track has both a Spotify and a YouTube source, browse and TUI list mode d
 
 When the TUI is syncing a YouTube / YouTube Music tab that has **no cached synced lyrics**, it now auto-stages the video's captions in a background worker. If the captions carry real timing (json3 `synced`/`enhanced`), they are auto-approved into the local cache and the lyric timeline reloads immediately — no manual `karaoke-stage youtube … && approve` needed. Untimed (plain) captions are left in the staging queue for manual review instead of being auto-approved. Each video is attempted only once per session, and the fetch respects the `KARAOKE_COOKIES_FROM_BROWSER` cookie setting.
 
+## Lyric sync offset in scan mode
+
+Browser MPRIS `position` runs slightly **ahead** of audible output (output/device buffering), so in scan mode lyrics tend to lead the sound (observed ~1.3s). The TUI subtracts a **sync offset** from the reported position before highlighting: `elapsed = position - offset`.
+
+- Default offset is `1.3` seconds; override with `KARAOKE_SYNC_OFFSET` (e.g. `KARAOKE_SYNC_OFFSET=0.8`).
+- Nudge live in the TUI with `,` (lyrics earlier, +0.1s) and `.` (lyrics later, -0.1s). A negative offset delays lyrics past the raw position.
+- The current offset is shown on the now-playing panel's `synced lyrics · <source> · offset ±X.Xs (, / .)` line.
+
 
 
 ### Execution Steps
