@@ -44,12 +44,26 @@ class KaraokeBrowser(App):
         table = self.query_one(DataTable)
         with localcache.connect() as conn:
             cur = conn.cursor()
+            # Prefer a browser-openable source (youtube/http) over spotify so
+            # Enter opens the song in the browser rather than depending on the
+            # Spotify desktop app. Selection is deterministic per track.
             cur.execute(
                 """
                 SELECT t.artist, t.title, s.url, s.kind
                 FROM tracks t
-                LEFT JOIN sources s ON t.track_id = s.track_id
-                GROUP BY t.track_id
+                LEFT JOIN sources s ON s.source_id = (
+                    SELECT s2.source_id FROM sources s2
+                    WHERE s2.track_id = t.track_id
+                    ORDER BY
+                        CASE
+                            WHEN s2.kind = 'youtube' THEN 0
+                            WHEN s2.url LIKE 'http%' THEN 1
+                            WHEN s2.kind = 'spotify' THEN 2
+                            ELSE 3
+                        END,
+                        s2.source_id
+                    LIMIT 1
+                )
                 ORDER BY t.artist, t.title
                 """
             )

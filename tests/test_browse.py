@@ -44,3 +44,39 @@ def test_open_song_url_uses_playerctl_for_spotify(monkeypatch):
 
     assert pid is None
     assert calls == [(["playerctl", "open", "spotify:track:123"], True, True, True)]
+
+
+def test_load_songs_prefers_browser_openable_source(tmp_path, monkeypatch):
+    from karaoke import localcache
+    from karaoke.lyrics import Lyrics
+
+    db = tmp_path / "k.db"
+    _real_connect = localcache.connect
+    conn = _real_connect(db)
+    # Track with BOTH a spotify and a youtube source. Browse must pick the
+    # youtube (browser-openable) one so Enter opens the page, not Spotify.
+    localcache.add_track_and_lyrics(
+        "Kiki Rockwell", "Cup Runneth Over", Lyrics(),
+        url="https://open.spotify.com/track/abc", kind="spotify", conn=conn,
+    )
+    localcache.add_track_source(
+        "Kiki Rockwell", "Cup Runneth Over",
+        url="https://www.youtube.com/watch?v=xNx0", kind="youtube", conn=conn,
+    )
+    conn.close()
+
+    monkeypatch.setattr(browse.localcache, "connect", lambda *a, **k: _real_connect(db))
+
+    app = browse.KaraokeBrowser()
+
+    class FakeTable:
+        def add_row(self, *args):
+            pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable())
+    app.load_songs()
+
+    assert len(app._song_data) == 1
+    assert app._song_data[0]["kind"] == "youtube"
+    assert "youtube.com" in app._song_data[0]["url"]
+
