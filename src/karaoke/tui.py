@@ -132,6 +132,7 @@ class KaraokeTui(App):
         self._gap_logged: set[tuple[str, str]] = set()
         self._elapsed = 0.0
         self._log_level = log_level
+        self._autoloaded: set[str] = set()
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -449,6 +450,18 @@ class KaraokeTui(App):
                     detect.record_gap(det, conn)
                     self._gap_logged.add(key)
                     log.info("no lyrics; queued gap: %s - %s", det.artist, det.title)
+                
+                # Auto-autoload captions in background if URL is YouTube/YT Music
+                if det.url and (detect.is_youtube_url(det.url) or "music.youtube.com" in det.url.lower()):
+                    from .localcache import extract_youtube_id
+                    vid = extract_youtube_id(det.url)
+                    if vid and vid not in self._autoloaded:
+                        self._autoloaded.add(vid)
+                        self.run_worker(
+                            lambda u=det.url, v=vid: self._background_autoload_captions(u, v),
+                            exclusive=False,
+                            thread=True,
+                        )
         display_artist = artist or det.artist
         display_title = title or det.title
         current_song = {"artist": display_artist, "title": display_title}
@@ -588,8 +601,61 @@ class KaraokeTui(App):
             f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
         )
 
+    def _background_autoload_captions(self, url: str, vid: str) -> None:
+        """Fetch, stage, and auto-approve YouTube captions in a worker thread.
+
+        Runs via run_worker(thread=True); all UI mutations are marshalled back
+        onto the Textual event loop with call_from_thread.
+        """
+        self.call_from_thread(
+            self.notify, f"Autoloading captions for {vid}…", severity="information"
+        )
+        try:
+            from .stage_sources import stage_youtube_captions
+            from . import staging
+
+            result = stage_youtube_captions(url)
+            # Only auto-approve when captions carry real timing (synced/enhanced).
+            if result and caption_is_synced(result.source_kind) and result.lines > 0:
+                staging.whitelist_staged(result.staged_id)
+                self.call_from_thread(
+                    self.notify,
+                    f"Auto-loaded synced captions for {result.artist} - {result.title}",
+                    severity="information",
+                )
+                log.info("Autoloaded and approved captions for %s (staged_id=%s)",
+                         url, result.staged_id)
+                # Re-poll so the newly approved lyrics load into the timeline now.
+                self._sync_key = None
+                self.call_from_thread(self._poll_detection)
+            else:
+                log.warning("Autoload: staged captions not synced for %s (kind=%s)",
+                            url, result.source_kind if result else "none")
+                self.call_from_thread(
+                    self.notify,
+                    "Autoload: only unsynced captions found; left in staging queue.",
+                    severity="warning",
+                )
+        except Exception:
+            log.exception("Background autoload failed for %s", url)
+            self.call_from_thread(
+                self.notify,
+                "Autoload: no usable captions found on YouTube.",
+                severity="warning",
+            )
+
 
 # -- pure helpers (unit-tested) ------------------------------------------
+def caption_is_synced(source_kind: str) -> bool:
+    """True when a staged caption source_kind carries real timing.
+
+    Caption source kinds look like ``youtube_caption_manual_en-US_enhanced``
+    or ``..._synced`` (timed) vs ``..._plain`` (no timing). Only timed captions
+    are worth auto-approving into the live timeline.
+    """
+    return "_synced" in source_kind or "_enhanced" in source_kind
+
+
 def first_nonempty_line(text: str) -> str:
     """Return the first non-empty line from a block of text."""
     for line in text.splitlines():
