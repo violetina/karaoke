@@ -36,6 +36,7 @@ class Detection:
     artist: str = ""
     title: str = ""
     url: str = ""
+    mpris_name: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -59,14 +60,15 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
     """
     if meta is None:
         return Detection(mode="browse")
-    player = (meta.player or "").lower()
+    player = (meta.mpris_name or meta.player or "").lower()
+    mpris = meta.mpris_name or meta.player
     ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
     if player.startswith("spotify"):
-        return Detection("spotify", meta.player, ref.artist, ref.title, meta.url)
+        return Detection("spotify", meta.player, ref.artist, ref.title, meta.url, mpris_name=mpris)
     # A desktop or browser player is active: sync to its position. Trust a
     # YouTube URL over the (often stale) browser artist/title for display.
     if ref.title or ref.artist or meta.url:
-        return Detection("scan", meta.player, ref.artist, ref.title, meta.url)
+        return Detection("scan", meta.player, ref.artist, ref.title, meta.url, mpris_name=mpris)
     return Detection(mode="browse")
 
 

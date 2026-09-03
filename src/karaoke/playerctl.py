@@ -23,6 +23,7 @@ class PlayerMetadata:
     album: str = ""
     url: str = ""
     player: str = ""
+    mpris_name: str = ""
 
 
 def _clean_piece(text: str) -> str:
@@ -128,7 +129,8 @@ def current_metadata() -> Optional[PlayerMetadata]:
     if len(parts) < 2:
         return None
     parts += [""] * (5 - len(parts))
-    player_name = _clean_piece(parts[4])
+    raw_player = _clean_piece(parts[4])
+    player_name = raw_player
     title_text = _clean_piece(parts[1])
     url_text = _clean_piece(parts[3])
     if "youtube music" in title_text.lower() or "music.youtube.com" in url_text.lower():
@@ -142,6 +144,7 @@ def current_metadata() -> Optional[PlayerMetadata]:
         album=_clean_piece(parts[2]),
         url=url_text,
         player=player_name,
+        mpris_name=raw_player,
     )
     if not meta.artist and not meta.title:
         return None
