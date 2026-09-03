@@ -133,6 +133,7 @@ class KaraokeTui(App):
         self._elapsed = 0.0
         self._log_level = log_level
         self._autoloaded: set[str] = set()
+        self._postprocess_enqueued: set[tuple[str, str]] = set()
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -466,6 +467,22 @@ class KaraokeTui(App):
         display_title = title or det.title
         current_song = {"artist": display_artist, "title": display_title}
         keybpm_line = self._format_keybpm_line(current_song)
+        # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
+        # if this track is missing derived assets. Best-effort; no-op if the
+        # RabbitMQ broker is unreachable.
+        pp_key = (display_artist.lower(), display_title.lower())
+        if pp_key not in self._postprocess_enqueued:
+            self._postprocess_enqueued.add(pp_key)
+            try:
+                from .postprocess_queue import enqueue_if_needed
+                self.run_worker(
+                    lambda a=display_artist, t=display_title, u=det.url or "":
+                        enqueue_if_needed(a, t, u),
+                    exclusive=False,
+                    thread=True,
+                )
+            except Exception:
+                log.debug("postprocess enqueue dispatch failed", exc_info=True)
         if lyrics is not None and lyrics.has_synced:
             self._timeline = timeline_from_lyrics(lyrics)
             now.update(

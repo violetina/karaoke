@@ -91,6 +91,35 @@ When a track has both a Spotify and a YouTube source, browse and TUI list mode d
 
 When the TUI is syncing a YouTube / YouTube Music tab that has **no cached synced lyrics**, it now auto-stages the video's captions in a background worker. If the captions carry real timing (json3 `synced`/`enhanced`), they are auto-approved into the local cache and the lyric timeline reloads immediately — no manual `karaoke-stage youtube … && approve` needed. Untimed (plain) captions are left in the staging queue for manual review instead of being auto-approved. Each video is attempted only once per session, and the fetch respects the `KARAOKE_COOKIES_FROM_BROWSER` cookie setting.
 
+## Async post-processing queue (key/BPM analysis + word timing)
+
+Some derived assets are too slow to compute inline while a song plays:
+
+- **Audio analysis** — musical key + tempo/BPM + energy/brightness (essentia/librosa), stored in `track_analysis`. Needs the downloaded audio file.
+- **Word-level timing** — upgrading line-level synced lyrics to Enhanced LRC using YouTube json3 captions.
+
+These are now offloaded to a **RabbitMQ work queue** running in the kind cluster. When the TUI syncs a track, it calls `postprocess_queue.enqueue_if_needed(...)`, which checks `needs_postprocessing(track_id)` and only publishes a task when something is actually missing. A host-side worker (`karaoke-postprocess-worker`) consumes the queue and runs the analysis/timing steps, writing results back into SQLite.
+
+### Why host-side worker + in-cluster broker
+The broker (RabbitMQ) is stateless infra and lives in kind (`deploy/k8s/rabbitmq.yaml`). The **worker runs on the host**, because it needs the local SQLite DB, the YouTube audio cache, and the heavy analysis stack (essentia/whisper/yt-dlp) — none of which belong in the slim API image. The queue is intentionally **non-durable in practice**: if the broker is reset, just re-fill it from SQLite with `make postprocess-enqueue-all`.
+
+### Running it
+```bash
+# 1. Deploy the broker (idempotent; part of the normal kustomize apply)
+kubectl --context kind-karaoke apply -k deploy/k8s
+
+# 2. Expose the broker to the host (existing cluster has no AMQP port mapping)
+make mq-port-forward          # forwards localhost:5672 (+ management 15672)
+
+# 3. Run the worker (leave it running; processes tasks as they arrive)
+make postprocess-worker
+
+# 4. (optional) Back-fill the queue for every track missing analysis/timing
+make postprocess-enqueue-all
+```
+Broker connection is configured via `RABBITMQ_HOST` (default `localhost`), `RABBITMQ_USER`/`RABBITMQ_PASS` (default `guest`). If the broker is unreachable, `enqueue_if_needed` is a silent no-op, so the TUI/app never blocks or crashes.
+
+
 
 
 ### Execution Steps

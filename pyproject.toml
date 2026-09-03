@@ -19,6 +19,7 @@ dependencies = [
     "textual",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.28.0",
+    "pika",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ karaoke-vector-index = "karaoke.vector_index:vector_index_main"
 karaoke-tui = "karaoke.cli:tui_main"
 karaoke-analyze = "karaoke.cli:analyze_main"
 karaoke-upgrade-timings = "karaoke.upgrade_timings:upgrade_main"
+karaoke-postprocess-worker = "karaoke.postprocess_worker:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
