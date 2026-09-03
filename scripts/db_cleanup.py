@@ -1,17 +1,79 @@
 """Data cleanup, deduplication, and self-healing script for the karaoke platform database."""
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sqlite3
+from difflib import SequenceMatcher
 from pathlib import Path
 import time
 from typing import Optional
 
 from karaoke.config import settings
+from karaoke.lyrics import clean_title
 from karaoke.youtube import fetch_metadata, parse_youtube_title, search
 from karaoke.analyze import analyze_audio
 from karaoke import localcache, track_analysis
+
+# Two tracks whose durations differ by <= this many seconds are considered the
+# "same length" (same song); a larger gap means a different version (edit, live,
+# extended, remix) and the tracks are allowed to coexist.
+DURATION_TOLERANCE_S = 4.0
+
+# Minimum fuzzy similarity (0..1) on the cleaned title for two tracks to be
+# considered the same song title.
+TITLE_SIMILARITY = 0.86
+
+# When neither track has a known duration we cannot confirm "same length", so we
+# only merge on a near-identical title to stay safe.
+TITLE_SIMILARITY_NO_DURATION = 0.97
+
+
+def _norm_title(title: str) -> str:
+    """Normalized, decoration-stripped title for fuzzy comparison."""
+    return clean_title(title or "").lower().strip()
+
+
+def are_titles_similar(t1: str, t2: str, threshold: float = TITLE_SIMILARITY) -> bool:
+    """True if two titles are fuzzily the same song (after stripping decorations)."""
+    n1, n2 = _norm_title(t1), _norm_title(t2)
+    if not n1 or not n2:
+        return False
+    if n1 == n2:
+        return True
+    return SequenceMatcher(None, n1, n2).ratio() >= threshold
+
+
+def duration_relation(d1: Optional[float], d2: Optional[float]) -> str:
+    """Classify two durations: 'same', 'different', or 'unknown'.
+
+    'same'      -> within DURATION_TOLERANCE_S (same length == same song)
+    'different' -> known but far apart (a different version; allowed to coexist)
+    'unknown'   -> at least one duration is missing
+    """
+    if d1 is None or d2 is None:
+        return "unknown"
+    return "same" if abs(float(d1) - float(d2)) <= DURATION_TOLERANCE_S else "different"
+
+
+def is_duplicate(t1: sqlite3.Row, t2: sqlite3.Row) -> bool:
+    """Decide whether two tracks represent the same song and should be merged.
+
+    Rule (per user intent): same/compatible artist AND a matching title, where a
+    *different video with the same length* counts as a duplicate, but a
+    *different length* is a distinct version and is left alone. When durations
+    are unknown we require a near-identical title before merging.
+    """
+    if not are_artists_compatible(t1["artist"], t2["artist"]):
+        return False
+    rel = duration_relation(t1["duration"], t2["duration"])
+    if rel == "same":
+        return are_titles_similar(t1["title"], t2["title"])
+    if rel == "different":
+        return False  # different version — allowed to coexist
+    # unknown duration: only merge on a near-exact title
+    return are_titles_similar(t1["title"], t2["title"], TITLE_SIMILARITY_NO_DURATION)
 
 
 def are_artists_compatible(art1: str, art2: str) -> bool:
@@ -125,62 +187,72 @@ def merge_tracks(track_id_src: int, track_id_dest: int, conn: sqlite3.Connection
     cur.execute("DELETE FROM tracks WHERE track_id = ?", (track_id_src,))
 
 
-def run_deduplication(conn: sqlite3.Connection) -> None:
-    """Scan and merge duplicate tracks representing the same song."""
+def run_deduplication(conn: sqlite3.Connection, dry_run: bool = False) -> int:
+    """Scan and merge duplicate tracks representing the same song.
+
+    Two tracks are duplicates when the artist is compatible and the title
+    fuzzily matches AND the durations agree (same length). Different lengths are
+    treated as distinct versions and left in place (a song may legitimately have
+    several videos). Returns the number of merges performed (or would perform in
+    dry-run).
+    """
     print("=== Step 1: Track Deduplication and Merging ===")
+    if dry_run:
+        print("(dry-run: no changes will be written)")
     cur = conn.cursor()
-    cur.execute("SELECT track_id, artist, title, duration FROM tracks")
+    cur.execute("SELECT track_id, artist, title, duration FROM tracks ORDER BY track_id")
     tracks = cur.fetchall()
 
-    by_title = {}
-    for t in tracks:
-        title_key = t["title"].lower().strip()
-        by_title.setdefault(title_key, []).append(t)
-
+    # Track which ids have been merged away so we don't reuse them.
+    merged_away: set[int] = set()
     merged_count = 0
-    for title, group in by_title.items():
-        if len(group) <= 1:
+
+    for i in range(len(tracks)):
+        t1 = tracks[i]
+        if t1["track_id"] in merged_away:
             continue
+        for j in range(i + 1, len(tracks)):
+            t2 = tracks[j]
+            if t2["track_id"] in merged_away:
+                continue
+            if not is_duplicate(t1, t2):
+                continue
 
-        # Check pairs in this title group
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                t1, t2 = group[i], group[j]
-                
-                # Check if we still have both in the database (one might have been deleted/merged already)
-                cur.execute("SELECT 1 FROM tracks WHERE track_id = ?", (t1["track_id"],))
-                if not cur.fetchone():
-                    continue
-                cur.execute("SELECT 1 FROM tracks WHERE track_id = ?", (t2["track_id"],))
-                if not cur.fetchone():
-                    continue
+            # Pick canonical (dest): prefer the one with lyrics, then more
+            # sources (more videos), then the longer artist spelling.
+            dest, src = _choose_canonical(t1, t2, cur)
 
-                if are_artists_compatible(t1["artist"], t2["artist"]):
-                    # Decide which is source (duplicate) and which is destination (canonical)
-                    # We prefer keeping the one with lyrics
-                    cur.execute("SELECT 1 FROM lyrics WHERE track_id = ?", (t1["track_id"],))
-                    t1_has_lyrics = bool(cur.fetchone())
-                    cur.execute("SELECT 1 FROM lyrics WHERE track_id = ?", (t2["track_id"],))
-                    t2_has_lyrics = bool(cur.fetchone())
+            d1, d2 = t1["duration"], t2["duration"]
+            dd = "?" if (d1 is None or d2 is None) else f"{abs(d1 - d2):.0f}s"
+            print(f"Duplicate (Δdur={dd}): '{src['artist']}' - '{src['title']}' (ID {src['track_id']})")
+            print(f"              merge into: '{dest['artist']}' - '{dest['title']}' (ID {dest['track_id']})")
 
-                    if t1_has_lyrics and not t2_has_lyrics:
-                        dest, src = t1, t2
-                    elif t2_has_lyrics and not t1_has_lyrics:
-                        dest, src = t2, t1
-                    else:
-                        # Prefer longer artist name as canonical spelling (usually has full names)
-                        if len(t1["artist"]) >= len(t2["artist"]):
-                            dest, src = t1, t2
-                        else:
-                            dest, src = t2, t1
+            if not dry_run:
+                merge_tracks(src["track_id"], dest["track_id"], conn)
+            merged_away.add(src["track_id"])
+            merged_count += 1
+            if src["track_id"] == t1["track_id"]:
+                break  # t1 was merged away; move to next i
 
-                    print(f"Merging duplicate track: '{src['artist']}' - '{src['title']}' (ID {src['track_id']})")
-                    print(f"                     into: '{dest['artist']}' - '{dest['title']}' (ID {dest['track_id']})")
-                    
-                    merge_tracks(src["track_id"], dest["track_id"], conn)
-                    merged_count += 1
+    verb = "Would merge" if dry_run else "Merged"
+    print(f"Deduplication complete. {verb} {merged_count} duplicate track(s).")
+    return merged_count
 
-    print(f"Deduplication complete. Merged {merged_count} duplicate track(s).")
+
+def _choose_canonical(t1: sqlite3.Row, t2: sqlite3.Row, cur: sqlite3.Cursor):
+    """Return (dest, src): the track to keep and the one to merge away."""
+    def score(tid: int) -> tuple[int, int]:
+        has_lyrics = bool(cur.execute(
+            "SELECT 1 FROM lyrics WHERE track_id = ? AND COALESCE(synced_lyrics,'') || COALESCE(plain_lyrics,'') != ''",
+            (tid,)).fetchone())
+        nsrc = cur.execute("SELECT count(*) FROM sources WHERE track_id = ?", (tid,)).fetchone()[0]
+        return (1 if has_lyrics else 0, nsrc)
+
+    s1, s2 = score(t1["track_id"]), score(t2["track_id"])
+    if s1 != s2:
+        return (t1, t2) if s1 > s2 else (t2, t1)
+    # Tie-break on the longer (usually fuller) artist spelling.
+    return (t1, t2) if len(t1["artist"]) >= len(t2["artist"]) else (t2, t1)
 
 
 def run_source_healing(conn: sqlite3.Connection, limit: int = 50) -> None:
@@ -343,6 +415,13 @@ def find_track_id_by_artist_title(artist: str, title: str, conn: sqlite3.Connect
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Karaoke DB cleanup / dedup / self-healing")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Report duplicates without merging or healing.")
+    parser.add_argument("--dedup-only", action="store_true",
+                        help="Only run deduplication (skip source/cache healing).")
+    args = parser.parse_args()
+
     db_path = os.path.expanduser(settings.local_db)
     print(f"Using database: {db_path}")
     conn = sqlite3.connect(db_path)
@@ -350,13 +429,18 @@ def main() -> None:
     track_analysis.ensure_schema(conn)
 
     try:
+        if args.dry_run:
+            # Read-only: report duplicates, touch nothing.
+            run_deduplication(conn, dry_run=True)
+            return
         with conn:
             # 1. Deduplication
             run_deduplication(conn)
-            # 2. Source healing
-            run_source_healing(conn, limit=30) # Let's heal a chunk of up to 30 tracks in this run
-            # 3. Orphan cache healing
-            run_orphan_cache_healing(conn)
+            if not args.dedup_only:
+                # 2. Source healing
+                run_source_healing(conn, limit=30)  # heal up to 30 tracks per run
+                # 3. Orphan cache healing
+                run_orphan_cache_healing(conn)
     finally:
         conn.close()
 
