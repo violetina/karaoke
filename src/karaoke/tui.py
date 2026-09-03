@@ -197,6 +197,8 @@ class KaraokeTui(App):
 
     def _load_tracks(self, conn, *, only_working: bool) -> None:
         cur = conn.cursor()
+        # Prefer a browser-openable source (youtube/http) over spotify so Enter
+        # opens in the browser. Deterministic per track (see browse.py).
         cur.execute(
             """
             SELECT t.track_id, t.artist, t.title,
@@ -206,7 +208,19 @@ class KaraokeTui(App):
                    COALESCE(l.synced_lyrics, '') AS synced_lyrics,
                    COALESCE(l.plain_lyrics, '') AS plain_lyrics
             FROM tracks t
-            LEFT JOIN sources s ON t.track_id = s.track_id
+            LEFT JOIN sources s ON s.source_id = (
+                SELECT s2.source_id FROM sources s2
+                WHERE s2.track_id = t.track_id
+                ORDER BY
+                    CASE
+                        WHEN s2.kind = 'youtube' THEN 0
+                        WHEN s2.url LIKE 'http%' THEN 1
+                        WHEN s2.kind = 'spotify' THEN 2
+                        ELSE 3
+                    END,
+                    s2.source_id
+                LIMIT 1
+            )
             LEFT JOIN lyrics l
               ON t.track_id = l.track_id AND l.kind = 'approved'
             GROUP BY t.track_id

@@ -70,6 +70,24 @@ make index-youtube-cache
 
 This adds/updates `tracks` and `sources` only. It does not create fake empty approved lyrics rows; legacy empty placeholder rows are cleaned automatically.
 
+## Browser cookies for better YouTube sync
+
+YouTube increasingly requires authentication for full metadata, captions, and Premium-quality audio. You can supply your logged-in browser cookies to yt-dlp so all YouTube fetches (staging, metadata, backfill, timing upgrades) authenticate as you:
+
+- **Globally** (recommended): set `KARAOKE_COOKIES_FROM_BROWSER` in `.env` (see `.env.example`). Every YouTube fetch then uses those cookies unless a per-call flag overrides it.
+  ```bash
+  # .env
+  KARAOKE_COOKIES_FROM_BROWSER=firefox        # or chrome, or firefox:PROFILE
+  ```
+- **Per command**: pass `--cookies-from-browser firefox` (or `--cookies cookies.txt`) to `karaoke --youtube`, `karaoke-stage youtube`, etc.
+
+The yt-dlp spec is `BROWSER[+KEYRING][:PROFILE][::CONTAINER]` (e.g. `firefox:default`, `firefox::Meta`). This unlocks higher-bitrate audio, library-only/private tracks, and age-restricted videos. It does **not** read Premium's DRM-locked offline downloads. If the browser cookie DB is locked (browser running) or a PO token is required, the fetch automatically retries anonymously.
+
+## Browse/Enter opens the browser, not Spotify
+
+When a track has both a Spotify and a YouTube source, browse and TUI list mode deterministically prefer the **browser-openable** (YouTube/http) source so pressing Enter opens the song page in the browser rather than depending on the Spotify desktop app being the active target. Spotify URLs are only used when no web URL exists.
+
+
 ### Execution Steps
 1. Navigate to the appropriate worktree (`cd ~/karaoke-<feature>`).
 2. Activate the shared virtual environment if necessary (`source .venv/bin/activate`). Worktree Makefile targets run Python with `PYTHONPATH=src` so they import the worktree code rather than the editable install from another checkout. For ad-hoc Python commands in a worktree, use:

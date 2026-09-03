@@ -246,12 +246,23 @@ def test_fetch_metadata_forwards_cookies_to_ytdlp(monkeypatch):
 
 
 def test_fetch_metadata_no_cookie_keys_by_default(monkeypatch):
+    monkeypatch.delenv("KARAOKE_COOKIES_FROM_BROWSER", raising=False)
     ydl = _install_capturing_ytdlp(monkeypatch, {
         "title": "x - y", "uploader": "x", "duration": 10,
     })
     fetch_metadata("https://youtu.be/x")
     assert "cookiesfrombrowser" not in ydl.last_opts
     assert "cookiefile" not in ydl.last_opts
+
+
+def test_fetch_metadata_uses_cookie_env_fallback(monkeypatch):
+    monkeypatch.setenv("KARAOKE_COOKIES_FROM_BROWSER", "firefox")
+    ydl = _install_capturing_ytdlp(monkeypatch, {
+        "title": "x - y", "uploader": "x", "duration": 10,
+    })
+    fetch_metadata("https://youtu.be/x")
+    assert ydl.last_opts["cookiesfrombrowser"] == ("firefox", None, None, None)
+
 
 # --- YouTube download-cache cleanup ----------------------------------------
 

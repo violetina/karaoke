@@ -164,12 +164,14 @@ def _cookie_opts(
     unreadable) — it authenticates the normal yt-dlp fetch as you.
     """
     opts: dict = {}
-    if cookies_from_browser:
+    import os
+    cfb = cookies_from_browser or os.environ.get("KARAOKE_COOKIES_FROM_BROWSER")
+    if cfb:
         # yt-dlp parses "BROWSER[+KEYRING][:PROFILE][::CONTAINER]"; the API wants
         # a tuple (browser, profile|None, keyring|None, container|None). We hand
         # it the raw spec split minimally and let yt-dlp normalize, matching how
         # the --cookies-from-browser CLI flag is parsed.
-        spec = cookies_from_browser.strip()
+        spec = cfb.strip()
         browser, _, profile = spec.partition(":")
         keyring = None
         if "+" in browser:
