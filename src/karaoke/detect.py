@@ -90,27 +90,8 @@ def spotify_running() -> bool:
 
 
 def launch_spotify() -> tuple[bool, str]:
-    """Ensure the Spotify desktop app is running so ``spotify`` mode works.
-
-    Returns (started, message). If Spotify already exposes an MPRIS player,
-    reports that; otherwise launches the desktop client (native or flatpak) in
-    the background without blocking the TUI.
-    """
-    if spotify_running():
-        return False, "Spotify already running"
-    if shutil.which("spotify"):
-        cmd = ["spotify"]
-    elif shutil.which("flatpak"):
-        cmd = ["flatpak", "run", "com.spotify.Client"]
-    else:
-        return False, "Spotify not installed (no `spotify` or flatpak)"
-    try:
-        subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except OSError as exc:
-        return False, f"failed to launch Spotify: {exc}"
-    return True, "launching Spotify…"
+    """Deprecated: Spotify playback is unified into the browser window."""
+    return False, "disabled (Spotify plays in unified browser window)"
 
 
 def resolve_lyrics(

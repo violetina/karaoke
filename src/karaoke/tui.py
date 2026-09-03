@@ -56,7 +56,7 @@ FILTER_OPTIONS = [
 ]
 
 # Manual mode override cycle. None == auto-detect.
-MODE_CYCLE = [None, "browse", "spotify", "scan"]
+MODE_CYCLE = [None, "browse", "scan"]
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -380,12 +380,7 @@ class KaraokeTui(App):
         self._mode_override = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
         label = self._mode_override or "auto"
         log.info("mode override -> %s", label)
-        if self._mode_override == "spotify":
-            started, msg = detect.launch_spotify()
-            self.notify(f"Spotify mode — {msg}")
-            log.info("spotify mode: %s", msg)
-        else:
-            self.notify(f"Mode: {label}")
+        self.notify(f"Mode: {label}")
         self._sync_key = None  # force a re-resolve
         self._poll_detection()
 
