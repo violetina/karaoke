@@ -22,6 +22,27 @@ def test_busy_property():
     assert not PostprocessStatus(ready=0, unacked=0).busy
 
 
+def test_queued_totals_ready_and_unacked():
+    assert PostprocessStatus(ready=3, unacked=1).queued == 4
+    assert PostprocessStatus(ready=0, unacked=0).queued == 0
+
+
+def test_cpu_from_samples_delta():
+    from karaoke.postprocess_status import _cpu_from_samples
+    # 50 proc jiffies out of 100 total, on a hypothetical single-core view.
+    import karaoke.postprocess_status as ps
+    # pid must match between samples.
+    prev = (99, 1000, 10000)
+    cur = (99, 1050, 10100)  # dproc=50 dtotal=100 -> 50% * ncpu
+    val = _cpu_from_samples(prev, cur)
+    assert val is not None and val > 0
+
+
+def test_cpu_from_samples_pid_change_returns_none():
+    from karaoke.postprocess_status import _cpu_from_samples
+    assert _cpu_from_samples((1, 100, 1000), (2, 200, 2000)) is None
+
+
 def test_worker_load_line_idle():
     st = PostprocessStatus(
         available=True, worker_running=True, worker_cpu=0.0, ready=0, unacked=0
@@ -38,7 +59,7 @@ def test_worker_load_line_working_shows_busy_and_queue():
     )
     line = worker_load_line(st)
     assert "92% cpu" in line
-    assert "queue 3" in line
+    assert "queue 4" in line   # 3 ready + 1 in-flight
     assert "1 busy" in line
     assert "working" in line
 

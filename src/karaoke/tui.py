@@ -163,6 +163,7 @@ class KaraokeTui(App):
         self._log_level = log_level
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
+        self._cpu_sample: tuple | None = None
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -368,16 +369,23 @@ class KaraokeTui(App):
     def _refresh_worker_load(self) -> None:
         """Update the post-processing worker-load read-out (in a thread).
 
-        The status probe samples worker CPU over a short interval and hits the
-        RabbitMQ management API, so it runs off the UI thread; the result is
-        marshalled back via call_from_thread. Best-effort — never disrupts UI.
+        Uses a NON-blocking CPU delta between successive ticks (no sleep) so the
+        timer keeps firing indefinitely, and hits the RabbitMQ management API off
+        the UI thread. Best-effort — a failure updates the line but never stops
+        future refreshes.
         """
+        prev = self._cpu_sample
+
         def _work() -> None:
+            line = "worker-load: (unavailable)"
             try:
                 from . import postprocess_status as ps
-                line = ps.worker_load_line(ps.get_status())
+                st = ps.get_status(prev_cpu_sample=prev)
+                # Persist the fresh sample for the next tick's delta.
+                self._cpu_sample = st.cpu_sample
+                line = ps.worker_load_line(st)
             except Exception:
-                line = "worker-load: (unavailable)"
+                log.debug("worker-load refresh failed", exc_info=True)
             try:
                 self.call_from_thread(
                     self.query_one("#worker-load", Static).update, line
@@ -385,7 +393,10 @@ class KaraokeTui(App):
             except Exception:
                 pass
 
-        self.run_worker(_work, exclusive=False, thread=True)
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            log.debug("worker-load dispatch failed", exc_info=True)
 
     def _selected_song(self) -> SongRow | None:
         table = self.query_one("#library", DataTable)

@@ -37,6 +37,12 @@ class PostprocessStatus:
     worker_running: bool = False
     worker_cpu: Optional[float] = None   # percent of one core
     worker_rss_mb: Optional[float] = None
+    cpu_sample: Optional[tuple] = None    # (pid, proc_jiffies, total_jiffies) for next delta
+
+    @property
+    def queued(self) -> int:
+        """Total queue length: waiting (ready) + in-flight (unacked)."""
+        return self.ready + self.unacked
 
     @property
     def busy(self) -> bool:
@@ -103,7 +109,11 @@ def _proc_rss_mb(pid: int) -> Optional[float]:
 
 
 def _worker_cpu_percent(pid: int, interval: float = 0.15) -> Optional[float]:
-    """Sample CPU% (of one core) over a short interval."""
+    """Sample CPU% (of one core) over a short blocking interval.
+
+    Prefer :func:`cpu_percent_delta` for repeated polling (no sleep); this is a
+    convenience for one-off callers.
+    """
     s1 = _proc_cpu_times(pid)
     if s1 is None:
         return None
@@ -111,23 +121,46 @@ def _worker_cpu_percent(pid: int, interval: float = 0.15) -> Optional[float]:
     s2 = _proc_cpu_times(pid)
     if s2 is None:
         return None
-    dproc = s2[0] - s1[0]
-    dtotal = s2[1] - s1[1]
+    return _cpu_from_samples((pid,) + s1, (pid,) + s2)
+
+
+def _cpu_from_samples(prev, cur) -> Optional[float]:
+    """CPU% (of one core) from two (pid, proc_jiffies, total_jiffies) samples."""
+    if not prev or not cur:
+        return None
+    # A restarted worker (different pid) resets counters -> no valid delta yet.
+    if prev[0] != cur[0]:
+        return None
+    dproc = cur[1] - prev[1]
+    dtotal = cur[2] - prev[2]
     if dtotal <= 0:
         return 0.0
     ncpu = os.cpu_count() or 1
     return max(0.0, min(100.0 * ncpu, 100.0 * ncpu * dproc / dtotal))
 
 
-def get_status(*, sample_cpu: bool = True) -> PostprocessStatus:
-    """Best-effort snapshot of the post-processing pipeline."""
+def get_status(*, sample_cpu: bool = True, prev_cpu_sample=None) -> PostprocessStatus:
+    """Best-effort snapshot of the post-processing pipeline.
+
+    ``prev_cpu_sample`` is an opaque ``(pid, proc_jiffies, total_jiffies)`` tuple
+    from a previous call. When provided, worker CPU% is computed as a NON-blocking
+    delta against it (no sleep) — ideal for repeated polling from a UI timer. The
+    fresh sample for the next call is attached to the returned status as
+    ``.cpu_sample``. When omitted and ``sample_cpu`` is true, a short blocking
+    sample is taken instead.
+    """
     st = PostprocessStatus()
 
     # Worker process (independent of RabbitMQ reachability).
     pid = _find_worker_pid()
     if pid is not None:
         st.worker_running = True
-        if sample_cpu:
+        cur = _proc_cpu_times(pid)
+        if cur is not None:
+            st.cpu_sample = (pid,) + cur
+        if prev_cpu_sample is not None and st.cpu_sample is not None:
+            st.worker_cpu = _cpu_from_samples(prev_cpu_sample, st.cpu_sample)
+        elif sample_cpu:
             st.worker_cpu = _worker_cpu_percent(pid)
         st.worker_rss_mb = _proc_rss_mb(pid)
 
@@ -164,7 +197,7 @@ def worker_load_line(st: PostprocessStatus, bar_width: int = 10) -> str:
 
     Examples:
         worker-load: [████░░░░░░]  38% cpu · queue 0 · idle
-        worker-load: [█████████░] 92% cpu · queue 3 (1 busy) · working
+        worker-load: [█████████░] 92% cpu · queue 4 (1 busy) · working
         worker-load: worker down · broker unreachable
     """
     parts: list[str] = []
@@ -176,7 +209,8 @@ def worker_load_line(st: PostprocessStatus, bar_width: int = 10) -> str:
         parts.append("worker down")
 
     if st.available:
-        q = f"queue {st.ready}"
+        # Total queue length (waiting + in-flight); call out in-flight separately.
+        q = f"queue {st.queued}"
         if st.unacked:
             q += f" ({st.unacked} busy)"
         parts.append(q)
