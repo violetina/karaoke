@@ -86,16 +86,19 @@ class ConfirmScreen(ModalScreen[bool]):
     Button { margin: 0 1; }
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, yes_label: str = "Whitelist",
+                 no_label: str = "Cancel") -> None:
         super().__init__()
         self._message = message
+        self._yes_label = yes_label
+        self._no_label = no_label
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label(self._message)
             with Horizontal(id="buttons"):
-                yield Button("Whitelist", variant="success", id="yes")
-                yield Button("Cancel", variant="default", id="no")
+                yield Button(self._yes_label, variant="success", id="yes")
+                yield Button(self._no_label, variant="default", id="no")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -127,6 +130,7 @@ class KaraokeTui(App):
         ("s", "resync", "Resync"),
         ("comma", "sync_earlier", "Lyrics -0.1s"),
         ("full_stop", "sync_later", "Lyrics +0.1s"),
+        ("S", "save_offset", "Save offset"),
         ("m", "cycle_mode", "Mode"),
         ("enter", "select", "Open/Whitelist"),
         ("space", "play_pause", "Play/Pause"),
@@ -149,6 +153,8 @@ class KaraokeTui(App):
         self._gap_logged: set[tuple[str, str]] = set()
         self._elapsed = 0.0
         self._sync_offset = _default_sync_offset()
+        self._current_track_id: int | None = None
+        self._offset_dirty = False
         self._log_level = log_level
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
@@ -298,17 +304,49 @@ class KaraokeTui(App):
     def action_sync_earlier(self) -> None:
         # Show lyrics earlier: increase the offset we subtract from position.
         self._sync_offset = round(self._sync_offset + SYNC_OFFSET_STEP, 2)
+        self._offset_dirty = True
         self._nudge_sync()
 
     def action_sync_later(self) -> None:
         # Show lyrics later: decrease the offset (can go negative to delay).
         self._sync_offset = round(self._sync_offset - SYNC_OFFSET_STEP, 2)
+        self._offset_dirty = True
         self._nudge_sync()
 
     def _nudge_sync(self) -> None:
-        self.notify(f"Lyric sync offset: {self._sync_offset:+.1f}s")
+        hint = " · press S to save" if self._current_track_id is not None else ""
+        self.notify(f"Lyric sync offset: {self._sync_offset:+.1f}s{hint}")
         if self._det.is_active and self._timeline.lines:
             self._tick_lyrics()
+
+    def action_save_offset(self) -> None:
+        if self._current_track_id is None:
+            self.notify("No track to save offset for", severity="warning")
+            return
+        with localcache.connect() as conn:
+            localcache.set_sync_offset(self._current_track_id, self._sync_offset, conn)
+        self._offset_dirty = False
+        self.notify(f"Saved offset {self._sync_offset:+.1f}s for this track")
+        log.info("saved sync offset %.2f for track %s",
+                 self._sync_offset, self._current_track_id)
+
+    def _prompt_save_offset(self, track_id: int, offset: float) -> None:
+        """Ask whether to persist an unsaved offset for a track that's ending."""
+        def _on_confirm(save: bool | None) -> None:
+            if save:
+                with localcache.connect() as conn:
+                    localcache.set_sync_offset(track_id, offset, conn)
+                self.notify(f"Saved offset {offset:+.1f}s")
+                log.info("saved sync offset %.2f for track %s (on change)",
+                         offset, track_id)
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Save lyric sync offset {offset:+.1f}s for this track?",
+                yes_label="Save", no_label="Discard",
+            ),
+            _on_confirm,
+        )
 
     def action_cycle_log(self) -> None:
         order = ["off", "err", "info", "full"]
@@ -419,6 +457,23 @@ class KaraokeTui(App):
     def _control_player(self) -> str:
         return self._det.mpris_name if self._det.is_active else ""
 
+    def _resolve_track_id(self, det, artist, title, conn) -> int | None:
+        """Best-effort canonical track id for the current detection.
+
+        Prefers a source-URL / video-ID match (reliable for browser tabs), then
+        the resolved or raw artist/title. Returns None on a miss.
+        """
+        if getattr(det, "url", ""):
+            found = localcache.find_track_by_url(det.url, conn)
+            if found:
+                return found[0]
+        for a, t in ((artist, title), (det.artist, det.title)):
+            if a and t:
+                tid = localcache.find_track_id(a, t, conn)
+                if tid is not None:
+                    return tid
+        return None
+
     def action_play_pause(self) -> None:
         if self._det.is_active:
             ok = playerctl.play_pause(self._control_player())
@@ -479,9 +534,24 @@ class KaraokeTui(App):
         if key == self._sync_key:
             return
 
+        # Track changed: if the previous track has unsaved offset edits, ask to
+        # save them before we load the new track's offset.
+        if self._offset_dirty and self._current_track_id is not None:
+            self._prompt_save_offset(self._current_track_id, self._sync_offset)
+            self._offset_dirty = False
+
         self._sync_key = key
         with localcache.connect() as conn:
             artist, title, lyrics = detect.resolve_lyrics(det, conn)
+            # Resolve the canonical track id and load any saved per-track offset,
+            # falling back to the session default when none has been saved.
+            self._current_track_id = self._resolve_track_id(det, artist, title, conn)
+            saved = (
+                localcache.get_sync_offset(self._current_track_id, conn)
+                if self._current_track_id is not None else None
+            )
+            self._sync_offset = saved if saved is not None else _default_sync_offset()
+            self._offset_dirty = False
             if lyrics is None or not lyrics.has_synced:
                 if key not in self._gap_logged:
                     detect.record_gap(det, conn)

@@ -57,6 +57,13 @@ CREATE TABLE IF NOT EXISTS lyric_gaps (
     processed_at    REAL,
     UNIQUE(artist, title)
 );
+
+CREATE TABLE IF NOT EXISTS track_sync_offsets (
+    track_id    INTEGER PRIMARY KEY,
+    offset_s    REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
 """
 
 _SCHEMA = """
@@ -86,6 +93,32 @@ def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO lyric_gaps (artist, title, created_at) VALUES (?, ?, ?)",
         (artist, title, time.time())
+    )
+    conn.commit()
+
+
+def get_sync_offset(track_id: Optional[int], conn: sqlite3.Connection) -> Optional[float]:
+    """Return the saved lyric sync offset (seconds) for a track, or None."""
+    if track_id is None:
+        return None
+    row = conn.execute(
+        "SELECT offset_s FROM track_sync_offsets WHERE track_id = ?",
+        (track_id,),
+    ).fetchone()
+    return float(row["offset_s"]) if row is not None else None
+
+
+def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection) -> None:
+    """Persist (upsert) the per-track lyric sync offset in seconds."""
+    conn.execute(
+        """
+        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            offset_s = excluded.offset_s,
+            updated_at = excluded.updated_at
+        """,
+        (track_id, float(offset_s), time.time()),
     )
     conn.commit()
 

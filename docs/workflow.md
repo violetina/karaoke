@@ -99,6 +99,15 @@ Browser MPRIS `position` runs slightly **ahead** of audible output (output/devic
 - Nudge live in the TUI with `,` (lyrics earlier, +0.1s) and `.` (lyrics later, -0.1s). A negative offset delays lyrics past the raw position.
 - The current offset is shown on the now-playing panel's `synced lyrics · <source> · offset ±X.Xs (, / .)` line.
 
+### Per-track saved offsets
+
+Offsets can be persisted per track in the `track_sync_offsets` SQLite table (`track_id`, `offset_s`, `updated_at`):
+
+- Press `S` (capital) to save the current offset for the playing track.
+- When you've nudged the offset and the track changes, the TUI **asks** whether to Save or Discard the change before moving on.
+- When a track starts, its saved offset is loaded automatically; tracks with no saved value use the `KARAOKE_SYNC_OFFSET` default.
+- Helpers: `localcache.get_sync_offset(track_id, conn)` / `localcache.set_sync_offset(track_id, offset_s, conn)` (upsert).
+
 
 
 ### Execution Steps

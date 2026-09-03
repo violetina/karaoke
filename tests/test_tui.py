@@ -52,3 +52,31 @@ def test_default_sync_offset_fallback_on_bad_value(monkeypatch):
 def test_default_sync_offset_default(monkeypatch):
     monkeypatch.delenv("KARAOKE_SYNC_OFFSET", raising=False)
     assert _default_sync_offset() == 1.3
+
+
+def test_sync_offset_get_set_roundtrip(tmp_path):
+    from karaoke import localcache
+    from karaoke.lyrics import Lyrics
+
+    c = localcache.connect(tmp_path / "karaoke.db")
+    localcache.add_track_and_lyrics("A", "B", Lyrics(plain="x", source="lrclib"), conn=c)
+    tid = localcache.find_track_id("A", "B", c)
+    assert tid is not None
+
+    # No offset saved yet.
+    assert localcache.get_sync_offset(tid, c) is None
+
+    localcache.set_sync_offset(tid, 1.4, c)
+    assert localcache.get_sync_offset(tid, c) == 1.4
+
+    # Upsert replaces, does not duplicate.
+    localcache.set_sync_offset(tid, -0.5, c)
+    assert localcache.get_sync_offset(tid, c) == -0.5
+    assert c.execute("SELECT count(*) FROM track_sync_offsets").fetchone()[0] == 1
+
+
+def test_sync_offset_none_track_is_safe(tmp_path):
+    from karaoke import localcache
+
+    c = localcache.connect(tmp_path / "karaoke.db")
+    assert localcache.get_sync_offset(None, c) is None
