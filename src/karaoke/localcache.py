@@ -121,9 +121,25 @@ def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional
     return row["track_id"] if row else None
 
 
+def extract_youtube_id(url: str) -> Optional[str]:
+    """Extract the 11-character video ID from a YouTube or YouTube Music URL."""
+    if not url:
+        return None
+    import re
+    m = re.search(r"(?:v=|/v/|/embed/|youtu\.be/|/watch\?v=)([^&\s\?]+)", url)
+    if m:
+        val = m.group(1)
+        if len(val) == 11:
+            return val
+    if len(url) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", url):
+        return url
+    return None
+
+
 def find_track_by_url(url: str, conn: sqlite3.Connection) -> Optional[tuple[int, str, str]]:
     """Find a track by source URL, returning (track_id, artist, title)."""
     cur = conn.cursor()
+    # Try exact match first
     cur.execute(
         """
         SELECT t.track_id, t.artist, t.title
@@ -133,9 +149,26 @@ def find_track_by_url(url: str, conn: sqlite3.Connection) -> Optional[tuple[int,
         (url,)
     )
     row = cur.fetchone()
-    if not row:
-        return None
-    return row["track_id"], row["artist"], row["title"]
+    if row:
+        return row["track_id"], row["artist"], row["title"]
+
+    # Fallback to matching by YouTube video ID
+    vid = extract_youtube_id(url)
+    if vid:
+        cur.execute(
+            """
+            SELECT t.track_id, t.artist, t.title
+            FROM tracks t JOIN sources s ON t.track_id = s.track_id
+            WHERE s.url LIKE ? AND s.kind IN ('youtube', 'youtube_music')
+            LIMIT 1
+            """,
+            (f"%{vid}%",)
+        )
+        row = cur.fetchone()
+        if row:
+            return row["track_id"], row["artist"], row["title"]
+
+    return None
 
 
 def get_lyrics_by_track_id(track_id: int, conn: sqlite3.Connection) -> Optional[Lyrics]:

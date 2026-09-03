@@ -128,12 +128,20 @@ def current_metadata() -> Optional[PlayerMetadata]:
     if len(parts) < 2:
         return None
     parts += [""] * (5 - len(parts))
+    player_name = _clean_piece(parts[4])
+    title_text = _clean_piece(parts[1])
+    url_text = _clean_piece(parts[3])
+    if "youtube music" in title_text.lower() or "music.youtube.com" in url_text.lower():
+        player_name = "YouTube Music"
+    elif "youtube" in title_text.lower() or "youtube.com" in url_text.lower() or "youtu.be" in url_text.lower():
+        player_name = "YouTube"
+
     meta = PlayerMetadata(
         artist=_clean_piece(parts[0]),
-        title=_clean_piece(parts[1]),
+        title=title_text,
         album=_clean_piece(parts[2]),
-        url=_clean_piece(parts[3]),
-        player=_clean_piece(parts[4]),
+        url=url_text,
+        player=player_name,
     )
     if not meta.artist and not meta.title:
         return None
