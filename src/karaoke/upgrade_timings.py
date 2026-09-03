@@ -81,12 +81,13 @@ def upgrade_track(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("caption upgrade needs yt-dlp installed") from exc
 
-    from .youtube import _cookie_opts
+    from .youtube import _cookie_opts, _ejs_opts
 
     opts: dict = {
         "quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
     }
     opts.update(_cookie_opts(cookies_from_browser, cookies_file))
+    opts.update(_ejs_opts())
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(row["url"], download=False)
 
