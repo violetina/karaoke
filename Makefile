@@ -27,7 +27,8 @@ K8S_NAMESPACE ?= karaoke
         install-audio analyze api ctrl-api \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
-        index-youtube-cache db-cleanup vector-index vector-index-dry-run
+        index-youtube-cache db-cleanup vector-index vector-index-dry-run \
+        mq-port-forward postprocess-worker postprocess-enqueue-all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -124,6 +125,11 @@ browse: ## Launch the interactive song browser TUI
 	$(PYTHON) -m karaoke.browse
 
 tui: ## Launch the clean karaoke control-surface TUI prototype
+	@if ! ss -lnt | grep -q :9222; then \
+		echo "Launching Google Chrome in kiosk debugging mode..."; \
+		google-chrome --app="https://music.youtube.com" --remote-debugging-port=9222 --user-data-dir=/home/tina/.config/google-chrome-kiosk >/dev/null 2>&1 & \
+		sleep 1.5; \
+	fi
 	$(PYTHON) -m karaoke.tui
 
 analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
@@ -172,6 +178,17 @@ index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in b
 
 db-cleanup: ## Run track deduplication, orphan source auto-fill, and orphan cache file healing
 	$(PYTHON) scripts/db_cleanup.py
+
+mq-port-forward: ## Expose the in-cluster RabbitMQ AMQP on localhost:5672 (management on 15672)
+	# The pre-existing kind cluster has no AMQP port mapping; forward instead of
+	# recreating it (which would destroy the OpenSearch release).
+	kubectl --context $(KUBE_CONTEXT) -n $(K8S_NAMESPACE) port-forward svc/rabbitmq 5672:5672 15672:15672
+
+postprocess-worker: ## Run the host-side post-processing worker (analysis + word-timing)
+	$(PYTHON) -m karaoke.postprocess_worker
+
+postprocess-enqueue-all: ## Enqueue every track missing key/BPM or word-timing for post-processing
+	$(PYTHON) scripts/enqueue_postprocess.py
 
 upgrade-timings-dry-run: ## Preview which cached tracks can gain word-level timing
 	$(PYTHON) -m karaoke.upgrade_timings --dry-run

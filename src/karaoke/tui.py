@@ -97,7 +97,7 @@ class KaraokeTui(App):
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
     #now-playing { height: 8; border: round green; padding: 1; margin-bottom: 1; }
-    #lyrics { height: 14; border: round blue; padding: 1; margin-bottom: 1; }
+    #lyrics { height: 14; border: round blue; padding: 1; margin-bottom: 1; overflow-y: auto; }
     #library { height: 1fr; }
     #mood-square {
         height: 8; content-align: center middle; text-style: bold;
@@ -110,6 +110,7 @@ class KaraokeTui(App):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
+        ("s", "resync", "Resync"),
         ("m", "cycle_mode", "Mode"),
         ("enter", "select", "Open/Whitelist"),
         ("space", "play_pause", "Play/Pause"),
@@ -133,6 +134,7 @@ class KaraokeTui(App):
         self._elapsed = 0.0
         self._log_level = log_level
         self._autoloaded: set[str] = set()
+        self._postprocess_enqueued: set[tuple[str, str]] = set()
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -262,11 +264,19 @@ class KaraokeTui(App):
     def on_data_table_row_highlighted(self, _e: DataTable.RowHighlighted) -> None:
         self._show_selected_song()
 
+    def on_data_table_row_selected(self, _e: DataTable.RowSelected) -> None:
+        self.action_select()
+
     def action_refresh(self) -> None:
         self.load_songs()
         self._show_selected_song()
         self._poll_detection()
         self.notify("Refreshed")
+
+    def action_resync(self) -> None:
+        self._sync_key = None
+        self._poll_detection()
+        self.notify("Resynced playhead")
 
     def action_cycle_log(self) -> None:
         order = ["off", "err", "info", "full"]
@@ -380,7 +390,7 @@ class KaraokeTui(App):
         self._poll_detection()
 
     def _control_player(self) -> str:
-        return self._det.player if self._det.is_active else ""
+        return self._det.mpris_name if self._det.is_active else ""
 
     def action_play_pause(self) -> None:
         if self._det.is_active:
@@ -466,6 +476,22 @@ class KaraokeTui(App):
         display_title = title or det.title
         current_song = {"artist": display_artist, "title": display_title}
         keybpm_line = self._format_keybpm_line(current_song)
+        # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
+        # if this track is missing derived assets. Best-effort; no-op if the
+        # RabbitMQ broker is unreachable.
+        pp_key = (display_artist.lower(), display_title.lower())
+        if pp_key not in self._postprocess_enqueued:
+            self._postprocess_enqueued.add(pp_key)
+            try:
+                from .postprocess_queue import enqueue_if_needed
+                self.run_worker(
+                    lambda a=display_artist, t=display_title, u=det.url or "":
+                        enqueue_if_needed(a, t, u),
+                    exclusive=False,
+                    thread=True,
+                )
+            except Exception:
+                log.debug("postprocess enqueue dispatch failed", exc_info=True)
         if lyrics is not None and lyrics.has_synced:
             self._timeline = timeline_from_lyrics(lyrics)
             now.update(

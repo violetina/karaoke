@@ -18,6 +18,9 @@ def test_open_song_url_spawns_xdg_open(monkeypatch, tmp_path):
     monkeypatch.setattr(browse, "OPEN_STDOUT_LOG", tmp_path / "xdg.stdout.log")
     monkeypatch.setattr(browse, "OPEN_STDERR_LOG", tmp_path / "xdg.stderr.log")
     monkeypatch.setattr(browse.subprocess, "Popen", fake_popen)
+    # Mock try_chrome_cdp_navigate to always return False to isolate test
+    import karaoke.player_open
+    monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
 
     pid = browse.open_song_url("https://www.youtube.com/watch?v=bXWHf2HH8jY", "youtube")
 
@@ -27,23 +30,24 @@ def test_open_song_url_spawns_xdg_open(monkeypatch, tmp_path):
     assert calls[0][2] is not None
 
 
-def test_open_song_url_uses_playerctl_for_spotify(monkeypatch):
+def test_open_song_url_uses_playerctl_for_spotify(monkeypatch, tmp_path):
     calls = []
 
-    class Completed:
-        stdout = ""
-        stderr = ""
+    def fake_popen(args, stdout=None, stderr=None):
+        calls.append((args, stdout, stderr))
+        return DummyProcess()
 
-    def fake_run(args, check=False, capture_output=False, text=False):
-        calls.append((args, check, capture_output, text))
-        return Completed()
-
-    monkeypatch.setattr(browse.subprocess, "run", fake_run)
+    monkeypatch.setattr(browse, "OPEN_STDOUT_LOG", tmp_path / "xdg.stdout.log")
+    monkeypatch.setattr(browse, "OPEN_STDERR_LOG", tmp_path / "xdg.stderr.log")
+    monkeypatch.setattr(browse.subprocess, "Popen", fake_popen)
+    import karaoke.player_open
+    monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
 
     pid = browse.open_song_url("spotify:track:123", "spotify")
 
-    assert pid is None
-    assert calls == [(["playerctl", "open", "spotify:track:123"], True, True, True)]
+    assert pid == 4242
+    assert calls[0][0] == ["xdg-open", "https://open.spotify.com/track/123"]
+
 
 
 def test_load_songs_prefers_browser_openable_source(tmp_path, monkeypatch):

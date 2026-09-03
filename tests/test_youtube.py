@@ -183,7 +183,8 @@ def test_fetch_metadata_raises_actionable_error_without_ytdlp(monkeypatch):
 
 # --- cookie / Premium auth --------------------------------------------------
 
-def test_cookie_opts_empty_when_none():
+def test_cookie_opts_empty_when_none(monkeypatch):
+    monkeypatch.delenv("KARAOKE_COOKIES_FROM_BROWSER", raising=False)
     assert _cookie_opts(None, None) == {}
 
 
@@ -206,7 +207,8 @@ def test_cookie_opts_browser_with_keyring_and_container():
     }
 
 
-def test_cookie_opts_file():
+def test_cookie_opts_file(monkeypatch):
+    monkeypatch.delenv("KARAOKE_COOKIES_FROM_BROWSER", raising=False)
     assert _cookie_opts(None, "/home/tina/cookies.txt") == {
         "cookiefile": "/home/tina/cookies.txt"
     }
