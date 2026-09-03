@@ -59,15 +59,20 @@ FILTER_OPTIONS = [
 # Manual mode override cycle. None == auto-detect.
 MODE_CYCLE = [None, "browse", "scan"]
 
-# Browser MPRIS position typically runs slightly AHEAD of audible output (output
-# buffering/latency), so lyrics lead the sound. This positive offset (seconds) is
-# subtracted from the reported position to pull the highlight back into sync.
-# Override the default with KARAOKE_SYNC_OFFSET; nudge live with , / . keys.
-def _default_sync_offset() -> float:
+# Browser MPRIS position can run slightly AHEAD of audible output (output
+# buffering/latency); a positive offset (seconds) is subtracted from the reported
+# position to pull the highlight back into sync. Default is 0 (no correction) for
+# both modes; tune per song with , / . and save with S, or set the env defaults
+# KARAOKE_SYNC_OFFSET / KARAOKE_SYNC_OFFSET_SPOTIFY.
+def _default_sync_offset(mode: str = "scan") -> float:
+    if mode == "spotify":
+        env, fallback = "KARAOKE_SYNC_OFFSET_SPOTIFY", 0.0
+    else:
+        env, fallback = "KARAOKE_SYNC_OFFSET", 0.0
     try:
-        return float(os.environ.get("KARAOKE_SYNC_OFFSET", "1.3"))
+        return float(os.environ.get(env, str(fallback)))
     except ValueError:
-        return 1.3
+        return fallback
 
 
 SYNC_OFFSET_STEP = 0.1
@@ -550,7 +555,7 @@ class KaraokeTui(App):
                 localcache.get_sync_offset(self._current_track_id, conn)
                 if self._current_track_id is not None else None
             )
-            self._sync_offset = saved if saved is not None else _default_sync_offset()
+            self._sync_offset = saved if saved is not None else _default_sync_offset(det.mode)
             self._offset_dirty = False
             if lyrics is None or not lyrics.has_synced:
                 if key not in self._gap_logged:

@@ -46,12 +46,29 @@ def test_default_sync_offset_from_env(monkeypatch):
 
 def test_default_sync_offset_fallback_on_bad_value(monkeypatch):
     monkeypatch.setenv("KARAOKE_SYNC_OFFSET", "not-a-number")
-    assert _default_sync_offset() == 1.3
+    assert _default_sync_offset() == 0.0
 
 
 def test_default_sync_offset_default(monkeypatch):
     monkeypatch.delenv("KARAOKE_SYNC_OFFSET", raising=False)
-    assert _default_sync_offset() == 1.3
+    assert _default_sync_offset() == 0.0
+
+
+def test_default_sync_offset_spotify_is_zero(monkeypatch):
+    # Spotify reports an accurate native position, so no browser-lag offset.
+    monkeypatch.delenv("KARAOKE_SYNC_OFFSET_SPOTIFY", raising=False)
+    assert _default_sync_offset("spotify") == 0.0
+
+
+def test_default_sync_offset_spotify_env_override(monkeypatch):
+    monkeypatch.setenv("KARAOKE_SYNC_OFFSET_SPOTIFY", "0.3")
+    assert _default_sync_offset("spotify") == 0.3
+
+
+def test_default_sync_offset_scan_unaffected_by_spotify_env(monkeypatch):
+    monkeypatch.setenv("KARAOKE_SYNC_OFFSET_SPOTIFY", "0.3")
+    monkeypatch.delenv("KARAOKE_SYNC_OFFSET", raising=False)
+    assert _default_sync_offset("scan") == 0.0
 
 
 def test_sync_offset_get_set_roundtrip(tmp_path):

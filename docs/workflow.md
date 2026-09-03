@@ -93,9 +93,10 @@ When the TUI is syncing a YouTube / YouTube Music tab that has **no cached synce
 
 ## Lyric sync offset in scan mode
 
-Browser MPRIS `position` runs slightly **ahead** of audible output (output/device buffering), so in scan mode lyrics tend to lead the sound (observed ~1.3s). The TUI subtracts a **sync offset** from the reported position before highlighting: `elapsed = position - offset`.
+Browser MPRIS `position` can run slightly **ahead** of audible output (output/device buffering), so lyrics may lead the sound. The TUI subtracts a **sync offset** from the reported position before highlighting: `elapsed = position - offset`.
 
-- Default offset is `1.3` seconds; override with `KARAOKE_SYNC_OFFSET` (e.g. `KARAOKE_SYNC_OFFSET=0.8`).
+- Default offset is `0` (no correction) for both scan and Spotify modes. Spotify reports an accurate native position, so it needs no browser-lag correction; scan/browser can be nudged per song when needed.
+- Override the defaults with `KARAOKE_SYNC_OFFSET` (scan/browser) and `KARAOKE_SYNC_OFFSET_SPOTIFY` (Spotify).
 - Nudge live in the TUI with `,` (lyrics earlier, +0.1s) and `.` (lyrics later, -0.1s). A negative offset delays lyrics past the raw position.
 - The current offset is shown on the now-playing panel's `synced lyrics · <source> · offset ±X.Xs (, / .)` line.
 
