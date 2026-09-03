@@ -22,7 +22,7 @@ def test_open_song_url_spawns_xdg_open(monkeypatch, tmp_path):
     pid = browse.open_song_url("https://www.youtube.com/watch?v=bXWHf2HH8jY", "youtube")
 
     assert pid == 4242
-    assert calls[0][0] == ["xdg-open", "https://www.youtube.com/watch?v=bXWHf2HH8jY"]
+    assert calls[0][0] == ["xdg-open", "https://music.youtube.com/watch?v=bXWHf2HH8jY"]
     assert calls[0][1] is not None
     assert calls[0][2] is not None
 

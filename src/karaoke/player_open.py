@@ -31,6 +31,14 @@ def open_song_url(url: str, kind: str | None) -> int | None:
             log.debug("playerctl stderr: %s", completed.stderr.strip())
         return None
 
+    # Automatically upgrade standard YouTube links to YouTube Music links for superior audio
+    if kind == "youtube" or "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        from .localcache import extract_youtube_id
+        vid = extract_youtube_id(url)
+        if vid:
+            url = f"https://music.youtube.com/watch?v={vid}"
+            kind = "youtube_music"
+
     OPEN_STDOUT_LOG.parent.mkdir(parents=True, exist_ok=True)
     stdout = OPEN_STDOUT_LOG.open("ab")
     stderr = OPEN_STDERR_LOG.open("ab")
