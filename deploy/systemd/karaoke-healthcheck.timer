@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the karaoke health check every 5 minutes
+Documentation=file:///home/tina/karaoke/docs/howto-systemd-services.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=karaoke-healthcheck.service
+
+[Install]
+WantedBy=timers.target

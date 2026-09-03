@@ -1,0 +1,21 @@
+[Unit]
+Description=Karaoke library API (FastAPI, read-only tracks/lyrics/stats)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_API_PORT=8000
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.api
+Restart=on-failure
+RestartSec=3
+# Confirm the port is actually listening before declaring the unit started.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+SyslogIdentifier=karaoke-api
+
+[Install]
+WantedBy=karaoke.target

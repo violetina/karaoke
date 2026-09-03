@@ -1,0 +1,12 @@
+[Unit]
+Description=Karaoke health check (services, ports, cluster, broker)
+Documentation=file:///home/tina/karaoke/docs/howto-systemd-services.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+# Non-zero exit marks the unit failed, so `systemctl --user is-failed` and the
+# journal both surface an unhealthy platform.
+ExecStart=/home/tina/karaoke/.venv/bin/python /home/tina/karaoke/scripts/healthcheck.py
+SyslogIdentifier=karaoke-healthcheck

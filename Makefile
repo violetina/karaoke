@@ -28,7 +28,8 @@ K8S_NAMESPACE ?= karaoke
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup vector-index vector-index-dry-run \
-        mq-port-forward postprocess-worker postprocess-enqueue-all
+        mq-port-forward postprocess-worker postprocess-enqueue-all \
+        systemd-install systemd-uninstall systemd-up systemd-down systemd-status health
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -198,6 +199,42 @@ upgrade-timings: ## Upgrade cached lyrics to word-level timing via YouTube capti
 
 vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without writing
 	$(PYTHON) -m karaoke.vector_index --dry-run --no-embed --lines
+
+health: ## Run the karaoke platform health check (services, ports, cluster, DB)
+	$(PYTHON) scripts/healthcheck.py
+
+systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
+	mkdir -p $(HOME)/.config/systemd/user
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-api.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-ctrl-api.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.timer $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke.target $(HOME)/.config/systemd/user/
+	systemctl --user daemon-reload
+	systemctl --user enable karaoke.target karaoke-healthcheck.timer
+	@echo "Installed. Start with: make systemd-up"
+
+systemd-uninstall: ## Stop and remove the karaoke systemd --user units
+	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-postprocess
+	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
+	      $(HOME)/.config/systemd/user/karaoke-*.timer \
+	      $(HOME)/.config/systemd/user/karaoke.target
+	systemctl --user daemon-reload
+
+systemd-up: ## Start all karaoke services via the target
+	systemctl --user start karaoke.target karaoke-healthcheck.timer
+
+systemd-down: ## Stop all karaoke services
+	systemctl --user stop karaoke.target
+
+systemd-status: ## Show status of all karaoke units + last health check
+	-systemctl --user --no-pager status 'karaoke*' || true
+	@echo "--- last health check ---"
+	-journalctl --user -u karaoke-healthcheck.service -n 12 --no-pager || true
+
 
 vector-index: ## Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
 	$(PYTHON) -m karaoke.vector_index --rebuild $(if $(LINES),--lines,)

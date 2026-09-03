@@ -1,0 +1,19 @@
+[Unit]
+Description=Karaoke RabbitMQ port-forward (kind svc/rabbitmq -> localhost:5672/15672)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+# Keep the AMQP (5672) and management (15672) ports reachable from the host so
+# the post-process worker and enqueue scripts can talk to the in-cluster broker.
+ExecStart=/usr/bin/kubectl --context kind-karaoke -n karaoke port-forward svc/rabbitmq 5672:5672 15672:15672
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-mq-forward
+
+[Install]
+WantedBy=karaoke.target

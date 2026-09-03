@@ -1,0 +1,22 @@
+[Unit]
+Description=Karaoke control API (host-side playback control; needs a desktop session)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target graphical-session.target
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_CTRL_PORT=8765
+# Playback opens the browser/Spotify in the user's session; pass the display.
+Environment=DISPLAY=:0
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.ctrl_api
+Restart=on-failure
+RestartSec=3
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8765/health >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+SyslogIdentifier=karaoke-ctrl-api
+
+[Install]
+WantedBy=karaoke.target

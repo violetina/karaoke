@@ -1,0 +1,8 @@
+[Unit]
+Description=Karaoke platform (all host-side services)
+Documentation=file:///home/tina/karaoke/docs/howto-systemd-services.md
+# Starting/stopping this target starts/stops every karaoke-*.service bound to it.
+Wants=karaoke-api.service karaoke-ctrl-api.service karaoke-mq-forward.service karaoke-postprocess.service
+
+[Install]
+WantedBy=default.target
