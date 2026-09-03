@@ -136,6 +136,30 @@ print(track_analysis.get_analysis(tid, conn))
 "
 ```
 
+### Monitoring from the TUI
+
+The TUI settings panel shows a live `worker-load:` line, refreshed every 3s:
+
+```
+worker-load: [████░░░░░░]  38% cpu · queue 0 · idle
+worker-load: [█████████░] 92% cpu · queue 3 (1 busy) · working
+worker-load: worker down · broker unreachable
+```
+
+- The ASCII bar is the worker process CPU% (of one core), read from `/proc`.
+- `queue N` is ready messages; `(M busy)` is in-flight (unacked) tasks.
+- `idle` / `working` reflects whether anything is queued or in flight.
+
+Programmatic probe (same data the TUI uses):
+```bash
+PYTHONPATH=src .venv/bin/python -c "
+from karaoke import postprocess_status as ps
+print(ps.worker_load_line(ps.get_status()))
+"
+```
+It reads the RabbitMQ **management API** (default `http://localhost:15672`,
+forwarded alongside AMQP by `make mq-port-forward` / `karaoke-mq-forward.service`).
+
 ---
 
 ## Configuration (env vars)

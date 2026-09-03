@@ -181,6 +181,7 @@ class KaraokeTui(App):
                     "l log level  r refresh",
                 )
                 yield Static(f"log: {self._log_level}", id="log-label")
+                yield Static("worker-load: —", id="worker-load")
                 yield Static(f"Logs\n{LOG_FILE}")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
@@ -199,7 +200,9 @@ class KaraokeTui(App):
         self._show_selected_song()
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
+        self.set_interval(3.0, self._refresh_worker_load)
         self._poll_detection()
+        self._refresh_worker_load()
 
     # -- library ----------------------------------------------------------
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -361,6 +364,28 @@ class KaraokeTui(App):
         self.query_one("#log-label", Static).update(f"log: {self._log_level}")
         log.warning("log level set to %s", self._log_level)
         self.notify(f"log level: {self._log_level}")
+
+    def _refresh_worker_load(self) -> None:
+        """Update the post-processing worker-load read-out (in a thread).
+
+        The status probe samples worker CPU over a short interval and hits the
+        RabbitMQ management API, so it runs off the UI thread; the result is
+        marshalled back via call_from_thread. Best-effort — never disrupts UI.
+        """
+        def _work() -> None:
+            try:
+                from . import postprocess_status as ps
+                line = ps.worker_load_line(ps.get_status())
+            except Exception:
+                line = "worker-load: (unavailable)"
+            try:
+                self.call_from_thread(
+                    self.query_one("#worker-load", Static).update, line
+                )
+            except Exception:
+                pass
+
+        self.run_worker(_work, exclusive=False, thread=True)
 
     def _selected_song(self) -> SongRow | None:
         table = self.query_one("#library", DataTable)
