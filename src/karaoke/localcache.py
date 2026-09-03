@@ -312,7 +312,17 @@ def add_track_source(
     c = conn or connect()
     try:
         cur = c.cursor()
-        track_id = find_track_id(artist, title, c)
+        # Prefer matching an existing track by its source URL / YouTube video ID
+        # so callers that pass a URL (transcribe, backfill, write-through) update
+        # the canonical track instead of spawning a duplicate when the parsed
+        # artist/title differ (e.g. Whisper's filename-derived tags, remix edits).
+        track_id: Optional[int] = None
+        if url:
+            found = find_track_by_url(url, c)
+            if found:
+                track_id = found[0]
+        if track_id is None:
+            track_id = find_track_id(artist, title, c)
         if track_id is None:
             cur.execute(
                 "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",

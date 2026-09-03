@@ -145,3 +145,33 @@ def test_log_event_ignores_blank_titles_in_top_lists(tmp_path):
     assert s.plays == 1
     assert s.distinct_tracks == 0
     assert s.top_tracks == []
+
+
+def test_add_track_with_url_updates_existing_track_no_duplicate(tmp_path):
+    """A transcribe-style write whose URL shares a track's video ID must UPDATE,
+    not create a duplicate track from divergent parsed artist/title."""
+    c = _conn(tmp_path)
+    # Canonical track from LRCLIB, with a YouTube source.
+    localcache.add_track_and_lyrics(
+        "Ian Asher & Phantogram", "Black Out Days (Stay Away)",
+        Lyrics(plain="words", source="lrclib"),
+        url="https://www.youtube.com/watch?v=FFxsTiFGWT8", kind="youtube", conn=c,
+    )
+    canonical_id = localcache.find_track_id(
+        "Ian Asher & Phantogram", "Black Out Days (Stay Away)", c)
+    assert canonical_id is not None
+
+    # Whisper write-back with filename-derived tags but the SAME video id
+    # (short-form youtu.be URL to also exercise video-ID matching).
+    localcache.add_track_and_lyrics(
+        "", "FFxsTiFGWT8",
+        Lyrics(plain="w", synced_raw="[00:01.00] w", source="whisper",
+               lines=[(1.0, "w")]),
+        url="https://youtu.be/FFxsTiFGWT8", kind="youtube", conn=c,
+    )
+
+    # Still exactly one track; its lyrics were updated in place.
+    assert c.execute("SELECT count(*) FROM tracks").fetchone()[0] == 1
+    got = localcache.get_lyrics_by_track_id(canonical_id, c)
+    assert got is not None and got.source == "whisper"
+
