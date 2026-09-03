@@ -1,0 +1,23 @@
+[Unit]
+Description=Karaoke post-processing worker (key/BPM analysis + word-timing upgrades)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target
+Requires=karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=RABBITMQ_HOST=localhost
+# Pull YouTube cookies from Firefox so downloads/captions authenticate as you.
+Environment=KARAOKE_COOKIES_FROM_BROWSER=firefox
+# The broker forward may take a moment to establish; retry rather than fail hard.
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.postprocess_worker
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-postprocess
+
+[Install]
+WantedBy=karaoke.target
