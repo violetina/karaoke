@@ -135,6 +135,25 @@ def resolve_lyrics(
                 det.title,
                 localcache.get_lyrics_by_track_id(track_id, conn),
             )
+        # Fallback for empty artist (e.g. browser tab playing YouTube Music without artist tag)
+        if not det.artist and det.title:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT t.track_id, t.artist, t.title FROM tracks t
+                WHERE lower(t.title) = lower(?)
+                ORDER BY EXISTS(SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id AND l.synced_lyrics != '') DESC, t.track_id DESC
+                LIMIT 1
+                """,
+                (det.title,),
+            )
+            row = cur.fetchone()
+            if row:
+                return (
+                    row["artist"],
+                    row["title"],
+                    localcache.get_lyrics_by_track_id(row["track_id"], conn),
+                )
     return det.artist, det.title, None
 
 
