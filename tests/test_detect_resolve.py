@@ -39,3 +39,18 @@ def test_record_gap_logs_gap_and_source(tmp_path):
     found = localcache.find_track_by_url("https://youtu.be/new", conn)
     assert found is not None
     assert found[1:] == ("New", "Song")
+
+
+def test_resolve_lyrics_empty_artist_fallback(tmp_path):
+    conn = localcache.connect(tmp_path / "k.db")
+    localcache.add_track_and_lyrics(
+        "Kiki Rockwell", "Cup Runneth Over",
+        Lyrics(synced_raw="[00:01.00] hi", source="lrclib", lines=[(1.0, "hi")]),
+        conn=conn,
+    )
+    # Detection from browser has empty artist and no URL, but has the correct title
+    det = Detection("scan", "chromium", "", "Cup Runneth Over", "")
+    artist, title, lyrics = detect.resolve_lyrics(det, conn)
+    assert (artist, title) == ("Kiki Rockwell", "Cup Runneth Over")
+    assert lyrics is not None and lyrics.has_synced
+
