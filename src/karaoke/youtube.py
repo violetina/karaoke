@@ -147,6 +147,25 @@ def parse_youtube_title(
     return "", cleaned
 
 
+def _ejs_opts() -> dict:
+    """yt-dlp options to enable EJS remote-component challenge solving.
+
+    Modern YouTube requires solving JS signature / ``n`` challenges to expose
+    real audio/video formats; without a challenge solver yt-dlp only sees image
+    storyboards and raises "Requested format is not available". yt-dlp can fetch
+    the solver scripts on demand via its EJS remote components. We enable the
+    GitHub source by default (a supported JS runtime like ``deno`` or ``node``
+    must be installed on the host). Override or disable via the
+    ``KARAOKE_YTDLP_REMOTE_COMPONENTS`` env var (set it empty to disable).
+    """
+    import os
+    spec = os.environ.get("KARAOKE_YTDLP_REMOTE_COMPONENTS", "ejs:github")
+    spec = spec.strip()
+    if not spec:
+        return {}
+    return {"remote_components": [s for s in spec.split(",") if s.strip()]}
+
+
 def _cookie_opts(
     cookies_from_browser: Optional[str], cookies_file: Optional[str]
 ) -> dict:
@@ -357,6 +376,7 @@ def fetch_metadata(
         "skip_download": not download,
     }
     opts.update(_cookie_opts(cookies_from_browser, cookies_file))
+    opts.update(_ejs_opts())
     path: Optional[str] = None
     if download:
         out_dir = settings.youtube_dir

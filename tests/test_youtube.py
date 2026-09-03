@@ -12,6 +12,7 @@ import pytest
 
 from karaoke.youtube import (
     _cookie_opts,
+    _ejs_opts,
     _youtube_audio_files,
     clean_uploader,
     clear_youtube_cache,
@@ -227,6 +228,21 @@ class _CapturingYDL(_FakeYDL):
     def __init__(self, opts):
         super().__init__(opts)
         type(self).last_opts = opts
+
+
+def test_ejs_opts_default_enables_github(monkeypatch):
+    monkeypatch.delenv("KARAOKE_YTDLP_REMOTE_COMPONENTS", raising=False)
+    assert _ejs_opts() == {"remote_components": ["ejs:github"]}
+
+
+def test_ejs_opts_disabled_when_env_empty(monkeypatch):
+    monkeypatch.setenv("KARAOKE_YTDLP_REMOTE_COMPONENTS", "")
+    assert _ejs_opts() == {}
+
+
+def test_ejs_opts_custom_multi(monkeypatch):
+    monkeypatch.setenv("KARAOKE_YTDLP_REMOTE_COMPONENTS", "ejs:github,ejs:npm")
+    assert _ejs_opts() == {"remote_components": ["ejs:github", "ejs:npm"]}
 
 
 def _install_capturing_ytdlp(monkeypatch, info):
