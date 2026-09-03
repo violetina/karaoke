@@ -83,4 +83,86 @@ This adds/updates `tracks` and `sources` only. It does not create fake empty app
 6. Submit a Pull Request for review (`gh pr create`).
 7. Once merged, return to the main directory (`cd ~/karaoke`), checkout main, and `git pull` to synchronize the stable environment.
 
+---
+
+## Dataflow, DB Gap Avoidance, and Mitigation Utilities
+
+This section details how metadata, lyrics, and audio analysis flow through the karaoke platform, how to prevent database inconsistencies/gaps, and the mitigation scripts available to repair the database.
+
+### 1. The Unified Lyric & Metadata Dataflow
+
+Every track in the platform is managed through three key tables in SQLite:
+* `tracks`: Stores the canonical identity (Artist, Title, Duration).
+* `sources`: Maps a track to an external media URL (YouTube webpage, Spotify URI, local file path, etc.).
+* `lyrics`: Stores approved synced or plain lyrics.
+
+During active playback (Spotify, Browser YouTube tabs, VLC), the system operates on the following resolution pipeline:
+
+1. **Active URL Lookup (Preferred):** If the player reports a source URL (e.g., Spotify Track ID, YouTube video link), the system looks up that exact URL in the `sources` table first. This is highly reliable because browser MPRIS metadata is often stale or truncated.
+2. **Fuzzy Artist/Title Lookup (Fallback):** If no URL matches, the system normalizes the player-reported `artist` and `title` and queries the `tracks` table.
+3. **Lyric Matching:** Once a `track_id` is resolved, the system serves its approved lyrics. If a track is found but lacks lyrics, or if no track is found at all, a "lyric gap" is logged to the `lyric_gaps` table to schedule background backfilling, and the track is queued for staging.
+
+### 2. How to Avoid DB Gaps & Inconsistencies
+
+Due to differences in metadata formatting between Spotify, YouTube, and lyric providers (LRCLIB, Genius), the following types of database gaps can naturally occur:
+* **Duplicate Tracks:** For example, Spotify reports the artist as `"Inpatient"`, whereas a lyric search/staging saves the canonical multi-artist string `"Inpatient, Ren & Chris Webby"`. This creates two disjoint track records for the same song.
+* **Orphan Tracks:** A track has approved lyrics in the database but lacks any associated external URL/kind in the `sources` table (rendering it un-openable on Enter).
+* **Orphan Cache Files:** A YouTube audio file (`*.webm`) was downloaded into the local cache (`~/.local/share/karaoke/youtube/`), but the track/source record was deleted, modified, or never mapped in SQLite.
+
+To proactively avoid and heal these gaps, follow the mitigation workflows below.
+
+### 3. Mitigation Scripts & Self-Healing Utilities
+
+A suite of built-in CLI commands and background scripts are available to automatically clean, heal, and backfill your local database.
+
+#### A. Database Cleanup & Self-Healing (`scripts/db_cleanup.py`)
+This central utility runs a 3-phase database cleanup and self-healing loop:
+1. **Track Deduplication:** Automatically groups tracks by lowercase title and identifies duplicate records where the artist names are compatible (substrings, shared first words, or matching uploader strings). It consolidates all lyrics, sources, and track analyses into the canonical record and prunes the duplicates.
+2. **Source Healing:** Scans the database for tracks that have approved lyrics but are missing entries in the `sources` table. It automatically searches YouTube for those tracks and registers their YouTube webpage URLs in SQLite.
+3. **Orphan Cache File Healing:** Scans your local YouTube cache (`~/.local/share/karaoke/youtube/`) for downloaded audio files that are not mapped in your database. It calls `yt-dlp` to retrieve their titles, decodes clean metadata, adds them back to `tracks`/`sources`, and runs full key/BPM/energy/brightness analysis on the local file.
+
+**Run the database cleanup script:**
+```bash
+PYTHONPATH=src .venv/bin/python scripts/db_cleanup.py
+```
+
+#### B. Automated Lyric Backfilling (`karaoke-backfill`)
+Finds unresolved lyric gaps in your `lyric_gaps` table, automatically searches online lyric repositories, and stages them for approval.
+* **To run backfill:**
+  ```bash
+  make backfill
+  # or
+  PYTHONPATH=src .venv/bin/python -m karaoke.backfill_runner
+  ```
+
+#### C. Upgrading Plain Lyrics to Enhanced LRC (`karaoke-upgrade-timings`)
+Finds cached tracks containing plain line-level lyrics, fetches their YouTube `json3` word-level captions, and upgrades them to Enhanced LRC format in-place.
+* **To run the upgrade dry-run:**
+  ```bash
+  make upgrade-timings-dry-run
+  ```
+* **To run the upgrade:**
+  ```bash
+  make upgrade-timings
+  ```
+
+#### D. Local Audio Analysis (`karaoke-analyze` / `scripts/analyze_all_cached.py`)
+Extracts and stores key, Camelot wheel, tempo (BPM), RMS energy, and spectral brightness from a local audio file and persists them in `track_analysis`.
+* **To analyze a specific local file and store it under a track:**
+  ```bash
+  karaoke-analyze -f /path/to/song.webm --artist "Artist Name" --title "Song Title"
+  ```
+* **To bulk-analyze all downloaded cache files:**
+  ```bash
+  make analyze
+  ```
+
+#### E. Lyric Alignment from Plain Text (`karaoke`)
+Aligns any raw, plain text lyric file with a local audio file using Whisper transcription to learn/generate highly accurate synced LRC lyrics.
+* **To align raw text to audio:**
+  ```bash
+  karaoke -f ~/.local/share/karaoke/youtube/<VIDEO_ID>.webm --force-transcribe --lyrics-file /path/to/plain_lyrics.txt
+  ```
+
+
 
