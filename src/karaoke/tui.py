@@ -1006,20 +1006,8 @@ class KaraokeTui(App):
         active = tl.active_index(elapsed)
         mood = mood_of(tl.lines[active][1]) if active >= 0 else "neutral"
         lyrics_widget = self.query_one("#lyrics", Static)
-        # content_size excludes border and padding. It is (0, 0) before the
-        # first layout pass, hence the guard; one plain tick then costs nothing.
-        size = lyrics_widget.content_size
-        # no_wrap/crop is required: a single cell of overrun would wrap a block
-        # row and shear the glyphs. It also crops overlong plain lines, which
-        # is a deliberate change from the previous wrapping behaviour.
-        body = Text(no_wrap=True, overflow="crop")
-        _render_body(
-            body, tl, elapsed, mood=mood,
-            # -1 of slack: a row exactly `width` cells can still wrap.
-            big_width=(size.width - 1) if size.width > 1 else None,
-            big_height=size.height or None,
-        )
-
+        body = Text()
+        _render_body(body, tl, elapsed, mood=mood)
         lyrics_widget.update(body)
         
         nxt = tl.next_time(elapsed)

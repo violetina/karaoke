@@ -513,130 +513,64 @@ def test_postprocess_enqueue_failure_never_breaks_playback(tmp_path, monkeypatch
     assert ly.synced_raw == lrc      # playback unaffected
 
 
-# --- big-type active line --------------------------------------------------
+# --- active line rendering -------------------------------------------------
 
-_BIG_LINES = [
+_LINES = [
     (0.0, "Little fish in a great big sea"),
     (10.0, "swimming past me in the dark"),
     (20.0, "all the stars were out tonight"),
 ]
 
 
-def _big_body(elapsed, **kw):
+def _body(elapsed, **kw):
     from rich.text import Text
     from karaoke.player import LyricTimeline, _render_body
 
-    body = Text(no_wrap=True, overflow="crop")
-    _render_body(body, LyricTimeline(_BIG_LINES), elapsed, **kw)
+    body = Text()
+    _render_body(body, LyricTimeline(_LINES), elapsed, **kw)
     return body
 
 
-def test_no_big_kwargs_leaves_output_unchanged():
-    """The console players pass no width and must render exactly as before."""
-    assert _big_body(3.0).plain == _big_body(3.0, big_width=None).plain
+def test_active_line_is_rendered_at_normal_width():
+    """No widening and no block type.
 
-
-def test_big_width_widens_the_active_line():
-    plain = _big_body(3.0, big_width=200, big_height=16).plain
-    assert "L i t t l e" in plain
-    assert "Little fish in a great big sea" not in plain   # active line widened
-
-
-def test_widened_line_uses_only_characters_the_font_has():
-    """Fullwidth forms were tried first and rendered as tofu boxes.
-
-    Most monospace terminal fonts have no glyphs for U+FF01-U+FF5E, so the
-    whole active line came out as empty rectangles. Spacing uses the line's own
-    characters and cannot fail that way.
+    All three were tried: figlet was unreadable at the sizes that fit,
+    fullwidth forms rendered as tofu in most terminal fonts, and letter
+    spacing threw off the reading rhythm.
     """
-    from karaoke.player import widen
-
-    out = widen("Little fish")
-    assert out.isascii()
-    assert all(0x20 <= ord(c) <= 0x7E for c in out)
-
-
-def test_widened_line_is_about_twice_as_wide():
-    """Spacing inserts a gap between characters: 2n-1 cells for n characters."""
-    from rich.cells import cell_len
-    from karaoke.player import widen
-
-    line = "Little fish"
-    assert cell_len(widen(line)) == 2 * cell_len(line) - 1
+    plain = _body(3.0).plain
+    assert "Little fish in a great big sea" in plain
+    assert "L i t t l e" not in plain
+    assert "Ｌｉｔｔｌｅ" not in plain
 
 
-def test_context_lines_are_not_widened():
-    """Only the active line grows; the surrounding lines stay normal."""
-    plain = _big_body(15.0, big_width=200, big_height=20).plain
-    assert "Little fish in a great big sea" in plain       # a context line
+def test_active_line_is_bold_over_a_mood_background():
+    body = _body(3.0, mood="happy")
+    styles = " ".join(str(s.style) for s in body.spans)
+    assert "bold" in styles
+    assert "on green" in styles          # happy
 
 
-def test_context_lines_survive_around_the_big_line():
-    plain = _big_body(15.0, big_width=200, big_height=20).plain
-    assert "Little fish in a great big sea" in plain    # before
-    assert "all the stars were out tonight" in plain    # after
-
-
-def test_narrow_panel_falls_back_to_plain():
-    """Below MIN_WIDTH the plain renderer is used, not a sheared block."""
-    narrow = _big_body(3.0, big_width=30, big_height=16).plain
-    assert narrow == _big_body(3.0).plain
-
-
-def test_highlight_moves_through_the_big_line():
-    def first_highlight(t):
-        body = _big_body(t, big_width=200, big_height=16)
-        cols = [s.start for s in body.spans if "magenta" in str(s.style)]
-        return min(cols) if cols else None
-
-    early, late = first_highlight(0.5), first_highlight(9.0)
-    assert early is not None and late is not None
-    assert late > early
-
-
-def test_no_big_type_during_an_instrumental_gap():
-    """A rest marker, not block letters, while nothing is being sung."""
-    from karaoke.player import LyricTimeline, _render_body
-    from rich.text import Text
-
-    tl = LyricTimeline([(0.0, "sing this now"), (60.0, "and later this")])
-    body = Text(no_wrap=True, overflow="crop")
-    _render_body(body, tl, 30.0, big_width=200, big_height=16)
-    assert "♪" in body.plain
-    assert "|___" not in body.plain
-
-
-def test_long_line_is_not_widened_past_the_panel():
-    """Widening doubles the width, so a long line must stay normal size."""
-    from karaoke.player import LyricTimeline, _render_body
-    from rich.text import Text
-
-    long_line = "a very long lyric line that would not fit when doubled at all"
-    tl = LyricTimeline([(0.0, long_line), (30.0, "next")])
-    body = Text(no_wrap=True, overflow="crop")
-    _render_body(body, tl, 1.0, big_width=60, big_height=16)
-    assert long_line in body.plain          # rendered normally, not spaced out
-
-
-def test_widen_preserves_the_original_characters():
-    from karaoke.player import widen
-    assert widen("café").replace(" ", "") == "café"
-
-
-def test_widened_line_keeps_the_word_highlight():
-    from rich.text import Text
-    from karaoke.player import LyricTimeline, _render_body
-
-    # Lines 3s apart, so the whole span counts as "being sung". A wider spacing
-    # would put the later sample inside an instrumental break, where the
-    # highlight is correctly suppressed.
-    tl = LyricTimeline([(0.0, "one two three four"), (3.0, "next")])
-
+def test_active_word_is_highlighted_and_moves():
     def cols(t):
-        b = Text(no_wrap=True, overflow="crop")
-        _render_body(b, tl, t, big_width=200, big_height=16)
-        return [s.start for s in b.spans if "magenta" in str(s.style)]
+        return [s.start for s in _body(t).spans if "magenta" in str(s.style)]
 
-    early, late = cols(0.2), cols(2.6)
+    early, late = cols(0.2), cols(8.0)
     assert early and late
     assert min(late) > min(early)
+
+
+def test_context_lines_surround_the_active_one():
+    plain = _body(15.0).plain
+    assert "Little fish in a great big sea" in plain     # before
+    assert "all the stars were out tonight" in plain     # after
+
+
+def test_instrumental_gap_shows_a_rest_marker():
+    from rich.text import Text
+    from karaoke.player import LyricTimeline, _render_body
+
+    tl = LyricTimeline([(0.0, "sing this now"), (60.0, "and later this")])
+    body = Text()
+    _render_body(body, tl, 30.0)
+    assert "♪" in body.plain

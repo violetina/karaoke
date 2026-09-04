@@ -463,24 +463,8 @@ def active_word_index(text: str, frac: float) -> int:
     return min(len(words) - 1, int(f * len(words)))
 
 
-def widen(text: str) -> str:
-    """Space out a line so it reads larger, using only its own characters.
-
-    A terminal cannot change font size per line. Unicode fullwidth forms
-    (Ｌｉｋｅ　ｔｈｉｓ) were tried first and are genuinely double-width, but
-    most monospace terminal fonts have no glyphs for that block and render the
-    whole line as tofu boxes — which is how it looked in practice.
-
-    Letter spacing gets the prominence with characters the font already draws,
-    so it cannot fail that way. Doubles the width like the fullwidth version
-    did, so callers' fit checks are unchanged.
-    """
-    return " ".join(text)
-
-
 def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
-                       mood: str = "neutral", word: Optional[int] = None,
-                       big: bool = False) -> None:
+                       mood: str = "neutral", word: Optional[int] = None) -> None:
     """Append one lyric line to a Rich Text body.
 
     kind: 'active' (current line — highlight the current word in purple over a
@@ -499,23 +483,17 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
     bg = _MOOD_BG.get(mood, "on blue")
     base = f"bold white {bg}"
     wi = active_word_index(line, frac) if word is None else word
-    # `big` doubles the glyph width. Applied per word so the highlight still
-    # lands on word boundaries.
-    grow = widen if big else (lambda s: s)
-    # Three spaces between spaced-out words, so word boundaries stay obvious
-    # once the letters within a word are themselves separated.
-    space = "   " if big else " "
     body.append("♪ ", style=base)
     if wi < 0:
-        body.append(grow(line) + "\n", style=base)
+        body.append(line + "\n", style=base)
         return
     words = line.split()
     for j, w in enumerate(words):
         if j == wi:
-            body.append(grow(w), style="bold white on magenta")
+            body.append(w, style="bold white on magenta")
         else:
-            body.append(grow(w), style=base)
-        body.append(space if j < len(words) - 1 else "\n", style=base)
+            body.append(w, style=base)
+        body.append(" " if j < len(words) - 1 else "\n", style=base)
 
 
 def _gap_marker(progress: float, width: int = 24) -> str:
@@ -529,9 +507,8 @@ def _gap_marker(progress: float, width: int = 24) -> str:
 
 
 def _render_body(body, tl: "LyricTimeline", elapsed: float,
-                 *, before: int = 3, after: int = 5, mood: str = "neutral",
-                 big_width: Optional[int] = None,
-                 big_height: Optional[int] = None) -> None:
+                 *, before: int = 3, after: int = 5,
+                 mood: str = "neutral") -> None:
     """Fill a Rich Text `body` with the window around the active line.
 
     `mood` tints the active line's background (from sentiment.mood_of on the
@@ -541,22 +518,15 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
     is shown, rather than leaving a stale line highlighted as if it were still
     being sung.
 
-    `big_width`/`big_height` opt in to rendering the active line as large type
-    sized to the caller's panel. Omitted (the console players) the output is
-    byte-identical to before. Big type is only ever an addition: if the line
-    will not fit, or the panel is too small, this silently falls back to the
-    ordinary rendering rather than showing something sheared.
+    The active line is bold on a mood-tinted background with the current word
+    highlighted; it is deliberately NOT widened or drawn as block type. Both
+    were tried: figlet was hard to read at the sizes that fit, fullwidth forms
+    rendered as tofu in most terminal fonts, and letter spacing threw off the
+    reading rhythm. Normal-width bold reads best.
     """
     active = tl.active_index(elapsed)
     frac = tl.active_fraction(elapsed)
     in_gap = tl.in_gap(elapsed)
-
-    # Double-width the active line when it still fits the panel. Checked in
-    # cells, not characters: a widened line is exactly twice as wide, so a long
-    # lyric would otherwise be cropped mid-word.
-    big = False
-    if big_width and not in_gap and 0 <= active < len(tl.lines):
-        big = len(tl.lines[active][1]) * 2 + 2 <= big_width
 
     lo = max(0, active - before)
     hi = min(len(tl.lines), active + after)
@@ -571,8 +541,7 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
                             style="cyan")
             else:
                 _append_lyric_line(body, line, kind="active", frac=frac,
-                                   mood=mood, word=tl.word_index(elapsed),
-                                   big=big)
+                                   mood=mood, word=tl.word_index(elapsed))
         elif i < active:
             _append_lyric_line(body, line, kind="past")
         else:
