@@ -75,6 +75,7 @@ FILTER_OPTIONS = [
     ("Working songs (have lyrics)", "working"),
     ("All songs", "all"),
     ("Staging queue", "staging"),
+    ("Spotify tracks", "spotify"),
 ]
 
 # Manual mode override cycle. None == auto-detect.
@@ -498,6 +499,10 @@ class KaraokeTui(App):
         self._lyrics_fetched: set[tuple[str, str]] = set()
         self._mic_ref = None                       # last songrec identification
         self._offset_mode = ""     # clock the current offset was tuned against
+        self._clock_from_mic = False   # mic named the song, a player times it
+        # Set once Spotify is unusable (bad auth or an exhausted quota) so a
+        # single failure cannot become a lookup storm across a listening session.
+        self._spotify_off = False
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
@@ -564,6 +569,8 @@ class KaraokeTui(App):
         with localcache.connect() as conn:
             if self._filter == "staging":
                 self._load_staging(conn)
+            elif self._filter == "spotify":
+                self._load_spotify(conn)
             else:
                 self._load_tracks(conn, only_working=self._filter == "working")
         for song in self._song_data:
@@ -574,6 +581,45 @@ class KaraokeTui(App):
                 "♪" if song.get("synced_lyrics") else (
                     "·" if song.get("plain_lyrics") else " "),
             )
+
+    def _load_spotify(self, conn) -> None:
+        """Tracks that have a Spotify source, joined to that source.
+
+        _load_tracks deliberately ranks spotify *below* every browser-openable
+        kind so Enter opens the browser, which leaves Spotify-only tracks
+        unreachable from the library. This lists them against their Spotify
+        source instead, so the row's url/kind are the Spotify ones and
+        _open_selected needs no special case — open_song_url already rewrites
+        them to the web player and navigates the existing Chrome window.
+        """
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.track_id, t.artist, t.title,
+                   s.url AS url, s.kind AS kind,
+                   COALESCE(l.source, '') AS lyric_source,
+                   COALESCE(l.synced_lyrics, '') AS synced_lyrics,
+                   COALESCE(l.plain_lyrics, '') AS plain_lyrics
+            FROM tracks t
+            JOIN sources s
+              ON s.track_id = t.track_id AND s.kind = 'spotify'
+            LEFT JOIN lyrics l
+              ON t.track_id = l.track_id AND l.kind = 'approved'
+            GROUP BY t.track_id
+            ORDER BY t.artist, t.title
+            """
+        )
+        for row in cur.fetchall():
+            self._song_data.append({
+                "track_id": row["track_id"],
+                "artist": row["artist"],
+                "title": row["title"],
+                "url": row["url"],
+                "kind": row["kind"],
+                "lyric_source": row["lyric_source"],
+                "synced_lyrics": row["synced_lyrics"],
+                "plain_lyrics": row["plain_lyrics"],
+            })
 
     def _load_tracks(self, conn, *, only_working: bool) -> None:
         cur = conn.cursor()
@@ -745,6 +791,10 @@ class KaraokeTui(App):
         if dur and dur > 30.0 and pos >= dur:
             pos %= dur
         return pos
+
+    def _mic_running(self) -> bool:
+        """Whether the mic worker is currently listening."""
+        return self._mic_stop is not None and not self._mic_stop.is_set()
 
     def _mic_loop(self) -> None:
         """Identify room audio on a loop until the mic is switched off.
@@ -1130,15 +1180,29 @@ class KaraokeTui(App):
     def _effective_detection(self) -> detect.Detection:
         """Apply the manual mode override on top of auto-detection.
 
-        A live mic identification wins outright: it hears what is actually in
-        the room, which is the whole reason to turn it on. MPRIS may be
-        reporting a different (or stale) track from some other player.
+        A live mic identification decides *which song* is playing: it hears the
+        room, and MPRIS may be reporting a stale track from some other player.
+
+        It does not decide the *clock*. When a player is playing the song the
+        mic just named — the Spotify app, typically — its MPRIS position is
+        exact, while radio dead-reckons from songrec's offset plus
+        DEFAULT_LEAD_S and drifts until the next re-anchor. In that case hand
+        back the player's own detection so the accurate position is used. The
+        mic still chose the song; only the clock changed.
         """
         if self._mic_ref is not None and self._mic_ref.title:
+            det = detect.detect_active()
+            if det.is_active and detect.same_track(
+                    det.artist, det.title,
+                    self._mic_ref.artist, self._mic_ref.title):
+                self._clock_from_mic = True
+                return det
+            self._clock_from_mic = False
             return detect.Detection(
                 mode="radio", player="songrec",
                 artist=self._mic_ref.artist, title=self._mic_ref.title,
             )
+        self._clock_from_mic = False
         det = detect.detect_active()
         if self._mode_override is None:
             return det
@@ -1158,6 +1222,10 @@ class KaraokeTui(App):
         mode_label = self.query_one("#mode-label", Static)
         now = self.query_one("#now-playing", Static)
         override = f" (forced {self._mode_override})" if self._mode_override else " (auto)"
+        # The mic identified the song but a player is supplying the position.
+        # Say so, or it looks like the mic quietly switched itself off.
+        if self._clock_from_mic:
+            override = " (mic)"
         if not det.is_active:
             mode_label.update(f"Mode: browse{override}")
             self._timeline = LyricTimeline([])
@@ -1195,6 +1263,16 @@ class KaraokeTui(App):
             self._offset_mode = det.mode
             # Needed by mic_elapsed to wrap the dead-reckoned playhead on repeat.
             self._track_duration = self._load_duration(self._current_track_id, conn)
+            # Radio identifies songs MPRIS never sees, so this is where a
+            # Spotify link is worth resolving — once per track, and only while
+            # the mic is actually running, so browsing costs no API quota.
+            if (self._mic_running() and not self._spotify_off
+                    and localcache.spotify_lookup_due(self._current_track_id, conn)):
+                self.run_worker(
+                    lambda tid=self._current_track_id, a=artist, t=title:
+                        self._background_fetch_spotify(tid, a, t),
+                    exclusive=False, thread=True,
+                )
             if lyrics is None or not lyrics.has_synced:
                 # The cache is only what has already been fetched. Radio mode
                 # calls get_synced, which hits LRCLIB on a miss and caches the
@@ -1481,6 +1559,53 @@ class KaraokeTui(App):
             self.run_worker(_work, exclusive=False, thread=True)
         except Exception:
             log.debug("cover art dispatch failed", exc_info=True)
+
+    def _background_fetch_spotify(self, track_id: int, artist: str,
+                                  title: str) -> None:
+        """Resolve a Spotify URI for a track and store it, in a worker thread.
+
+        Runs at most once per track: a hit is cached as a ``spotify`` source and
+        a miss in ``spotify_lookups``, and ``spotify_lookup_due`` consults both.
+        Search is the rate-limited endpoint and this project has already lost a
+        day of API access to calling it in a loop, so the guards matter more
+        than the feature.
+        """
+        if self._spotify_off or not (artist and title):
+            return
+        from .spotify_client import (SpotifyAuthError, SpotifyClient,
+                                     SpotifyRateLimited)
+        try:
+            uri = SpotifyClient().search_track(artist, title)
+        except SpotifyRateLimited as exc:
+            # Not a miss. Recording it would cache a false negative that
+            # spotify_lookup_due would then honour permanently.
+            self._spotify_off = True
+            log.warning("spotify rate limited; lookups off for this session: %s", exc)
+            self.call_from_thread(
+                self.notify,
+                f"Spotify rate limited; retry in {exc.retry_after // 60}min",
+                severity="warning")
+            return
+        except SpotifyAuthError as exc:
+            self._spotify_off = True
+            log.warning("spotify auth failed; lookups off: %s (see: make auth-status)", exc)
+            return
+        except Exception:
+            log.debug("spotify lookup failed for %s - %s", artist, title,
+                      exc_info=True)
+            return
+
+        try:
+            with localcache.connect() as conn:
+                if uri:
+                    localcache.add_track_source(artist, title, url=uri,
+                                                kind="spotify", conn=conn)
+                localcache.record_spotify_lookup(track_id, uri, conn)
+        except Exception:
+            log.debug("storing spotify lookup failed", exc_info=True)
+            return
+        if uri:
+            log.info("spotify source stored for %s - %s", artist, title)
 
     def _background_fetch_lyrics(self, artist: str, title: str) -> None:
         """Fetch lyrics from LRCLIB for a cache miss, in a worker thread.

@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS lyric_gaps (
     UNIQUE(artist, title)
 );
 
+CREATE TABLE IF NOT EXISTS spotify_lookups (
+    track_id   INTEGER PRIMARY KEY,
+    -- NULL means Spotify was asked and had no match. That is a real result and
+    -- must be remembered: without it, every track Spotify does not carry is
+    -- re-searched on every play, and search is the rate-limited endpoint.
+    uri        TEXT,
+    checked_at REAL NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
 CREATE TABLE IF NOT EXISTS track_sync_offsets (
     track_id    INTEGER PRIMARY KEY,
     offset_s    REAL NOT NULL,
@@ -155,6 +166,68 @@ def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# How many times a track may be looked up on Spotify before we stop asking. A
+# transient failure deserves one retry; more than that and we are just spending
+# quota on a song Spotify does not have.
+SPOTIFY_LOOKUP_ATTEMPTS = 2
+
+
+def ensure_spotify_lookup_table(conn: sqlite3.Connection) -> None:
+    """Create the Spotify lookup cache in databases predating it."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS spotify_lookups (
+            track_id   INTEGER PRIMARY KEY,
+            uri        TEXT,
+            checked_at REAL NOT NULL,
+            attempts   INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+
+def spotify_lookup_due(track_id: Optional[int], conn: sqlite3.Connection, *,
+                       max_attempts: int = SPOTIFY_LOOKUP_ATTEMPTS) -> bool:
+    """Whether this track may be looked up on Spotify.
+
+    False once a URI is known (the answer is cached), and false once the track
+    has been asked about ``max_attempts`` times without one — a miss is a
+    result, not an invitation to keep spending search quota.
+    """
+    if track_id is None:
+        return False
+    row = conn.execute(
+        "SELECT uri, attempts FROM spotify_lookups WHERE track_id = ?",
+        (track_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    if row["uri"]:
+        return False
+    return int(row["attempts"] or 0) < max_attempts
+
+
+def record_spotify_lookup(track_id: int, uri: Optional[str],
+                          conn: sqlite3.Connection) -> None:
+    """Record the outcome of a Spotify lookup, hit or miss.
+
+    Call this for a miss too. Never call it for a rate-limit error: a 429 says
+    nothing about whether Spotify has the song, and recording it would cache a
+    false negative that ``spotify_lookup_due`` would then honour forever.
+    """
+    conn.execute(
+        """
+        INSERT INTO spotify_lookups (track_id, uri, checked_at, attempts)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(track_id) DO UPDATE SET
+            uri = excluded.uri,
+            checked_at = excluded.checked_at,
+            attempts = spotify_lookups.attempts + 1
+        """,
+        (track_id, uri or None, time.time()),
+    )
+    conn.commit()
+
+
 def offset_mode(mode: str) -> str:
     """Collapse a detection mode to the clock its sync offset belongs to.
 
@@ -228,6 +301,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)
     ensure_sync_offset_columns(conn)
+    ensure_spotify_lookup_table(conn)
     return conn
 
 

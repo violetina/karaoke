@@ -77,6 +77,35 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
     return Detection(mode="browse")
 
 
+def same_track(artist_a: str, title_a: str,
+               artist_b: str, title_b: str) -> bool:
+    """Whether two (artist, title) pairs name the same recording.
+
+    Used to decide whether an MPRIS player is playing the song the microphone
+    just identified — if it is, its exact position beats dead reckoning.
+
+    The two sources disagree constantly: songrec returns "The Mothers of
+    Invention" where a player reports "Mothers of Invention", and players append
+    edition suffixes ("(Live)", "- Remastered 2011") that songrec omits. The
+    normalisation for exactly this already exists in localcache, so it is reused
+    rather than reimplemented.
+
+    A blank artist on either side is tolerated — browser MPRIS often has none —
+    but a title match is required in every case, or an empty artist would make
+    unrelated songs compare equal.
+    """
+    from .localcache import _artist_key, _title_keys
+
+    if not (title_a or "").strip() or not (title_b or "").strip():
+        return False
+    if not _title_keys(title_a) & _title_keys(title_b):
+        return False
+    key_a, key_b = _artist_key(artist_a), _artist_key(artist_b)
+    if not key_a or not key_b:
+        return True
+    return key_a == key_b
+
+
 def detect_active() -> Detection:
     """Detect the currently-active desktop player and its karaoke mode."""
     return classify(current_metadata())

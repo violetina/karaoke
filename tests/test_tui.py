@@ -773,3 +773,43 @@ def test_stats_panels_work_without_a_broker():
     panels = dict(stats_panels(_stub_stats(), summary, None))
     assert "workers" not in dict(panels["pipeline"])
     assert panels["library"]
+
+
+# --- Spotify filter --------------------------------------------------------
+
+def test_spotify_is_a_filter_option():
+    from karaoke.tui import FILTER_OPTIONS
+    assert ("Spotify tracks", "spotify") in FILTER_OPTIONS
+
+
+def test_load_spotify_returns_only_spotify_sourced_rows(tmp_path):
+    """The rows must carry the *Spotify* url/kind, so Enter opens the web player.
+
+    _load_tracks ranks spotify below every browser-openable kind, which is why
+    these tracks are otherwise unreachable from the library.
+    """
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.executescript(
+            """
+            INSERT INTO tracks (track_id, artist, title) VALUES
+                (1, 'A', 'Has Both'), (2, 'B', 'YouTube Only');
+            INSERT INTO sources (track_id, kind, url) VALUES
+                (1, 'youtube', 'https://youtu.be/xyz'),
+                (1, 'spotify', 'spotify:track:abc'),
+                (2, 'youtube', 'https://youtu.be/def');
+            """
+        )
+        conn.commit()
+        app = KaraokeTui.__new__(KaraokeTui)
+        app._song_data = []
+        app._load_spotify(conn)
+    finally:
+        conn.close()
+
+    assert [r["title"] for r in app._song_data] == ["Has Both"]
+    assert app._song_data[0]["kind"] == "spotify"
+    assert app._song_data[0]["url"] == "spotify:track:abc"
