@@ -1,5 +1,16 @@
 """Render a lyric line as large figlet-style type, keeping word positions.
 
+NOT CURRENTLY WIRED IN — kept deliberately, not dead code left behind. The TUI
+renders the active line bold at normal width because every "bigger" option was
+worse in practice: this module's block type was unreadable at the sizes that fit
+the panel, Unicode fullwidth forms drew tofu in the terminal font, and letter
+spacing broke the reading rhythm. Keep it for a future display with more room
+(a projector, a wider pane), where block type would come into its own.
+
+Fully tested, so re-wiring it is a one-line call to `render()` from
+`player._render_body`. Requires the `pyfiglet` dependency.
+
+
 The active line deserves the screen, but a big renderer that loses the
 word-level highlight would be a downgrade — knowing *which word* is being sung
 is the point of a karaoke display. So this module renders **word by word** and
