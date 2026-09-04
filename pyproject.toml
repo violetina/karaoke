@@ -44,6 +44,7 @@ karaoke-tui = "karaoke.cli:tui_main"
 karaoke-analyze = "karaoke.cli:analyze_main"
 karaoke-upgrade-timings = "karaoke.upgrade_timings:upgrade_main"
 karaoke-postprocess-worker = "karaoke.postprocess_worker:main"
+karaoke-spotify-playlist = "karaoke.spotify_playlist:playlist_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

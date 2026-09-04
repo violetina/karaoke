@@ -30,6 +30,17 @@ class SpotifyAuthError(RuntimeError):
     pass
 
 
+class SpotifyRateLimited(RuntimeError):
+    """Raised on HTTP 429 so callers stop instead of mistaking it for a miss."""
+
+    def __init__(self, retry_after: int = 0) -> None:
+        self.retry_after = retry_after
+        hours = retry_after / 3600.0
+        super().__init__(
+            f"Spotify rate limit hit; retry after {retry_after}s (~{hours:.1f}h)"
+        )
+
+
 @dataclass
 class Playback:
     """Current Spotify playback state normalized for lyric sync."""
@@ -139,3 +150,129 @@ class SpotifyClient:
         """Return Spotify Connect devices visible to the authenticated account."""
         r = requests.get(f"{_API}/me/player/devices", headers=self._headers(), timeout=10)
         return r.json().get("devices", []) if r.status_code == 200 else []
+
+    # --- playlist building ------------------------------------------------
+
+    def current_user_id(self) -> str:
+        """Return the authenticated user's Spotify id."""
+        r = requests.get(f"{_API}/me", headers=self._headers(), timeout=10)
+        if r.status_code != 200:
+            raise SpotifyAuthError(f"me failed: {r.status_code} {r.text[:200]}")
+        return r.json().get("id", "")
+
+    def _search_items(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Run one Spotify track search and return the raw items.
+
+        Raises :class:`SpotifyRateLimited` on HTTP 429. Swallowing that would be
+        actively misleading — an exhausted quota is indistinguishable from "no
+        such track", and a caller would record hundreds of real songs as missing.
+        """
+        r = requests.get(
+            f"{_API}/search", headers=self._headers(),
+            params={"q": query, "type": "track", "limit": limit}, timeout=10,
+        )
+        if r.status_code == 429:
+            raise SpotifyRateLimited(int(r.headers.get("Retry-After") or 0))
+        if r.status_code != 200:
+            return []
+        return ((r.json().get("tracks") or {}).get("items") or [])
+
+    def search_track(self, artist: str, title: str) -> Optional[str]:
+        """Return the best-matching Spotify track URI for artist/title, or None.
+
+        Tries the strict field-filtered query first, then progressively looser
+        ones, because library metadata carries noise Spotify does not index:
+        "feat. X" inside the title, a full credited-artist list where Spotify
+        has only the primary, and rows with artist and title swapped.
+
+        Every loose result is checked with :func:`track_matches` before being
+        accepted, so relaxing the query cannot silently return a different song.
+        """
+        from .spotify_playlist import primary_artist, search_title, track_matches
+
+        a, t = artist.strip(), title.strip()
+        pa, st = primary_artist(a), search_title(t)
+
+        # 1. Strict: exact-ish filters. Trust these without extra checking.
+        for cand_a, cand_t in {(a, t), (pa, st)}:
+            if not (cand_a and cand_t):
+                continue
+            items = self._search_items(f'track:"{cand_t}" artist:"{cand_a}"', limit=1)
+            if items:
+                return items[0].get("uri")
+
+        # 2. Loose free text, including the swapped reading — verified.
+        for q_artist, q_title in ((pa, st), (st, pa)):
+            if not (q_artist and q_title):
+                continue
+            for item in self._search_items(f"{q_artist} {q_title}", limit=5):
+                names = [x.get("name", "") for x in (item.get("artists") or [])]
+                if track_matches(q_artist, q_title, names, item.get("name", "")):
+                    return item.get("uri")
+        return None
+
+    def find_playlist(self, name: str) -> Optional[str]:
+        """Return the id of the user's playlist with this exact name, if any.
+
+        Lets a rebuild target the existing playlist instead of creating a
+        duplicate every run.
+        """
+        url: Optional[str] = f"{_API}/me/playlists?limit=50"
+        while url:
+            r = requests.get(url, headers=self._headers(), timeout=10)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            for pl in data.get("items") or []:
+                if (pl.get("name") or "") == name:
+                    return pl.get("id")
+            url = data.get("next")
+        return None
+
+    def playlist_track_uris(self, playlist_id: str) -> list[str]:
+        """Return every track URI already in a playlist (paged)."""
+        uris: list[str] = []
+        url: Optional[str] = f"{_API}/playlists/{playlist_id}/tracks?limit=100"
+        while url:
+            r = requests.get(url, headers=self._headers(), timeout=15)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            for item in data.get("items") or []:
+                uri = ((item.get("track") or {}).get("uri") or "")
+                if uri:
+                    uris.append(uri)
+            url = data.get("next")
+        return uris
+
+    def create_playlist(self, name: str, *, description: str = "",
+                        public: bool = False) -> str:
+        """Create a playlist for the current user and return its id."""
+        user_id = self.current_user_id()
+        r = requests.post(
+            f"{_API}/users/{user_id}/playlists", headers=self._headers(),
+            json={"name": name, "description": description, "public": public},
+            timeout=15,
+        )
+        if r.status_code not in (200, 201):
+            raise SpotifyAuthError(
+                f"playlist create failed: {r.status_code} {r.text[:200]}")
+        return r.json().get("id", "")
+
+    def add_playlist_tracks(self, playlist_id: str, uris: list[str]) -> int:
+        """Append track URIs to a playlist. Returns how many were added.
+
+        Spotify caps each request at 100 URIs, so this batches.
+        """
+        added = 0
+        for start in range(0, len(uris), 100):
+            batch = uris[start:start + 100]
+            r = requests.post(
+                f"{_API}/playlists/{playlist_id}/tracks", headers=self._headers(),
+                json={"uris": batch}, timeout=15,
+            )
+            if r.status_code not in (200, 201):
+                raise SpotifyAuthError(
+                    f"playlist add failed: {r.status_code} {r.text[:200]}")
+            added += len(batch)
+        return added
