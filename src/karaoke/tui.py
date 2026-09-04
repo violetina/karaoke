@@ -921,6 +921,12 @@ class KaraokeTui(App):
             self.call_from_thread(self.notify, f"Sample failed: {exc}",
                                   severity="error")
             return
+        except sample_audio.AnalysisUnavailable as exc:
+            # The recording worked; this interpreter just cannot analyse it.
+            # Say so plainly rather than reporting an unknown key.
+            log.warning("sample not analysed: %s", exc)
+            self.call_from_thread(self.notify, str(exc), severity="warning")
+            return
         except Exception as exc:
             log.exception("sample analysis failed")
             self.call_from_thread(self.notify, f"Analysis failed: {exc}",
