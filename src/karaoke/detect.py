@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
+from .logger import log
 from .lyrics import Lyrics
 from .playerctl import PlayerMetadata, current_metadata, normalize_player_track
 
@@ -164,6 +165,12 @@ def record_gap(det: Detection, conn: sqlite3.Connection) -> None:
     Stores the source (track + URL) when we have a real title, and logs a
     lyric gap so ``karaoke-backfill`` / ``karaoke-stage`` can pick it up later.
     Best-effort: never raises to the caller.
+
+    A gap is only logged when BOTH artist and title are known. YouTube Music
+    reports a title with no ``xesam:artist``, and browsers expose no
+    ``xesam:url`` to resolve one from, so an artist-less row could never be
+    matched against LRCLIB — it would sit in the queue being retried forever.
+    Dropping it beats recording a gap nothing can ever fill.
     """
     from . import localcache
 
@@ -180,6 +187,9 @@ def record_gap(det: Detection, conn: sqlite3.Connection) -> None:
                 player_name=det.player,
                 conn=conn,
             )
+        if not det.artist.strip():
+            log.debug("gap not logged, player gave no artist for %r", det.title)
+            return
         localcache.log_lyric_gap(det.artist, det.title, conn)
     except Exception:
         pass
