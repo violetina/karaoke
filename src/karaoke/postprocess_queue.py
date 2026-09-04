@@ -59,6 +59,37 @@ def needs_postprocessing(track_id: int, conn: sqlite3.Connection) -> list[str]:
     return pending
 
 
+# What the worker can actually fetch audio (or captions) for. Both task kinds
+# need it: analysis needs the file to examine, and the word-timing upgrade needs
+# YouTube captions.
+_DOWNLOADABLE_MARKERS = ("watch?v=", "youtu.be/", "youtube.com/embed/")
+
+
+def is_downloadable(url: str) -> bool:
+    """Whether the worker could obtain audio from this URL."""
+    return any(marker in (url or "").lower() for marker in _DOWNLOADABLE_MARKERS)
+
+
+def has_downloadable_source(track_id: int, conn: sqlite3.Connection) -> bool:
+    """Whether any stored source for this track yields audio.
+
+    A Spotify URL does not: there is no file behind it, which is the whole
+    reason ``karaoke-sample`` and record mode exist.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT url, kind FROM sources WHERE track_id = ?", (track_id,)
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row["kind"] == "local":
+            return True
+        if is_downloadable(row["url"] or ""):
+            return True
+    return False
+
+
 def enqueue_if_needed(
     artist: str, title: str, url: str = "",
     conn: Optional[sqlite3.Connection] = None,
@@ -75,10 +106,24 @@ def enqueue_if_needed(
     try:
         track_id = localcache.find_track_id(artist, title, c)
         if track_id is None:
-            # Unknown track: still enqueue so the worker can resolve+download it.
+            # Unknown track: still enqueue so the worker can resolve+download
+            # it -- but only if there is something to download. A Spotify URL
+            # would just fail on every retry.
+            if url and not is_downloadable(url):
+                log.debug("not enqueuing %s - %s: no downloadable source",
+                          artist, title)
+                return False
             return publish_postprocess_task(artist, title, url)
         pending = needs_postprocessing(track_id, c)
         if not pending:
+            return False
+        # The worker cannot analyse what it cannot fetch. Without this, every
+        # Spotify-only track is enqueued, fails "no watchable URL", is retried
+        # and dropped -- on every track change, forever. Those tracks need a
+        # recording instead (karaoke-sample, or record mode).
+        if not (is_downloadable(url) or has_downloadable_source(track_id, c)):
+            log.info("skipping post-process for %s - %s: no downloadable audio"
+                     " (sample it instead)", artist, title)
             return False
         return publish_postprocess_task(artist, title, url)
     except Exception as exc:
