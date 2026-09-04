@@ -583,3 +583,51 @@ def test_title_banner_never_wraps_to_a_second_block():
     out = _banner("Disappearer", 150)
     rows = out.splitlines()
     assert len({len(r) for r in rows[:-1]}) == 1     # block rows equal width
+
+
+# --- cover art source ------------------------------------------------------
+
+def test_cover_prefers_the_players_own_art(monkeypatch, tmp_path):
+    """Browsers write the cover locally, so nothing has to be downloaded."""
+    from karaoke import playerctl, tui
+    from karaoke.tui import KaraokeTui
+
+    art = tmp_path / "cover.png"
+    art.write_bytes(b"x")
+    monkeypatch.setattr(playerctl, "art_url", lambda *a, **k: f"file://{art}")
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    monkeypatch.setattr(app, "_control_player", lambda: "", raising=False)
+    assert app.cover_source("") == art
+
+
+def test_cover_falls_back_to_the_cached_video(monkeypatch, tmp_path):
+    """No cover: the first frame of the downloaded media stands in."""
+    import types
+    from karaoke import config, playerctl
+    from karaoke.tui import KaraokeTui
+
+    monkeypatch.setattr(playerctl, "art_url", lambda *a, **k: "")
+    # settings is a frozen dataclass, so swap the object rather than a field.
+    monkeypatch.setattr(config, "settings",
+                        types.SimpleNamespace(youtube_dir=str(tmp_path)))
+    media = tmp_path / "_3tkup9b-iM.webm"
+    media.write_bytes(b"x")
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    monkeypatch.setattr(app, "_control_player", lambda: "", raising=False)
+    assert app.cover_source("https://youtu.be/_3tkup9b-iM") == media
+
+
+def test_cover_source_is_none_when_there_is_nothing(monkeypatch, tmp_path):
+    import types
+    from karaoke import config, playerctl
+    from karaoke.tui import KaraokeTui
+
+    monkeypatch.setattr(playerctl, "art_url", lambda *a, **k: "")
+    monkeypatch.setattr(config, "settings",
+                        types.SimpleNamespace(youtube_dir=str(tmp_path)))
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    monkeypatch.setattr(app, "_control_player", lambda: "", raising=False)
+    assert app.cover_source("https://youtu.be/_3tkup9b-iM") is None

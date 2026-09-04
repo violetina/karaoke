@@ -196,6 +196,15 @@ def status(player: str = "") -> Optional[str]:
     return _run(_base_cmd(player) + ["status"])
 
 
+def art_url(player: str = "") -> Optional[str]:
+    """The player's cover-art URL (``mpris:artUrl``), or None.
+
+    Browsers write the artwork to a local file and advertise it here, so this
+    is usually a ``file://`` path that costs nothing to read.
+    """
+    return _run(_base_cmd(player) + ["metadata", "mpris:artUrl"])
+
+
 def play_pause(player: str = "") -> bool:
     """Toggle play/pause on the (targeted) player. Returns success."""
     return _run(_base_cmd(player) + ["play-pause"]) is not None

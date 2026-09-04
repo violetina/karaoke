@@ -27,6 +27,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from rich.text import Text
@@ -1022,6 +1023,7 @@ class KaraokeTui(App):
         # Remembered so `A` can post-process whatever is playing without
         # re-resolving it.
         self._current_song = (display_artist, display_title, det.url or "")
+        self._refresh_cover_art(det.url or "")
         keybpm_line = self._format_keybpm_line(current_song)
         # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
         # if this track is missing derived assets. Best-effort; no-op if the
@@ -1185,6 +1187,55 @@ class KaraokeTui(App):
         self.query_one("#ascii-visual", Static).update(
             f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
         )
+
+    def cover_source(self, url: str = "") -> "os.PathLike | None":
+        """Where to get artwork for the current track.
+
+        Prefers the player's own MPRIS art, which browsers have already written
+        to a local file — no download, and it is the cover the user is looking
+        at. Falls back to the cached YouTube media, whose first frame stands in
+        when there is no cover.
+        """
+        from . import coverart
+
+        path = coverart.art_path_from_url(playerctl.art_url(self._control_player()) or "")
+        if path is not None:
+            return path
+        vid = localcache.extract_youtube_id(url or "")
+        if not vid:
+            return None
+        from .config import settings
+        for ext in (".webm", ".m4a", ".mp4", ".mkv", ".opus", ".ogg"):
+            candidate = Path(settings.youtube_dir) / f"{vid}{ext}"
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _refresh_cover_art(self, url: str = "") -> None:
+        """Render cover art into the left column, in a worker thread.
+
+        ffmpeg is a subprocess, so this stays off the UI thread and only runs
+        on a track change rather than every poll.
+        """
+        def _work() -> None:
+            from . import coverart
+            try:
+                panel = self.query_one("#beat-art", Static)
+                cols = max(0, panel.content_size.width)
+                rows = max(0, panel.content_size.height)
+                source = self.cover_source(url)
+                art = None
+                if source is not None and cols > 3 and rows > 1:
+                    art = coverart.render(source, cols,
+                                          min(rows, cols // coverart.CELL_ASPECT))
+                self.call_from_thread(panel.update, art if art is not None else "")
+            except Exception:
+                log.debug("cover art refresh failed", exc_info=True)
+
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            log.debug("cover art dispatch failed", exc_info=True)
 
     def _background_fetch_lyrics(self, artist: str, title: str) -> None:
         """Fetch lyrics from LRCLIB for a cache miss, in a worker thread.
