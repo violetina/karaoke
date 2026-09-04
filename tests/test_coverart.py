@@ -84,9 +84,16 @@ def _visual_aspect(cols, rows):
     return (rows * coverart.CELL_ASPECT) / cols
 
 
-def test_square_source_renders_square():
-    """Cells are ~2:1 tall, so a square image needs half as many rows."""
+def test_square_source_renders_square(monkeypatch):
+    """Cells are ~2:1 tall, so a square image needs about half as many rows."""
+    monkeypatch.setattr(coverart, "CELL_ASPECT", 2.0)
     assert coverart.fit((120, 120), 28, 37) == (28, 14)
+
+
+def test_default_aspect_is_the_measured_one():
+    """2.5, calibrated by eye — the theoretical 2.0 rendered covers stretched."""
+    assert coverart.CELL_ASPECT == 2.5
+    assert coverart.fit((120, 120), 28, 37) == (28, 11)
 
 
 def test_landscape_source_keeps_its_shape():
@@ -132,6 +139,8 @@ def test_no_padding_when_the_image_fills_the_panel():
 
 def test_render_measures_the_source_before_scaling(monkeypatch):
     seen = {}
+    # Pin the aspect so this tests the measuring, not the default constant.
+    monkeypatch.setattr(coverart, "CELL_ASPECT", 2.0)
     monkeypatch.setattr(coverart, "probe_size", lambda *a, **k: (1920, 1080))
 
     def fake_sample(path, cols, rows, **kw):

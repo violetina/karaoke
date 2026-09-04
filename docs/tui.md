@@ -120,7 +120,9 @@ column on a terminal that draws block glyphs wide.
 
 Terminal cells are roughly twice as tall as they are wide, but the exact figure
 depends on the font and on any line spacing the terminal adds — and a TUI
-cannot query it. If the cover looks stretched, calibrate:
+cannot query it. The default is **2.5**, measured by eye on a real terminal
+rather than taken from the theoretical 2.0. If the cover still looks stretched,
+calibrate:
 
 ```bash
 python -m karaoke.coverart          # prints a square
@@ -136,7 +138,7 @@ export KARAOKE_CELL_ASPECT=2.4
 
 | variable | default | meaning |
 |---|---|---|
-| `KARAOKE_CELL_ASPECT` | `2.0` | cell height ÷ width, for cover art |
+| `KARAOKE_CELL_ASPECT` | `2.5` | cell height ÷ width, for cover art |
 | `KARAOKE_SYNC_OFFSET` | `0.0` | seconds to pull lyrics back in scan mode |
 | `KARAOKE_SYNC_OFFSET_SPOTIFY` | `0.0` | same, for Spotify |
 | `KARAOKE_COOKIES_FROM_BROWSER` | — | browser to take YouTube cookies from |

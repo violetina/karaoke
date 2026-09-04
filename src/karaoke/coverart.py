@@ -24,15 +24,18 @@ from urllib.parse import unquote, urlparse
 # How many times taller than wide a terminal cell is. A square image needs
 # `cols / CELL_ASPECT` rows to still look square.
 #
-# 2.0 is the usual figure, but it depends on the font and on any line spacing
-# the terminal adds — with extra leading, cells get taller and art rendered for
-# 2.0 comes out stretched vertically. There is no way to query this from inside
-# a TUI, so it is tunable: raise it if the cover looks too tall, lower it if it
-# looks squashed. `python -m karaoke.coverart` prints a calibration square.
+# 2.0 is the textbook figure, but it depends on the font and on any line
+# spacing the terminal adds — with extra leading, cells are taller and art
+# rendered for 2.0 comes out stretched. 2.5 is what a real terminal here
+# measured out at, calibrated by eye against `python -m karaoke.coverart`, and
+# is a better default than the theoretical value.
+#
+# There is no way to query this from inside a TUI, so it stays tunable: raise
+# it if the cover still looks too tall, lower it if it looks squashed.
 try:
-    CELL_ASPECT = float(os.environ.get("KARAOKE_CELL_ASPECT", "2.0"))
+    CELL_ASPECT = float(os.environ.get("KARAOKE_CELL_ASPECT", "2.5"))
 except ValueError:
-    CELL_ASPECT = 2.0
+    CELL_ASPECT = 2.5
 
 
 def art_path_from_url(art_url: str) -> Optional[Path]:
