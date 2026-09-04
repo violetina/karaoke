@@ -227,6 +227,117 @@ class HelpScreen(ModalScreen[None]):
             yield Static("\n".join((*HELP_NOTES, f"logs: {LOG_FILE}")))
 
 
+def stats_panels(lib, summary, status=None) -> "list[tuple[str, list[tuple[str, str]]]]":
+    """(section, rows) pairs for the stats screen.
+
+    Pure: takes already-gathered data and returns labelled strings, so the
+    layout is testable without a database, a broker or an event loop.
+    """
+    from .librarystats import bar
+
+    def pct(n: int, d: int) -> str:
+        return f"{100 * n / d:.0f}%" if d else "—"
+
+    library = [
+        ("tracks", str(lib.tracks)),
+        ("karaoke-ready", f"{lib.synced}  {bar(lib.synced, lib.tracks)} "
+                          f"{pct(lib.synced, lib.tracks)}"),
+        ("plain only", str(lib.plain_only)),
+        ("no lyrics", str(lib.tracks - lib.with_lyrics)),
+        ("sources", str(lib.sources)),
+        ("staged", str(lib.staged)),
+    ]
+
+    pipeline = [
+        ("analysed", f"{lib.analysed}  {bar(lib.analysed, lib.tracks)} "
+                     f"{pct(lib.analysed, lib.tracks)}"),
+        ("backlog", str(lib.unanalysed)),
+        ("word timings", str(lib.word_timed)),
+    ]
+    if status is not None:
+        pipeline.append(("workers", f"{status.workers} up"))
+        pipeline.append(("queue", str(status.queued)))
+
+    listening = [
+        ("plays", str(summary.plays)),
+        ("discoveries", str(summary.discoveries)),
+        ("cache hits", f"{summary.cache_hits}/"
+                       f"{summary.cache_hits + summary.cache_misses}  "
+                       f"{pct(summary.cache_hits, summary.cache_hits + summary.cache_misses)}"),
+        ("artists", str(summary.distinct_artists)),
+    ]
+
+    total_lyrics = sum(n for _, n in lib.lyric_sources) or 1
+    # Caption source names run to 35 characters and would push the bars out of
+    # line; the distinguishing part is the front.
+    sources = [(name[:16], f"{n:>4}  {bar(n, total_lyrics)}")
+               for name, n in lib.lyric_sources[:6]]
+
+    total_keys = sum(n for _, n in lib.keys) or 1
+    keys = [(name, f"{n:>4}  {bar(n, total_keys)}") for name, n in lib.keys[:6]]
+
+    total_bpm = sum(n for _, n in lib.tempo_bands) or 1
+    tempo = [(name, f"{n:>4}  {bar(n, total_bpm)}") for name, n in lib.tempo_bands]
+
+    panels = [
+        ("library", library),
+        ("pipeline", pipeline),
+        ("listening", listening),
+        ("lyric sources", sources),
+        ("gaps", [(s, str(n)) for s, n in lib.gaps]),
+        ("keys", keys),
+        ("tempo", tempo),
+    ]
+    return [(title, rows) for title, rows in panels if rows]
+
+
+class StatsScreen(ModalScreen[None]):
+    """Library, pipeline and listening statistics."""
+
+    CSS = """
+    StatsScreen { align: center middle; }
+    #stats-dialog {
+        width: 92; height: auto; max-height: 90%;
+        border: thick $accent; padding: 1 2; background: $surface;
+        border-title-align: center; overflow-y: auto;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("T", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, panels) -> None:
+        super().__init__()
+        self._panels = panels
+
+    def compose(self) -> ComposeResult:
+        from rich.table import Table
+
+        grid = Table.grid(padding=(0, 3))
+        grid.add_column()
+        grid.add_column()
+        cells = []
+        for title, rows in self._panels:
+            inner = Table.grid(padding=(0, 2))
+            inner.add_column(justify="left", style="cyan", no_wrap=True)
+            inner.add_column(justify="left")
+            inner.add_row(f"[bold]{title}[/bold]", "")
+            for label, value in rows:
+                inner.add_row(label, value)
+            cells.append(inner)
+        # Two columns, so seven short panels fit without scrolling.
+        for i in range(0, len(cells), 2):
+            grid.add_row(cells[i], cells[i + 1] if i + 1 < len(cells) else "")
+
+        with Vertical(id="stats-dialog") as dialog:
+            dialog.border_title = "Stats"
+            dialog.border_subtitle = "esc to close"
+            yield Static(grid)
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """A tiny yes/no modal used for the staging whitelist confirmation."""
 
@@ -345,6 +456,7 @@ class KaraokeTui(App):
         ("A", "approve_postprocess", "Post-process"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
+        ("T", "stats", "Stats"),
         ("question_mark", "help", "Keys"),
         Binding("escape", "hide_browse", "Close browse", show=False),
         ("r", "refresh", "Refresh"),
@@ -711,6 +823,25 @@ class KaraokeTui(App):
         self._postprocess_enqueued.discard((artist.lower(), title.lower()))
         ok, message = self.approve_postprocess(artist, title, url)
         self.notify(message, severity="information" if ok else "warning")
+
+    def action_stats(self) -> None:
+        """`T`: library, pipeline and listening statistics."""
+        from . import librarystats
+
+        try:
+            with localcache.connect() as conn:
+                lib = librarystats.collect(conn)
+            summary = localcache.summarize()
+        except Exception as exc:
+            self.notify(f"Stats unavailable: {exc}", severity="error")
+            return
+        status = None
+        try:
+            from .postprocess_status import get_status
+            status = get_status(sample_cpu=False)
+        except Exception:
+            pass          # broker down is not a reason to hide the rest
+        self.push_screen(StatsScreen(stats_panels(lib, summary, status)))
 
     def action_help(self) -> None:
         # get_key_display is the app's own formatter, so the help screen and

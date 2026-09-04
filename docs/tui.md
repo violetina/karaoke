@@ -42,6 +42,7 @@ go stale. The ones worth knowing:
 | `F` | focus mode — hides everything but the lyrics |
 | `R` | mic/radio mode (songrec) |
 | `A` | queue the playing track for post-processing |
+| `T` | stats — library, pipeline, listening, keys, tempo |
 | `?` | key reference |
 | `,` `.` | nudge lyric sync ∓0.1s, `S` saves it for that track |
 
@@ -63,6 +64,30 @@ out of the way. A larger font means fewer cells, so the panels adapt:
 | any size, `F` | everything hidden but the lyrics (93–96% of the screen) |
 
 Measured lyric share at 80×24: **28% before, 77% after**.
+
+## Stats (`T`)
+
+Seven panels over the library and the pipeline:
+
+```
+library                     pipeline
+  tracks       487            analysed     255  ######...... 52%
+  karaoke-ready 422 ####. 87% backlog      232
+  plain only     8            word timings   6
+  no lyrics     57            workers    12 up
+  sources      306            queue         0
+
+lyric sources               keys              tempo
+  lrclib       307 ####...     E minor  29      moderato 100-129  130
+  whisper       72 #......     C minor  25      andante  70-99     54
+  whisper_align 39 #......     A minor  20      allegro 130-159    44
+```
+
+`karaoke-ready` is the number that matters — tracks with *synced* lyrics, the
+ones that can actually drive a session. `backlog` is what
+`scripts/enqueue_postprocess.py` would pick up.
+
+Degrades gracefully: a broker outage drops the worker rows and keeps the rest.
 
 ## Modes
 

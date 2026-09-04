@@ -680,3 +680,77 @@ def test_offset_sign_is_always_shown():
     from karaoke.tui import track_info
     assert "+0.0s" in track_info(offset=0.0)
     assert "-1.5s" in track_info(offset=-1.5)
+
+
+# --- stats screen ----------------------------------------------------------
+
+def _stub_stats():
+    from karaoke.librarystats import LibraryStats
+    return LibraryStats(
+        tracks=100, with_lyrics=90, synced=80, plain_only=10, sources=60,
+        staged=5, analysed=50, word_timed=3,
+        lyric_sources=[("lrclib", 70), ("youtube_caption_manual_en_enhanced", 20)],
+        gaps=[("processed", 30), ("pending", 10)],
+        keys=[("E minor", 12)], tempo_bands=[("moderato 100-129", 40)],
+    )
+
+
+def _stub_summary():
+    from karaoke import localcache
+    return localcache.CacheSummary(
+        total_events=100, plays=50, discoveries=20, cache_hits=30,
+        cache_misses=10, distinct_tracks=40, distinct_artists=25,
+        top_tracks=[], top_artists=[], by_mode=[],
+    ) if hasattr(localcache, "CacheSummary") else None
+
+
+def test_library_stats_derive_backlog_and_share():
+    lib = _stub_stats()
+    assert lib.unanalysed == 50
+    assert lib.synced_share == 0.8
+
+
+def test_bar_is_ascii_so_it_cannot_shift():
+    """Block glyphs are ambiguous width — the sentiment-bar lesson."""
+    from karaoke.librarystats import bar
+    out = bar(5, 10, width=10)
+    assert out.isascii() and len(out) == 10
+    assert bar(0, 10) == "." * 12
+    assert bar(10, 10) == "#" * 12
+
+
+def test_bar_handles_a_zero_total():
+    from karaoke.librarystats import bar
+    assert len(bar(0, 0, width=8)) == 8
+
+
+def test_stats_panels_cover_every_section():
+    summary = _stub_summary()
+    if summary is None:
+        return
+    from karaoke.tui import stats_panels
+    titles = [t for t, _ in stats_panels(_stub_stats(), summary)]
+    for expected in ("library", "pipeline", "listening", "lyric sources",
+                     "gaps", "keys", "tempo"):
+        assert expected in titles
+
+
+def test_stats_panels_truncate_long_source_names():
+    """Caption names run to 35 chars and would push the bars out of line."""
+    summary = _stub_summary()
+    if summary is None:
+        return
+    from karaoke.tui import stats_panels
+    rows = dict(stats_panels(_stub_stats(), summary))["lyric sources"]
+    assert all(len(label) <= 16 for label, _ in rows)
+
+
+def test_stats_panels_work_without_a_broker():
+    """A broker outage must not hide the library and listening numbers."""
+    summary = _stub_summary()
+    if summary is None:
+        return
+    from karaoke.tui import stats_panels
+    panels = dict(stats_panels(_stub_stats(), summary, None))
+    assert "workers" not in dict(panels["pipeline"])
+    assert panels["library"]

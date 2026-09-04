@@ -231,3 +231,16 @@ def test_sidebars_both_hide_on_a_narrow_terminal(app):
             assert not app.query_one("#sidebar").display
             assert not app.query_one("#visuals").display
     _run(go())
+
+
+def test_stats_screen_opens_and_closes(app):
+    async def go():
+        async with app.run_test(size=(150, 45)) as pilot:
+            await pilot.pause()
+            await pilot.press("T")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.StatsScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, tui.StatsScreen)
+    _run(go())
