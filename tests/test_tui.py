@@ -631,3 +631,52 @@ def test_cover_source_is_none_when_there_is_nothing(monkeypatch, tmp_path):
     app = KaraokeTui.__new__(KaraokeTui)
     monkeypatch.setattr(app, "_control_player", lambda: "", raising=False)
     assert app.cover_source("https://youtu.be/_3tkup9b-iM") is None
+
+
+# --- track info read-out ---------------------------------------------------
+
+def test_track_info_lines_up_in_one_column():
+    from karaoke.tui import track_info
+
+    out = track_info(source="lrclib", duration=245.0, offset=-0.3,
+                     pending=["analysis"], lyric_lines=42)
+    starts = {len(line) - len(line.lstrip()) or line.index(line.split()[1])
+              for line in out.splitlines()}
+    assert len(starts) == 1
+    assert out.isascii()          # nothing mis-measurable in the labels
+
+
+def test_track_info_formats_duration_as_minutes():
+    from karaoke.tui import track_info
+    assert "4:05" in track_info(duration=245.0)
+    assert "0:07" in track_info(duration=7.0)
+
+
+def test_track_info_shows_what_postprocessing_is_left():
+    from karaoke.tui import track_info
+    assert "analysis, timings" in track_info(pending=["analysis", "timings"])
+    assert "done" in track_info(pending=[])
+
+
+def test_track_info_omits_what_is_not_known():
+    """A track with nothing known should not render empty labels."""
+    from karaoke.tui import track_info
+
+    out = track_info(offset=0.2)
+    assert "source" not in out and "length" not in out and "postproc" not in out
+    assert "+0.2s" in out
+
+
+def test_an_error_replaces_the_block(): 
+    """When something is wrong, that is the thing worth reading."""
+    from karaoke.tui import track_info
+
+    out = track_info(source="lrclib", duration=100.0, error="broker down")
+    assert out == "! broker down"
+    assert "lrclib" not in out
+
+
+def test_offset_sign_is_always_shown():
+    from karaoke.tui import track_info
+    assert "+0.0s" in track_info(offset=0.0)
+    assert "-1.5s" in track_info(offset=-1.5)

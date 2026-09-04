@@ -120,6 +120,38 @@ def _radio_cli_running() -> bool:
                for line in out.splitlines())
 
 
+def track_info(*, source: str = "", duration: float | None = None,
+               offset: float = 0.0, pending: "list[str] | None" = None,
+               lyric_lines: int = 0, error: str = "") -> str:
+    """Compact per-track read-out for under the cover art.
+
+    A label column wide enough for the longest label, ASCII throughout, so the
+    values line up whatever the terminal does with symbol glyphs.
+
+    An error replaces the block rather than joining it: when something is
+    wrong, that is the thing worth reading. Absent values are simply left out,
+    so a track with nothing known renders nothing at all.
+    """
+    if error:
+        return f"! {error}"
+
+    rows: list[tuple[str, str]] = []
+    if source:
+        rows.append(("source", source))
+    if lyric_lines:
+        rows.append(("lines", str(lyric_lines)))
+    if duration:
+        rows.append(("length", f"{int(duration) // 60}:{int(duration) % 60:02d}"))
+    rows.append(("offset", f"{offset:+.1f}s"))
+    if pending is not None:
+        rows.append(("postproc", ", ".join(pending) if pending else "done"))
+
+    if not rows:
+        return ""
+    width = max(len(label) for label, _ in rows) + 2
+    return "\n".join(f"{label:<{width}s}{value}" for label, value in rows)
+
+
 def binding_rows(bindings, *, key_display=None) -> list[tuple[str, str]]:
     """Return (key, description) pairs for the help screen, from BINDINGS.
 
@@ -265,6 +297,9 @@ class KaraokeTui(App):
     /* Takes the rest of the column so the reserved space is visibly held. */
     #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1;
                 margin-top: 1; }
+    /* auto height, so the art above takes whatever is left */
+    #track-info { height: auto; padding: 0 1; margin-top: 1;
+                  color: $text-muted; }
 
     /* Browse overlay. On its own layer so showing it never resizes #workspace.
        The offset centres it by arithmetic (Screen is layout: vertical, so
@@ -344,6 +379,7 @@ class KaraokeTui(App):
         self._lyrics_fetched: set[tuple[str, str]] = set()
         self._mic_ref = None                       # last songrec identification
         self._mic_stop: threading.Event | None = None
+        self._last_error = ""      # surfaced in the track-info read-out
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -358,6 +394,7 @@ class KaraokeTui(App):
                 # Empty for now so the column keeps its width and the lyrics
                 # stay centred.
                 yield Static("", id="beat-art")
+                yield Static("", id="track-info")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
@@ -1024,6 +1061,9 @@ class KaraokeTui(App):
         # re-resolving it.
         self._current_song = (display_artist, display_title, det.url or "")
         self._refresh_cover_art(det.url or "")
+        if lyrics is not None and (lyrics.synced_raw or lyrics.plain):
+            self._last_error = ""      # resolved fine; drop any stale error
+        self._refresh_track_info(lyrics)
         keybpm_line = self._format_keybpm_line(current_song)
         # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
         # if this track is missing derived assets. Best-effort; no-op if the
@@ -1211,6 +1251,36 @@ class KaraokeTui(App):
                 return candidate
         return None
 
+    def _refresh_track_info(self, lyrics) -> None:
+        """Fill the read-out under the cover art. Best-effort and never fatal."""
+        try:
+            pending = None
+            duration = None
+            if self._current_track_id is not None:
+                from .postprocess_queue import needs_postprocessing
+                with localcache.connect() as conn:
+                    pending = needs_postprocessing(self._current_track_id, conn)
+                    row = conn.execute(
+                        "SELECT duration FROM tracks WHERE track_id = ?",
+                        (self._current_track_id,),
+                    ).fetchone()
+                    duration = row["duration"] if row else None
+            text = track_info(
+                source=(lyrics.source if lyrics else ""),
+                duration=duration,
+                offset=self._sync_offset,
+                pending=pending,
+                lyric_lines=len(self._timeline.lines),
+                error=self._last_error,
+            )
+        except Exception as exc:
+            log.debug("track info refresh failed", exc_info=True)
+            text = track_info(error=str(exc)[:40])
+        try:
+            self.query_one("#track-info", Static).update(text)
+        except Exception:
+            pass
+
     def _refresh_cover_art(self, url: str = "") -> None:
         """Render cover art into the left column, in a worker thread.
 
@@ -1229,8 +1299,9 @@ class KaraokeTui(App):
                     art = coverart.render(source, cols,
                                           min(rows, cols // coverart.CELL_ASPECT))
                 self.call_from_thread(panel.update, art if art is not None else "")
-            except Exception:
+            except Exception as exc:
                 log.debug("cover art refresh failed", exc_info=True)
+                self._last_error = f"cover art: {exc}"[:60]
 
         try:
             self.run_worker(_work, exclusive=False, thread=True)
@@ -1264,8 +1335,9 @@ class KaraokeTui(App):
             # Force the next poll to re-resolve rather than short-circuit on an
             # unchanged key.
             self._sync_key = None
-        except Exception:
+        except Exception as exc:
             log.debug("background lyric fetch failed", exc_info=True)
+            self._last_error = f"lyric fetch: {exc}"[:60]
 
     def _background_autoload_captions(self, url: str, vid: str) -> None:
         """Fetch, stage, and auto-approve YouTube captions in a worker thread.
