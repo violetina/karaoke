@@ -85,3 +85,99 @@ def test_verify_key_relative_reconciliation(tmp_path):
     assert stored.reference_key == Key(0, "major")
     assert stored.resolved_key == Key(0, "major")
     assert stored.key_relation == "relative"
+
+
+# --- bar-chart alignment ---------------------------------------------------
+#
+# sentiment_bars had no coverage at all, and that is where the alignment bug
+# lived: a leading ambiguous-width mood glyph shifted one row's bar sideways.
+
+def _bars(text="happy joy\nsad tears\nlove heart\nhate rage", width=12):
+    return visuals.sentiment_bars(visuals.analyze_sentiment(text),
+                                  width=width).splitlines()
+
+
+def test_sentiment_bars_has_a_row_per_mood():
+    rows = _bars()
+    assert len(rows) == 4
+    for mood in ("happy", "tender", "sad", "angry"):
+        assert any(r.startswith(mood) for r in rows)
+
+
+def test_sentiment_bars_all_start_in_the_same_column():
+    """The regression test: every bar must begin at the same offset.
+
+    Previously "▽ sad" was drawn one cell wider than its siblings on some
+    terminals, so the sad row's bar was pushed right.
+    """
+    rows = _bars()
+    starts = {min(r.index(c) for c in "█░" if c in r) for r in rows}
+    assert len(starts) == 1
+
+
+def test_nothing_mis_measurable_precedes_the_bar():
+    """Everything left of the bar is ASCII, so its width cannot be disputed."""
+    for row in _bars():
+        start = min(row.index(c) for c in "█░" if c in row)
+        assert row[:start].isascii()
+
+
+def test_sentiment_bars_are_exactly_width_cells():
+    for row in _bars(width=12):
+        bar = row[visuals._BAR_LABEL_W + 1:]
+        assert len(bar) == 12
+        assert set(bar) <= {"█", "░"}
+
+
+def test_sentiment_bars_reflect_shares():
+    rows = _bars("happy joy sunshine glad", width=12)
+    happy = next(r for r in rows if r.startswith("happy"))
+    angry = next(r for r in rows if r.startswith("angry"))
+    assert happy.endswith("█" * 12)
+    assert angry.endswith("░" * 12)
+
+
+def test_sentiment_bars_empty_profile_is_all_empty():
+    for row in _bars("", width=8):
+        assert row.endswith("░" * 8)
+
+
+def test_mood_marks_still_used_by_the_arc():
+    """The glyphs are not deleted, only moved out of the aligned rows."""
+    profile = visuals.analyze_sentiment("happy joy\nsad tears")
+    assert set(visuals.sentiment_arc(profile, width=8)) & set(
+        visuals._MOOD_MARK.values())
+
+
+# --- width helpers ---------------------------------------------------------
+
+def test_cell_width_matches_rich():
+    from rich.cells import cell_len
+    for glyph in "☀☔🔥♡◇▲▽✷♥·█░ab ":
+        assert visuals.cell_width(glyph) == cell_len(glyph), glyph
+
+
+def test_cell_width_knows_the_genuinely_wide_ones():
+    assert visuals.cell_width("☔") == 2
+    assert visuals.cell_width("🔥") == 2
+    assert visuals.cell_width("☀") == 1
+
+
+def test_cell_width_ambiguous_policy_is_explicit():
+    assert visuals.cell_width("▽", ambiguous=1) == 1
+    assert visuals.cell_width("▽", ambiguous=2) == 2
+
+
+def test_cell_width_ignores_combining_marks():
+    assert visuals.cell_width("é") == 1
+
+
+def test_pad_cells_pads_to_display_width_not_len():
+    assert visuals.cell_width(visuals.pad_cells("☔", 2)) == 2
+    assert visuals.cell_width(visuals.pad_cells("☀", 2)) == 2
+    assert visuals.pad_cells("ab", 6, align="left") == "ab    "
+    assert visuals.pad_cells("ab", 6, align="right") == "    ab"
+
+
+def test_pad_cells_never_truncates():
+    assert visuals.pad_cells("abcdef", 2) == "abcdef"

@@ -7,11 +7,14 @@ lexicon in ``sentiment``.
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 
 from .sentiment import MOODS, mood_of, score_line
 
-# Glyph + accent per mood for the arc/labels.
+# Glyph per mood, used by the arc only. These are East-Asian *ambiguous* width,
+# so never place them where something after them has to stay aligned — see
+# sentiment_bars.
 _MOOD_MARK = {
     "happy": "▲",
     "sad": "▽",
@@ -19,6 +22,47 @@ _MOOD_MARK = {
     "tender": "♥",
     "neutral": "·",
 }
+
+# Width of the bar-chart label column: the longest label is "tender". ASCII
+# only, so len() and display width agree.
+_BAR_LABEL_W = 6
+
+
+def cell_width(text: str, *, ambiguous: int = 1) -> int:
+    """Terminal cell width of ``text``.
+
+    Agrees with ``rich.cells.cell_len`` under the default ``ambiguous=1``, but
+    keeps the policy an explicit argument rather than an inherited guess: East-
+    Asian "Ambiguous" characters are genuinely terminal-dependent, and callers
+    that know their terminal draws them wide can say so.
+    """
+    total = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue                      # combining marks add no width
+        eaw = unicodedata.east_asian_width(ch)
+        if eaw in ("W", "F"):
+            total += 2
+        elif eaw == "A":
+            total += ambiguous
+        else:
+            total += 1
+    return total
+
+
+def pad_cells(text: str, width: int, *, align: str = "center") -> str:
+    """Pad ``text`` with spaces to ``width`` terminal cells.
+
+    Never truncates: a string already wider than ``width`` is returned as-is,
+    since silently cutting a glyph is worse than overflowing by one cell.
+    """
+    pad = max(0, width - cell_width(text))
+    if align == "center":
+        left = pad // 2
+        return " " * left + text + " " * (pad - left)
+    if align == "right":
+        return " " * pad + text
+    return text + " " * pad
 
 
 @dataclass(frozen=True)
@@ -68,13 +112,27 @@ def sentiment_arc(profile: SentimentProfile, width: int = 24) -> str:
 
 
 def sentiment_bars(profile: SentimentProfile, width: int = 12) -> str:
-    """Small horizontal bar chart of mood shares."""
+    """Small horizontal bar chart of mood shares.
+
+    Deliberately label-then-bar with NO leading glyph. The marks in
+    ``_MOOD_MARK`` are East-Asian *ambiguous* width: terminals disagree about
+    whether they occupy one cell or two, and font fallback can differ per glyph
+    — one report had "▽" drawn wide while "▲ ♥ ✷" stayed narrow, so only the
+    "sad" bar was pushed a column right. Nothing can measure that reliably
+    (``rich.cells.cell_len`` reports 1 for all four), so the fix is to put
+    nothing mis-measurable before the bar. Everything left of it is ASCII, and
+    every bar therefore starts in the same column on every terminal.
+
+    The marks still appear in :func:`sentiment_arc`, where a shift is harmless.
+    """
     shares = profile.shares
     lines = []
     for mood in ("happy", "tender", "sad", "angry"):
         filled = int(round(shares.get(mood, 0.0) * width))
+        # NB "█"/"░" are themselves ambiguous-width. Terminals seen so far draw
+        # them narrow; if one ever doesn't, swap them for "#"/"." here.
         bar = "█" * filled + "░" * (width - filled)
-        lines.append(f"{_MOOD_MARK[mood]} {mood:6s} {bar}")
+        lines.append(f"{mood:<{_BAR_LABEL_W}s} {bar}")
     return "\n".join(lines)
 
 

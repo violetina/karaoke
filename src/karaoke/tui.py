@@ -42,12 +42,22 @@ from .sentiment import mood_of
 SongRow = dict[str, object]
 SongMapping = Mapping[str, object]
 
+# Mood squares. The art rows are 2 cells wide, but the weather glyphs are not
+# all the same width: "☔" and "🔥" are genuinely 2 cells while "☀ ♡ ◇" are 1, so
+# without padding those two squares render visibly lopsided under
+# `content-align: center`. pad_cells fixes that exactly.
+#
+# It cannot help East-Asian *ambiguous* glyphs, whose width is terminal- and
+# font-dependent rather than defined — see visuals.sentiment_bars.
 MOOD_GLYPHS = {
-    "happy": "☀\n╲╱\n╱╲",
-    "sad": "☔\n░░\n▒▒",
-    "angry": "🔥\n▓▓\n██",
-    "tender": "♡\n/\\\n\\/",
-    "neutral": "◇\n··\n··",
+    mood: f"{visuals.pad_cells(glyph, 2)}\n{art}"
+    for mood, glyph, art in (
+        ("happy", "☀", "╲╱\n╱╲"),
+        ("sad", "☔", "░░\n▒▒"),
+        ("angry", "🔥", "▓▓\n██"),
+        ("tender", "♡", "/\\\n\\/"),
+        ("neutral", "◇", "··\n··"),
+    )
 }
 
 FILTER_OPTIONS = [

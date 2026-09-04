@@ -97,3 +97,18 @@ def test_sync_offset_none_track_is_safe(tmp_path):
 
     c = localcache.connect(tmp_path / "karaoke.db")
     assert localcache.get_sync_offset(None, c) is None
+
+
+def test_mood_square_glyph_rows_are_uniform_width():
+    """All five squares must be the same visual width.
+
+    "☔" and "🔥" are 2 cells while "☀ ♡ ◇" are 1, so the unpadded squares
+    rendered lopsided under `content-align: center`.
+    """
+    from karaoke import visuals
+    from karaoke.tui import MOOD_GLYPHS
+
+    for mood, art in MOOD_GLYPHS.items():
+        rows = art.splitlines()
+        assert len(rows) == 3, mood
+        assert {visuals.cell_width(r) for r in rows} == {2}, mood
