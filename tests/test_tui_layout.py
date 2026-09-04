@@ -244,3 +244,18 @@ def test_stats_screen_opens_and_closes(app):
             await pilot.pause()
             assert not isinstance(app.screen, tui.StatsScreen)
     _run(go())
+
+
+def test_sidebar_order_puts_workers_at_the_bottom(app):
+    """Art takes the slack; per-track facts then global worker stats below."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            art = app.query_one("#beat-art").region
+            info = app.query_one("#track-info").region
+            workers = app.query_one("#worker-panel").region
+            assert art.y < info.y < workers.y
+            sidebar = app.query_one("#sidebar").region
+            # Pinned to the bottom, not floating in the middle.
+            assert sidebar.bottom - workers.bottom <= 1
+    _run(go())

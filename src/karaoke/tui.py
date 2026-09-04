@@ -10,7 +10,7 @@ Watches the desktop over MPRIS and picks a mode automatically:
 - Nothing playing -> ``browse``: drive the library list.
 
 Layout is two equal side columns around the lyrics, so they sit centred. The
-left column carries worker stats, cover art and a per-track read-out; the right
+left column carries cover art, a per-track read-out and worker stats; the right
 carries mood, key/BPM and the sentiment/rhythm visuals. Both give way on a small
 terminal — the way to get bigger lyrics is a bigger terminal FONT, which costs
 cells, so the chrome has to yield. ``F`` hides it entirely.
@@ -409,10 +409,11 @@ class KaraokeTui(App):
     }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
-    #worker-panel { height: auto; border: round cyan; padding: 0 1; }
+    #worker-panel { height: auto; border: round cyan; padding: 0 1;
+                    margin-top: 1; }
     /* Takes the rest of the column so the reserved space is visibly held. */
-    #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1;
-                margin-top: 1; }
+    /* 1fr: soaks up the slack, so the panels under it sit at the bottom. */
+    #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1; }
     /* auto height, so the art above takes whatever is left */
     #track-info { height: auto; padding: 0 1; margin-top: 1;
                   color: $text-muted; }
@@ -505,13 +506,11 @@ class KaraokeTui(App):
             # Left column balances the right one so the lyrics sit centred
             # rather than pushed against the screen edge.
             with Vertical(id="sidebar"):
-                yield Static("workers  —", id="worker-panel")
-                # Reserved for beat-driven visuals: sampled video frames as
-                # ASCII, or generated art matching the lyric's sentiment.
-                # Empty for now so the column keeps its width and the lyrics
-                # stay centred.
+                # Art first (it takes the slack), then per-track facts, then
+                # the global worker read-out pinned at the bottom.
                 yield Static("", id="beat-art")
                 yield Static("", id="track-info")
+                yield Static("workers  —", id="worker-panel")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")

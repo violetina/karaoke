@@ -12,19 +12,20 @@ whatever is playing, and renders time-synced lyrics.
 │ \___\___/_\__,_\___|_||_|  |___/_| \___/\_/\_/|_||_|                │
 │   Gotye · scan · chromium · F major 129bpm · lrclib · offset +0.0s  │
 ├──────────────┬────────────────────────────────────┬─────────────────┤
-│ workers  12  │   Now and then, I think of when    │  mood square    │
-│ cpu  [###__] │ ♪ Like when you said you felt so   │  key / bpm      │
-│ mem  675 MB  │   Told myself that you were right  │  sentiment arc  │
-│ queue    0   │   But felt so lonely in your comp  │  mood bars      │
+│              │   Now and then, I think of when    │  mood square    │
+│  cover art   │ ♪ Like when you said you felt so   │  key / bpm      │
+│  (colour)    │   Told myself that you were right  │  sentiment arc  │
+│              │   But felt so lonely in your comp  │  mood bars      │
 │              │   ...                              │  rhythm         │
-│  cover art   │                                    │                 │
-│  (colour)    │                                    │                 │
 │              │                                    │                 │
 │ source lrclib│                                    │                 │
 │ lines  42    │                                    │                 │
 │ length 4:05  │                                    │                 │
 │ offset -0.3s │                                    │                 │
 │ postproc done│                                    │                 │
+│ workers  12  │                                    │                 │
+│ cpu  [###__] │                                    │                 │
+│ queue    0   │                                    │                 │
 └──────────────┴────────────────────────────────────┴─────────────────┘
   Mode: scan (auto) · chromium          worker-load: [##___] 38% · queue 0
 ```
