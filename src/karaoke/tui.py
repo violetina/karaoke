@@ -28,7 +28,8 @@ from urllib.parse import quote_plus
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
 
@@ -88,6 +89,76 @@ def _default_sync_offset(mode: str = "scan") -> float:
 SYNC_OFFSET_STEP = 0.1
 
 
+def binding_rows(bindings, *, key_display=None) -> list[tuple[str, str]]:
+    """Return (key, description) pairs for the help screen, from BINDINGS.
+
+    Generated rather than hand-written so the help can never drift from the
+    real key map — the previous cheat-sheet was a hard-coded Static that had
+    already fallen out of step with BINDINGS.
+    """
+    from textual.keys import format_key
+
+    rows: list[tuple[str, str]] = []
+    for binding in Binding.make_bindings(bindings):
+        if not binding.show or not binding.description:
+            continue
+        if key_display is not None:
+            key = key_display(binding)
+        else:
+            key = binding.key_display or format_key(binding.key)
+        rows.append((key, binding.description))
+    return rows
+
+
+def help_table(rows: list[tuple[str, str]]):
+    """Render (key, description) pairs as a two-column Rich grid."""
+    from rich.table import Table
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(justify="right", style="bold cyan", no_wrap=True)
+    table.add_column()
+    for key, description in rows:
+        table.add_row(key, description)
+    return table
+
+
+HELP_NOTES = (
+    "",
+    "H opens the library over the lyrics; picking a song closes it again.",
+    "↑/↓ move the highlight, enter opens (or whitelists in the staging list).",
+)
+
+
+class HelpScreen(ModalScreen[None]):
+    """Keyboard reference, rendered from the app's own BINDINGS."""
+
+    CSS = """
+    HelpScreen { align: center middle; }
+    #help-dialog {
+        width: 64; height: auto; max-height: 90%;
+        border: thick $accent; padding: 1 2; background: $surface;
+        border-title-align: center;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("question_mark", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, rows: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog") as dialog:
+            dialog.border_title = "Keys"
+            dialog.border_subtitle = "esc / ? to close"
+            yield Static(help_table(self._rows))
+            yield Static("\n".join((*HELP_NOTES, f"logs: {LOG_FILE}")))
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """A tiny yes/no modal used for the staging whitelist confirmation."""
 
@@ -100,6 +171,11 @@ class ConfirmScreen(ModalScreen[bool]):
     #buttons { height: auto; margin-top: 1; align-horizontal: center; }
     Button { margin: 0 1; }
     """
+
+    # Without this the dialog can only be dismissed by clicking a button.
+    # _prompt_save_offset raises it unprompted on a track change, so being
+    # unable to escape it was a real trap.
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
     def __init__(self, message: str, *, yes_label: str = "Whitelist",
                  no_label: str = "Cancel") -> None:
@@ -118,29 +194,63 @@ class ConfirmScreen(ModalScreen[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
 
+    def action_cancel(self) -> None:
+        # dismiss(False), not dismiss(): both call sites test the result for
+        # truthiness, so escape must mean an explicit "no".
+        self.dismiss(False)
+
 
 class KaraokeTui(App):
     """A player-aware Textual shell for the karaoke experience."""
 
+    # Textual's default ("*") focuses the first focusable widget at mount,
+    # which with the browse overlay hidden is the Select *inside it* — every
+    # keypress would then be swallowed by an invisible dropdown. Focus is
+    # granted explicitly when the overlay opens instead.
+    AUTO_FOCUS = None
+
     CSS = """
-    Screen { layout: vertical; }
+    Screen { layout: vertical; layers: base overlay; }
     #workspace { height: 1fr; }
-    #settings { width: 30; border: round cyan; padding: 1; }
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
     #now-playing { height: 8; border: round green; padding: 1; margin-bottom: 1; }
-    #lyrics { height: 14; border: round blue; padding: 1; margin-bottom: 1; overflow-y: auto; }
-    #library { height: 1fr; }
+    /* overflow-y is hidden, not auto: a scrollbar appearing mid-song steals a
+       column and shears the block glyphs, and #lyrics is a non-focusable
+       Static so the scrollbar is unreachable by keyboard anyway. */
+    #lyrics { height: 1fr; border: round blue; padding: 1; overflow-y: hidden; }
+    #statusbar { height: 1; }
+    #mode-label { width: 1fr; }
+    #worker-load { width: auto; text-align: right; }
     #mood-square {
         height: 8; content-align: center middle; text-style: bold;
         border: heavy white; margin-bottom: 1;
     }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
+
+    /* Browse overlay. On its own layer so showing it never resizes #workspace.
+       The offset centres it by arithmetic (Screen is layout: vertical, so
+       `align` is unavailable) — if width/height change, offset must too. */
+    #browse-overlay {
+        layer: overlay; display: none;
+        width: 80%; height: 80%; offset: 10% 10%;
+        border: round cyan; border-title-align: center;
+        background: $surface; padding: 1 2;
+    }
+    #browse-overlay.-visible { display: block; }
+    #browse-head { height: 3; }
+    #browse-head > Static { width: 8; content-align: left middle; }
+    #filter-select { width: 34; }
+    #library { height: 1fr; }
+    #log-label, #log-path { color: $text-muted; height: 1; }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        ("H", "toggle_browse", "Browse"),
+        ("question_mark", "help", "Keys"),
+        Binding("escape", "hide_browse", "Close browse", show=False),
         ("r", "refresh", "Refresh"),
         ("s", "resync", "Resync"),
         ("comma", "sync_earlier", "Lyrics -0.1s"),
@@ -179,29 +289,28 @@ class KaraokeTui(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="workspace"):
-            with Vertical(id="settings"):
-                yield Static("Settings / config", classes="panel-title")
-                yield Static("Library filter")
-                yield Select(FILTER_OPTIONS, value="working", id="filter-select",
-                             allow_blank=False)
-                yield Static("Mode: auto", id="mode-label")
-                yield Static(
-                    "m mode  space play/pause\n"
-                    "n next  p prev  [ -5s  ] +5s\n"
-                    "enter open/whitelist\n"
-                    "l log level  r refresh",
-                )
-                yield Static(f"log: {self._log_level}", id="log-label")
-                yield Static("worker-load: —", id="worker-load")
-                yield Static(f"Logs\n{LOG_FILE}")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
-                yield DataTable(id="library", cursor_type="row")
+                with Horizontal(id="statusbar"):
+                    yield Static("Mode: auto", id="mode-label")
+                    yield Static("worker-load: —", id="worker-load")
             with Vertical(id="visuals"):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("key: —\nbpm: —", id="keybpm")
                 yield Static("sentiment / rhythm", id="ascii-visual")
+        # Floats on its own layer above #workspace, so revealing it costs the
+        # lyrics no space and does not reflow them.
+        with Container(id="browse-overlay") as overlay:
+            overlay.border_title = "Library"
+            overlay.border_subtitle = "H close · ? keys"
+            with Horizontal(id="browse-head"):
+                yield Static("Filter")
+                yield Select(FILTER_OPTIONS, value="working", id="filter-select",
+                             allow_blank=False)
+            yield DataTable(id="library", cursor_type="row")
+            yield Static(f"log: {self._log_level}", id="log-label")
+            yield Static(f"logs: {LOG_FILE}", id="log-path")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -308,6 +417,39 @@ class KaraokeTui(App):
 
     def on_data_table_row_selected(self, _e: DataTable.RowSelected) -> None:
         self.action_select()
+
+    # -- browse overlay ---------------------------------------------------
+    _BROWSE_OPEN = "-visible"
+
+    def _browse_open(self) -> bool:
+        return self.query_one("#browse-overlay").has_class(self._BROWSE_OPEN)
+
+    def _show_browse(self) -> None:
+        # add_class BEFORE focus: a hidden widget silently refuses focus, so
+        # reversing these two lines leaves the table unfocused and the arrow
+        # keys dead.
+        self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
+        self.query_one("#library", DataTable).focus()
+
+    def _hide_browse(self) -> None:
+        self.query_one("#browse-overlay").remove_class(self._BROWSE_OPEN)
+        # Back to the screen. There is no sensible focusable target in #main,
+        # and inventing one purely to hold focus would be worse.
+        self.set_focus(None)
+
+    def action_toggle_browse(self) -> None:
+        self._hide_browse() if self._browse_open() else self._show_browse()
+
+    def action_hide_browse(self) -> None:
+        """escape: close the overlay if open, otherwise do nothing."""
+        if self._browse_open():
+            self._hide_browse()
+
+    def action_help(self) -> None:
+        # get_key_display is the app's own formatter, so the help screen and
+        # the Footer always agree on how a key is written.
+        self.push_screen(HelpScreen(
+            binding_rows(self.BINDINGS, key_display=self.get_key_display)))
 
     def action_refresh(self) -> None:
         self.load_songs()
@@ -493,6 +635,11 @@ class KaraokeTui(App):
             self.notify(f"Open failed; see {LOG_FILE}", severity="error")
             self.query_one("#now-playing", Static).update(f"Open failed: {exc}")
             return
+        # Close the overlay only once the song actually opened. On the failure
+        # path above we deliberately stay open: the reason is written into
+        # #now-playing, which sits *behind* the overlay, and the user most
+        # likely wants to pick a different row.
+        self._hide_browse()
         suffix = f" (pid {pid})" if pid is not None else ""
         self.notify(f"Opening {artist} - {title}{suffix}")
 

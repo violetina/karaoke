@@ -112,3 +112,179 @@ def test_mood_square_glyph_rows_are_uniform_width():
         rows = art.splitlines()
         assert len(rows) == 3, mood
         assert {visuals.cell_width(r) for r in rows} == {2}, mood
+
+
+# --- help screen / bindings ------------------------------------------------
+
+def test_binding_rows_are_generated_from_bindings():
+    from karaoke.tui import KaraokeTui, binding_rows
+
+    rows = dict(binding_rows(KaraokeTui.BINDINGS))
+    assert rows["H"] == "Browse"
+    assert rows["?"] == "Keys"
+    assert rows[","] == "Lyrics -0.1s"
+    assert rows["["] == "Seek -5s"
+
+
+def test_binding_rows_omit_hidden_bindings():
+    """escape is bound but show=False, so it stays out of the footer and help."""
+    from karaoke.tui import KaraokeTui, binding_rows
+
+    assert "Close browse" not in dict(binding_rows(KaraokeTui.BINDINGS)).values()
+
+
+def test_every_binding_has_a_matching_action():
+    """Catches a typo'd action name, which would otherwise fail only at runtime."""
+    from textual.binding import Binding
+    from karaoke.tui import KaraokeTui
+
+    for binding in Binding.make_bindings(KaraokeTui.BINDINGS):
+        action = binding.action.split("(")[0]
+        assert hasattr(KaraokeTui, f"action_{action}") or hasattr(
+            KaraokeTui, action), action
+
+
+def test_binding_keys_are_unique():
+    from textual.binding import Binding
+    from karaoke.tui import KaraokeTui
+
+    keys = [b.key for b in Binding.make_bindings(KaraokeTui.BINDINGS)]
+    assert len(keys) == len(set(keys)), f"duplicate key: {keys}"
+
+
+def test_help_table_has_a_row_per_binding():
+    from karaoke.tui import KaraokeTui, binding_rows, help_table
+
+    rows = binding_rows(KaraokeTui.BINDINGS)
+    assert help_table(rows).row_count == len(rows)
+
+
+def test_confirm_screen_can_be_escaped():
+    """escape must resolve to an explicit False, not a bare dismiss()."""
+    from textual.binding import Binding
+    from karaoke.tui import ConfirmScreen
+
+    keys = {b.key: b.action for b in Binding.make_bindings(ConfirmScreen.BINDINGS)}
+    assert keys.get("escape") == "cancel"
+    assert hasattr(ConfirmScreen, "action_cancel")
+
+
+# --- browse overlay --------------------------------------------------------
+
+class _FakeOverlay:
+    def __init__(self):
+        self.classes = set()
+        self.calls = []
+
+    def add_class(self, name):
+        self.calls.append(("add_class", name))
+        self.classes.add(name)
+
+    def remove_class(self, name):
+        self.calls.append(("remove_class", name))
+        self.classes.discard(name)
+
+    def has_class(self, name):
+        return name in self.classes
+
+
+class _FakeTable:
+    def __init__(self, log):
+        self._log = log
+
+    def focus(self):
+        self._log.append(("focus", "library"))
+
+
+def _app_with_fakes(monkeypatch, *, open_=False):
+    """A KaraokeTui whose query_one returns fakes, so no event loop is needed."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)          # skip App.__init__
+    overlay = _FakeOverlay()
+    if open_:
+        overlay.classes.add(KaraokeTui._BROWSE_OPEN)
+    calls = overlay.calls
+    table = _FakeTable(calls)
+
+    def fake_query_one(selector, *args, **kwargs):
+        if "browse-overlay" in selector:
+            return overlay
+        if "library" in selector:
+            return table
+        raise AssertionError(f"unexpected query_one({selector!r})")
+
+    monkeypatch.setattr(app, "query_one", fake_query_one, raising=False)
+    monkeypatch.setattr(app, "set_focus",
+                        lambda w: calls.append(("set_focus", w)), raising=False)
+    return app, overlay, calls
+
+
+def test_show_browse_reveals_then_focuses(monkeypatch):
+    """Order matters: a hidden widget silently refuses focus."""
+    from karaoke.tui import KaraokeTui
+
+    app, overlay, calls = _app_with_fakes(monkeypatch)
+    app._show_browse()
+
+    assert overlay.has_class(KaraokeTui._BROWSE_OPEN)
+    assert calls == [("add_class", "-visible"), ("focus", "library")]
+
+
+def test_hide_browse_releases_focus(monkeypatch):
+    app, overlay, calls = _app_with_fakes(monkeypatch, open_=True)
+    app._hide_browse()
+
+    assert not overlay.has_class("-visible")
+    assert ("set_focus", None) in calls
+
+
+def test_toggle_browse_round_trips(monkeypatch):
+    app, overlay, _ = _app_with_fakes(monkeypatch)
+    app.action_toggle_browse()
+    assert overlay.has_class("-visible")
+    app.action_toggle_browse()
+    assert not overlay.has_class("-visible")
+
+
+def test_escape_is_a_noop_when_browse_is_closed(monkeypatch):
+    app, overlay, calls = _app_with_fakes(monkeypatch)
+    app.action_hide_browse()
+    assert calls == []
+
+
+def test_open_selected_hides_overlay_on_success(monkeypatch):
+    from karaoke import tui
+
+    app, overlay, _ = _app_with_fakes(monkeypatch, open_=True)
+    monkeypatch.setattr(app, "_selected_song",
+                        lambda: {"url": "https://youtu.be/x", "kind": "youtube",
+                                 "artist": "A", "title": "B"}, raising=False)
+    monkeypatch.setattr(tui, "open_song_url", lambda url, kind: 123)
+    monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
+
+    app._open_selected()
+    assert not overlay.has_class("-visible")
+
+
+def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
+    """The failure reason lands in #now-playing, which sits behind the overlay."""
+    from karaoke import tui
+
+    app, overlay, _ = _app_with_fakes(monkeypatch, open_=True)
+    monkeypatch.setattr(app, "_selected_song",
+                        lambda: {"url": "https://youtu.be/x", "kind": "youtube",
+                                 "artist": "A", "title": "B"}, raising=False)
+    monkeypatch.setattr(tui, "open_song_url",
+                        lambda url, kind: (_ for _ in ()).throw(RuntimeError("nope")))
+    monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
+
+    class _NP:
+        def update(self, _): pass
+    monkeypatch.setattr(app, "query_one",
+                        lambda sel, *a, **k: _NP() if "now-playing" in sel
+                        else (overlay if "browse-overlay" in sel else _NP()),
+                        raising=False)
+
+    app._open_selected()
+    assert overlay.has_class("-visible")
