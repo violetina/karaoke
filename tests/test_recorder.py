@@ -183,3 +183,77 @@ def test_a_fresh_session_is_within_limits(db, monkeypatch):
 def test_record_is_bound_to_O():
     from karaoke.tui import KaraokeTui, binding_rows
     assert dict(binding_rows(KaraokeTui.BINDINGS))["O"] == "Record"
+
+
+# --- the sidebar indicator -------------------------------------------------
+
+def test_short_source_keeps_both_informative_ends():
+    """The head says which device, ".monitor" says it is not a microphone."""
+    out = recorder_panel_helpers_short(
+        "bluez_output.1C_5E_82_70_03_6F.1.monitor", 26)
+    assert out.startswith("bluez_output")
+    assert out.endswith(".monitor")
+    assert len(out) <= 26
+
+
+def recorder_panel_helpers_short(name, width):
+    from karaoke.tui import short_source
+    return short_source(name, width)
+
+
+def test_short_source_leaves_a_short_name_alone():
+    from karaoke.tui import short_source
+    assert short_source("mic.source", 26) == "mic.source"
+
+
+def test_short_source_handles_a_non_monitor_name():
+    from karaoke.tui import short_source
+    out = short_source("alsa_input.pci-0000_c1_00.6.HiFi__Mic2__source", 20)
+    assert len(out) <= 20 and "…" in out
+
+
+def test_record_panel_shows_the_running_state():
+    from karaoke.tui import record_panel
+    text = record_panel(recording_id=3, elapsed_s=201, marks_ok=4,
+                        marks_total=5, size_bytes=22_400_000,
+                        source="bluez_output.x.monitor")
+    assert "REC 3" in text
+    assert "03:21" in text          # elapsed as mm:ss
+    assert "4/5" in text
+    assert "22 MB" in text
+    assert ".monitor" in text
+
+
+def test_record_panel_shows_hours_when_long():
+    from karaoke.tui import record_panel
+    assert "2:02:05" in record_panel(recording_id=1, elapsed_s=7325)
+
+
+def test_record_panel_blink_alternates_the_dot():
+    """A still display gives no sign that capture is actually alive."""
+    from karaoke.tui import record_panel
+    on = record_panel(recording_id=1, blink=True)
+    off = record_panel(recording_id=1, blink=False)
+    assert on.startswith("●") and off.startswith("○")
+
+
+def test_record_panel_labels_line_up():
+    """ASCII labels in a fixed column, so nothing shifts as numbers change."""
+    from karaoke.tui import record_panel
+    rows = record_panel(recording_id=1, marks_ok=1, marks_total=2,
+                        size_bytes=1_000_000, source="x.monitor").splitlines()[1:]
+    starts = {len(r) - len(r.lstrip()) for r in rows}
+    values = [r.split()[1] for r in rows]
+    assert starts == {0}
+    assert all(r.index(v) == rows[0].index(values[0]) for r, v in zip(rows, values))
+
+
+def test_record_panel_omits_an_unknown_source():
+    from karaoke.tui import record_panel
+    assert "src" not in record_panel(recording_id=1, source="")
+
+
+def test_session_source_and_elapsed_are_none_when_not_running():
+    assert recorder.session_source(9999) is None
+    assert recorder.elapsed(9999) is None
+    assert recorder.session_directory(9999) is None

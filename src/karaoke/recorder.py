@@ -92,6 +92,28 @@ def is_running(recording_id: int) -> bool:
     return session is not None and session.process.poll() is None
 
 
+def elapsed(recording_id: int) -> Optional[float]:
+    """Seconds this session has been recording, or None if it is not running."""
+    with _lock:
+        session = _sessions.get(recording_id)
+    if session is None:
+        return None
+    return time.monotonic() - session.started_mono
+
+
+def session_source(recording_id: int) -> Optional[str]:
+    """The PipeWire source a running session is recording."""
+    with _lock:
+        session = _sessions.get(recording_id)
+    return session.source if session else None
+
+
+def session_directory(recording_id: int) -> Optional[Path]:
+    with _lock:
+        session = _sessions.get(recording_id)
+    return session.directory if session else None
+
+
 def directory_size(directory: Path) -> int:
     """Bytes currently written for a recording."""
     try:
