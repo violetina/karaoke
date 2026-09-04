@@ -436,12 +436,16 @@ def test_background_fetch_ignores_a_blank_track(monkeypatch, tmp_path):
 
 # --- mic / radio mode ------------------------------------------------------
 
-def _mic_app(ref=None, stopped=True):
+def _mic_app(ref=None, stopped=True, duration=None):
     from karaoke.tui import KaraokeTui
     app = KaraokeTui.__new__(KaraokeTui)
     app._mic_ref = ref
     app._mic_stop = None if stopped else __import__("threading").Event()
     app._mode_override = None
+    # Bounds the dead-reckoned playhead so a repeating track cannot run past
+    # its own end; None leaves the reckoning unbounded. See
+    # tests/test_sync_offset_modes.py for the wrap behaviour itself.
+    app._track_duration = duration
     return app
 
 

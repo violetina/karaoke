@@ -497,6 +497,8 @@ class KaraokeTui(App):
         self._current_song: tuple[str, str, str] | None = None
         self._lyrics_fetched: set[tuple[str, str]] = set()
         self._mic_ref = None                       # last songrec identification
+        self._offset_mode = ""     # clock the current offset was tuned against
+        self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
 
@@ -728,7 +730,21 @@ class KaraokeTui(App):
         if ref is None or ref.offset is None or ref.offset_mono is None:
             return None
         now = time.monotonic() if now is None else now
-        return max(0.0, ref.offset + (now - ref.offset_mono) + DEFAULT_LEAD_S)
+        pos = max(0.0, ref.offset + (now - ref.offset_mono) + DEFAULT_LEAD_S)
+
+        # Bound the reckoning to the track. Nothing here observes the audio, so
+        # a song left on repeat keeps counting upward past its own end: the
+        # lyrics run out, the footer counts down to a track change that never
+        # comes, and the next re-identification is the only thing that rescues
+        # it. Wrapping is right for repeat and self-correcting otherwise, since
+        # a genuine track change re-anchors within MIC_REIDENTIFY_S either way.
+        #
+        # Guarded on a sane duration: a bad or missing value must not fold a
+        # correct playhead back to zero.
+        dur = self._track_duration
+        if dur and dur > 30.0 and pos >= dur:
+            pos %= dur
+        return pos
 
     def _mic_loop(self) -> None:
         """Identify room audio on a loop until the mic is switched off.
@@ -879,6 +895,12 @@ class KaraokeTui(App):
         self._nudge_sync()
 
     def _nudge_sync(self) -> None:
+        # Record which clock this tuning was made against. Radio dead-reckons
+        # the playhead and adds DEFAULT_LEAD_S; MPRIS modes do not. Capturing it
+        # here rather than at save time is what makes it correct: by the time
+        # the save prompt fires on a track change, self._det already describes
+        # the *next* track.
+        self._offset_mode = self._det.mode
         hint = " · press S to save" if self._current_track_id is not None else ""
         self.notify(f"Lyric sync offset: {self._sync_offset:+.1f}s{hint}")
         if self._det.is_active and self._timeline.lines:
@@ -889,7 +911,8 @@ class KaraokeTui(App):
             self.notify("No track to save offset for", severity="warning")
             return
         with localcache.connect() as conn:
-            localcache.set_sync_offset(self._current_track_id, self._sync_offset, conn)
+            localcache.set_sync_offset(self._current_track_id, self._sync_offset,
+                                       conn, mode=self._offset_mode or self._det.mode)
         self._offset_dirty = False
         self.notify(f"Saved offset {self._sync_offset:+.1f}s for this track")
         log.info("saved sync offset %.2f for track %s",
@@ -900,7 +923,8 @@ class KaraokeTui(App):
         def _on_confirm(save: bool | None) -> None:
             if save:
                 with localcache.connect() as conn:
-                    localcache.set_sync_offset(track_id, offset, conn)
+                    localcache.set_sync_offset(track_id, offset, conn,
+                                               mode=self._offset_mode)
                 self.notify(f"Saved offset {offset:+.1f}s")
                 log.info("saved sync offset %.2f for track %s (on change)",
                          offset, track_id)
@@ -1163,11 +1187,14 @@ class KaraokeTui(App):
             # falling back to the session default when none has been saved.
             self._current_track_id = self._resolve_track_id(det, artist, title, conn)
             saved = (
-                localcache.get_sync_offset(self._current_track_id, conn)
+                localcache.get_sync_offset(self._current_track_id, conn, det.mode)
                 if self._current_track_id is not None else None
             )
             self._sync_offset = saved if saved is not None else _default_sync_offset(det.mode)
             self._offset_dirty = False
+            self._offset_mode = det.mode
+            # Needed by mic_elapsed to wrap the dead-reckoned playhead on repeat.
+            self._track_duration = self._load_duration(self._current_track_id, conn)
             if lyrics is None or not lyrics.has_synced:
                 # The cache is only what has already been fetched. Radio mode
                 # calls get_synced, which hits LRCLIB on a miss and caches the
@@ -1393,6 +1420,15 @@ class KaraokeTui(App):
                 return candidate
         return None
 
+    @staticmethod
+    def _load_duration(track_id: "int | None", conn) -> "float | None":
+        """Stored track length in seconds, or None when unknown."""
+        if track_id is None:
+            return None
+        row = conn.execute("SELECT duration FROM tracks WHERE track_id = ?",
+                           (track_id,)).fetchone()
+        return float(row["duration"]) if row and row["duration"] else None
+
     def _refresh_track_info(self, lyrics) -> None:
         """Fill the read-out under the cover art. Best-effort and never fatal."""
         try:
@@ -1402,11 +1438,7 @@ class KaraokeTui(App):
                 from .postprocess_queue import needs_postprocessing
                 with localcache.connect() as conn:
                     pending = needs_postprocessing(self._current_track_id, conn)
-                    row = conn.execute(
-                        "SELECT duration FROM tracks WHERE track_id = ?",
-                        (self._current_track_id,),
-                    ).fetchone()
-                    duration = row["duration"] if row else None
+                    duration = self._load_duration(self._current_track_id, conn)
             text = track_info(
                 source=(lyrics.source if lyrics else ""),
                 duration=duration,

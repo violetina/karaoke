@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS track_sync_offsets (
     track_id    INTEGER PRIMARY KEY,
     offset_s    REAL NOT NULL,
     updated_at  REAL NOT NULL,
+    -- Which clock the offset was tuned against: 'radio' (dead-reckoned from
+    -- songrec, carries DEFAULT_LEAD_S) or 'player' (MPRIS position, no lead).
+    -- An offset is only valid for its own clock; see offset_mode().
+    mode        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 """
@@ -151,28 +155,65 @@ def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def get_sync_offset(track_id: Optional[int], conn: sqlite3.Connection) -> Optional[float]:
-    """Return the saved lyric sync offset (seconds) for a track, or None."""
+def offset_mode(mode: str) -> str:
+    """Collapse a detection mode to the clock its sync offset belongs to.
+
+    Radio dead-reckons the playhead from songrec and adds ``DEFAULT_LEAD_S`` to
+    cover the listening latency; every other mode reads an MPRIS position with
+    no such lead. An offset tuned against one clock is wrong by roughly that
+    lead on the other, so the two are stored and matched separately. Modes that
+    share the MPRIS position (scan, spotify, listen) share an offset.
+    """
+    return "radio" if mode == "radio" else "player"
+
+
+def ensure_sync_offset_columns(conn: sqlite3.Connection) -> None:
+    """Add the ``mode`` column to databases created before it existed."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(track_sync_offsets)")}
+    if "mode" not in cols:
+        conn.execute("ALTER TABLE track_sync_offsets ADD COLUMN "
+                     "mode TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
+def get_sync_offset(track_id: Optional[int], conn: sqlite3.Connection,
+                    mode: Optional[str] = None) -> Optional[float]:
+    """Return the saved lyric sync offset (seconds) for a track, or None.
+
+    When ``mode`` is given, an offset saved against a different clock is
+    ignored rather than misapplied — the caller then falls back to its default.
+    Rows predating the ``mode`` column store ``''`` and are honoured for any
+    mode: they cannot be attributed, and the alternative is silently discarding
+    tuning the user did by hand.
+    """
     if track_id is None:
         return None
     row = conn.execute(
-        "SELECT offset_s FROM track_sync_offsets WHERE track_id = ?",
+        "SELECT offset_s, mode FROM track_sync_offsets WHERE track_id = ?",
         (track_id,),
     ).fetchone()
-    return float(row["offset_s"]) if row is not None else None
+    if row is None:
+        return None
+    saved = row["mode"] or ""
+    if mode is not None and saved and saved != offset_mode(mode):
+        return None
+    return float(row["offset_s"])
 
 
-def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection) -> None:
+def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection,
+                    mode: str = "") -> None:
     """Persist (upsert) the per-track lyric sync offset in seconds."""
     conn.execute(
         """
-        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at, mode)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(track_id) DO UPDATE SET
             offset_s = excluded.offset_s,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            mode = excluded.mode
         """,
-        (track_id, float(offset_s), time.time()),
+        (track_id, float(offset_s), time.time(),
+         offset_mode(mode) if mode else ""),
     )
     conn.commit()
 
@@ -186,6 +227,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)
+    ensure_sync_offset_columns(conn)
     return conn
 
 
