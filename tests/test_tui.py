@@ -369,3 +369,66 @@ def test_approve_clears_the_session_guard(monkeypatch, tmp_path):
 
     app.action_approve_postprocess()
     assert ("a", "b") not in app._postprocess_enqueued
+
+
+# --- background lyric fetch ------------------------------------------------
+
+def test_background_fetch_caches_lyrics_and_forces_a_resync(monkeypatch, tmp_path):
+    """The cache-only detection path could never gain lyrics on its own."""
+    from karaoke import localcache, tui
+    from karaoke.lyrics import Lyrics
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "k.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(tui, "fetch_lrclib", None, raising=False)
+    monkeypatch.setattr("karaoke.lyrics.fetch_lrclib",
+                        lambda a, t, *args, **kw: Lyrics(
+                            plain="w", synced_raw="[00:01.00] w", source="lrclib"))
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._sync_key = ("a", "b")
+    app._background_fetch_lyrics("A", "B")
+
+    assert localcache.get_cached_lyrics("A", "B", conn=conn) is not None
+    assert app._sync_key is None          # next poll re-resolves
+
+
+def test_background_fetch_is_quiet_on_a_miss(monkeypatch, tmp_path):
+    from karaoke import localcache
+    from karaoke.lyrics import Lyrics
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "k.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr("karaoke.lyrics.fetch_lrclib",
+                        lambda a, t, *args, **kw: Lyrics())
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._sync_key = ("a", "b")
+    app._background_fetch_lyrics("A", "B")
+
+    assert localcache.get_cached_lyrics("A", "B", conn=conn) is None
+    assert app._sync_key == ("a", "b")    # nothing changed, no needless resync
+
+
+def test_background_fetch_survives_a_network_error(monkeypatch, tmp_path):
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "k.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+
+    def boom(*a, **k):
+        raise OSError("no network")
+    monkeypatch.setattr("karaoke.lyrics.fetch_lrclib", boom)
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._sync_key = ("a", "b")
+    app._background_fetch_lyrics("A", "B")     # must not raise
+
+
+def test_background_fetch_ignores_a_blank_track(monkeypatch, tmp_path):
+    from karaoke.tui import KaraokeTui
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._background_fetch_lyrics("", "")       # must not raise or hit the net

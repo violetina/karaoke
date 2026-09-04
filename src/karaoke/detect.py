@@ -137,6 +137,21 @@ def resolve_lyrics(
                     row["title"] if row else cleaned,
                     localcache.get_lyrics_by_track_id(track_id, conn),
                 )
+        # Relaxed match before giving up. Radio mode (songrec) caches tracks
+        # under the full credit and a decorated title — "James Brown & The
+        # Famous Flames", "[2020 Remaster]" — so a song it already fetched is
+        # invisible to an exact lookup on the browser's plainer spelling.
+        relaxed = localcache.find_track_id_relaxed(det.artist, det.title, conn)
+        if relaxed is not None:
+            row = conn.execute(
+                "SELECT artist, title FROM tracks WHERE track_id = ?",
+                (relaxed,),
+            ).fetchone()
+            return (
+                row["artist"] if row else det.artist,
+                row["title"] if row else det.title,
+                localcache.get_lyrics_by_track_id(relaxed, conn),
+            )
         # Fallback for empty artist (e.g. browser tab playing YouTube Music without artist tag)
         if not det.artist and det.title:
             cur = conn.cursor()

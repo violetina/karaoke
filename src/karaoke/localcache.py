@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -206,6 +207,97 @@ def find_track_id(artist: str, title: str, conn: sqlite3.Connection) -> Optional
     )
     row = cur.fetchone()
     return row["track_id"] if row else None
+
+
+def _match_key(text: str) -> str:
+    """Aggressively normalised form for comparing track/artist names.
+
+    Lowercased, accents stripped, everything but letters and digits removed, so
+    "(Sittin' on) The Dock of the Bay" and "(Sittin On) The Dock Of The Bay"
+    collapse to the same key.
+    """
+    folded = unicodedata.normalize("NFKD", text or "")
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", folded.casefold())
+
+
+def _artist_key(artist: str) -> str:
+    """Match key for an artist, ignoring a leading "The".
+
+    Sources disagree on it constantly — songrec stores "The Mothers of
+    Invention" where a player reports "Mothers of Invention".
+    """
+    return _match_key(re.sub(r"^\s*the\s+", "", artist or "", flags=re.I))
+
+
+def _title_keys(title: str) -> set[str]:
+    """Match keys for a title, with and without trailing bracketed suffixes.
+
+    Editions arrive in every bracket style — "[2020 Remaster]", "(Live)",
+    "- Remastered 2011" — and only some are covered by clean_title's suffix
+    list, so the bare stem is compared too.
+    """
+    from .lyrics import clean_title
+
+    keys = {_match_key(title), _match_key(clean_title(title))}
+    stem = re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
+    while stem and stem != title:
+        keys.add(_match_key(stem))
+        title, stem = stem, re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", stem).strip()
+    return {k for k in keys if k}
+
+
+def find_track_id_relaxed(artist: str, title: str,
+                          conn: sqlite3.Connection) -> Optional[int]:
+    """Find a track when the exact spelling does not match.
+
+    Sources name the same song differently: songrec stores the full credit
+    ("James Brown & The Famous Flames") and a decorated title ("[2020
+    Remaster]") where a browser reports "James Brown" and a plainer title. An
+    exact lookup misses those, so a track the radio already cached looks absent
+    to the TUI and its lyrics never appear.
+
+    Tries the exact match, then the cleaned title, then a punctuation- and
+    case-insensitive comparison in which the artist need only be a prefix of
+    the stored credit, or the reverse.
+    """
+    exact = find_track_id(artist, title, conn)
+    if exact is not None:
+        return exact
+
+    from .lyrics import clean_title
+
+    cleaned = clean_title(title)
+    if cleaned and cleaned != title:
+        got = find_track_id(artist, cleaned, conn)
+        if got is not None:
+            return got
+
+    want_titles = _title_keys(title) | _title_keys(cleaned or title)
+    want_artist = _artist_key(artist)
+    if not want_titles:
+        return None
+
+    # Prefilter in SQL on a word of the title so this stays cheap on a large
+    # library rather than normalising every row on every 1.5s poll.
+    words = re.sub(r"[^a-z0-9]+", " ", (cleaned or title).casefold()).split()
+    lead = max(words, key=len) if words else ""
+    rows = conn.execute(
+        "SELECT track_id, artist, title FROM tracks WHERE lower(title) LIKE ?"
+        " ORDER BY track_id DESC LIMIT 200",
+        (f"%{lead}%" if lead else "%",),
+    ).fetchall()
+
+    for row in rows:
+        if not (_title_keys(row["title"]) & want_titles):
+            continue
+        got_artist = _artist_key(row["artist"])
+        if not want_artist or not got_artist:
+            return int(row["track_id"])
+        # "James Brown" should match "James Brown & The Famous Flames".
+        if got_artist.startswith(want_artist) or want_artist.startswith(got_artist):
+            return int(row["track_id"])
+    return None
 
 
 def extract_youtube_id(url: str) -> Optional[str]:

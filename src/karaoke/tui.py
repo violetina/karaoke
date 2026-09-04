@@ -289,6 +289,7 @@ class KaraokeTui(App):
         self._postprocess_enqueued: set[tuple[str, str]] = set()
         self._cpu_sample: tuple | None = None
         self._current_song: tuple[str, str, str] | None = None
+        self._lyrics_fetched: set[tuple[str, str]] = set()
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -808,6 +809,17 @@ class KaraokeTui(App):
             self._sync_offset = saved if saved is not None else _default_sync_offset(det.mode)
             self._offset_dirty = False
             if lyrics is None or not lyrics.has_synced:
+                # The cache is only what has already been fetched. Radio mode
+                # calls get_synced, which hits LRCLIB on a miss and caches the
+                # result; the TUI used to read the cache and stop, so a track
+                # nobody had fetched yet showed as having no lyrics forever.
+                if key not in self._lyrics_fetched:
+                    self._lyrics_fetched.add(key)
+                    self.run_worker(
+                        lambda a=det.artist, t=det.title: self._background_fetch_lyrics(a, t),
+                        exclusive=False,
+                        thread=True,
+                    )
                 if key not in self._gap_logged:
                     detect.record_gap(det, conn)
                     self._gap_logged.add(key)
@@ -995,6 +1007,36 @@ class KaraokeTui(App):
         self.query_one("#ascii-visual", Static).update(
             f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
         )
+
+    def _background_fetch_lyrics(self, artist: str, title: str) -> None:
+        """Fetch lyrics from LRCLIB for a cache miss, in a worker thread.
+
+        The detection path is cache-only by design (it runs on a 1.5s timer and
+        must not block on the network). This is the missing other half: on a
+        miss, go and get them once, cache them, and clear the sync key so the
+        next poll picks the track up with lyrics attached.
+        """
+        if not (artist and title):
+            return
+        try:
+            from .lyrics import clean_title, fetch_lrclib
+
+            found = None
+            for candidate in {title, clean_title(title)}:
+                ly = fetch_lrclib(artist, candidate)
+                if ly.synced_raw or ly.plain:
+                    found = ly
+                    break
+            if found is None:
+                return
+            with localcache.connect() as conn:
+                localcache.add_track_and_lyrics(artist, title, found, conn=conn)
+            log.info("fetched lyrics for %s - %s (%s)", artist, title, found.source)
+            # Force the next poll to re-resolve rather than short-circuit on an
+            # unchanged key.
+            self._sync_key = None
+        except Exception:
+            log.debug("background lyric fetch failed", exc_info=True)
 
     def _background_autoload_captions(self, url: str, vid: str) -> None:
         """Fetch, stage, and auto-approve YouTube captions in a worker thread.
