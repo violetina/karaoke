@@ -46,7 +46,8 @@ from . import detect, localcache, playerctl, staging, track_analysis, visuals
 from .browse import open_song_url
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
-from .player import LyricTimeline, _render_body, timeline_from_lyrics
+from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
+                     timeline_from_lyrics)
 from .sentiment import mood_of
 
 SongRow = dict[str, object]
@@ -716,12 +717,18 @@ class KaraokeTui(App):
         songrec reports where in the track it heard us, plus the monotonic
         instant it finished listening. Everything since is dead reckoning off
         that anchor — there is no MPRIS position to read in radio mode.
+
+        DEFAULT_LEAD_S is added for the same reason `karaoke -r` adds it:
+        songrec listens for ~10s before returning, so the offset it reports is
+        already stale by roughly that much and the highlight would sit a couple
+        of lines behind the audio. Both modes use the same figure so they stay
+        in step.
         """
         ref = self._mic_ref
         if ref is None or ref.offset is None or ref.offset_mono is None:
             return None
         now = time.monotonic() if now is None else now
-        return max(0.0, ref.offset + (now - ref.offset_mono))
+        return max(0.0, ref.offset + (now - ref.offset_mono) + DEFAULT_LEAD_S)
 
     def _mic_loop(self) -> None:
         """Identify room audio on a loop until the mic is switched off.

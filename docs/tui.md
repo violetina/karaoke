@@ -96,8 +96,11 @@ Degrades gracefully: a broker outage drops the worker rows and keeps the rest.
 - **spotify** — Spotify is playing; sync and control it.
 - **radio** (`R`) — songrec identifies room audio through the microphone. There
   is no MPRIS position, so the playhead is dead-reckoned from where songrec
-  heard us plus elapsed time. Declines to start if `karaoke --radio` already
-  holds the mic.
+  heard us plus elapsed time, plus a **12.6s forward lead**: songrec listens for
+  ~10s before answering, so the offset it reports is already stale and the
+  highlight would sit a couple of lines behind. `karaoke -r` applies the same
+  figure (`DEFAULT_LEAD_S`, overridable there with `--lead`), so both modes stay
+  in step. Declines to start if `karaoke --radio` already holds the mic.
 - **browse** — nothing playing; drive the library list.
 
 Lyrics are resolved from the cache first, then fetched from LRCLIB in the

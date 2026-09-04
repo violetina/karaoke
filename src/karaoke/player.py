@@ -427,8 +427,9 @@ _NUDGE_HINT = "[v]-line [b]+line [0]reset [q]quit"
 # Live recognition (songrec) listens ~10s before returning a position, biasing
 # the reported offset low so the highlight starts a couple of lines behind the
 # audio. Pre-bias the lyric clock forward by this many seconds on mic/radio
-# locks so the start is close without needing to tap `b`. Overridable via --lead.
-DEFAULT_LEAD_S = 13.0
+# locks so the start is close without needing to tap `b`. Overridable via
+# --lead on the CLI; the TUI's radio mode uses the same figure.
+DEFAULT_LEAD_S = 12.6
 
 
 def word_index_at(word_times: list[float], elapsed: float) -> int:

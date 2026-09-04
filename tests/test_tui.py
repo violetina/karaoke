@@ -452,10 +452,25 @@ def _ref(artist="A", title="B", offset=30.0, mono=100.0):
 
 
 def test_mic_elapsed_dead_reckons_from_the_anchor():
-    """No MPRIS position exists in radio mode; it is offset + time since."""
+    """No MPRIS position in radio mode: offset + time since + the lead."""
+    from karaoke.player import DEFAULT_LEAD_S
+
     app = _mic_app(_ref(offset=30.0, mono=100.0))
-    assert app.mic_elapsed(now=100.0) == 30.0
-    assert app.mic_elapsed(now=112.5) == 42.5
+    assert app.mic_elapsed(now=100.0) == 30.0 + DEFAULT_LEAD_S
+    assert app.mic_elapsed(now=112.5) == 42.5 + DEFAULT_LEAD_S
+
+
+def test_mic_elapsed_applies_the_same_lead_as_the_cli():
+    """songrec listens ~10s before answering, so its offset is already stale.
+
+    `karaoke -r` compensates with DEFAULT_LEAD_S; radio mode in the TUI was
+    missing it entirely and ran that far behind.
+    """
+    from karaoke.player import DEFAULT_LEAD_S
+
+    assert DEFAULT_LEAD_S == 12.6
+    app = _mic_app(_ref(offset=0.0, mono=0.0))
+    assert app.mic_elapsed(now=0.0) == DEFAULT_LEAD_S
 
 
 def test_mic_elapsed_is_none_without_an_identification():
