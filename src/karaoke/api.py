@@ -186,6 +186,47 @@ def get_stats() -> dict[str, Any]:
     }
 
 
+@app.get("/api/workers")
+def get_workers() -> dict[str, Any]:
+    """Post-processing worker and queue statistics.
+
+    Best-effort by design: if RabbitMQ is unreachable, or the workers run on a
+    different host (inside a container ``/proc`` shows none of them), this
+    reports ``available: false`` with a reason rather than failing. The rest of
+    the API stays read-only over SQLite, so a broker outage cannot take the
+    library endpoints down with it.
+
+    CPU and memory are summed across every worker, since they scale
+    horizontally and a single worker's usage would understate the load.
+    """
+    from .postprocess_status import QUEUE_NAME, get_status
+
+    st = get_status(sample_cpu=True)
+    return {
+        "available": st.available,
+        "reason": st.reason,
+        "queue": {
+            "name": QUEUE_NAME,
+            "ready": st.ready,
+            "unacked": st.unacked,
+            "queued": st.queued,
+            "consumers": st.consumers,
+            "deliver_rate": round(st.deliver_rate, 3),
+            "publish_rate": round(st.publish_rate, 3),
+            "busy": st.busy,
+        },
+        "workers": {
+            "count": st.workers,
+            "running": st.worker_running,
+            "pids": list(st.worker_pids),
+            "cpu_percent": (round(st.worker_cpu, 1)
+                            if st.worker_cpu is not None else None),
+            "rss_mb": (round(st.worker_rss_mb, 1)
+                       if st.worker_rss_mb is not None else None),
+        },
+    }
+
+
 @app.get("/api/logs")
 def get_logs(lines: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
     """Get the most recent log lines from the application log file."""

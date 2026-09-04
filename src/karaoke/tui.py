@@ -228,6 +228,9 @@ class KaraokeTui(App):
     }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
+    #worker-panel {
+        height: auto; border: round cyan; padding: 0 1; margin-top: 1;
+    }
 
     /* Browse overlay. On its own layer so showing it never resizes #workspace.
        The offset centres it by arithmetic (Screen is layout: vertical, so
@@ -299,6 +302,7 @@ class KaraokeTui(App):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("key: —\nbpm: —", id="keybpm")
                 yield Static("sentiment / rhythm", id="ascii-visual")
+                yield Static("workers  —", id="worker-panel")
         # Floats on its own layer above #workspace, so revealing it costs the
         # lyrics no space and does not reflow them.
         with Container(id="browse-overlay") as overlay:
@@ -530,20 +534,24 @@ class KaraokeTui(App):
 
         def _work() -> None:
             line = "worker-load: (unavailable)"
+            panel = "workers  (unavailable)"
             try:
                 from . import postprocess_status as ps
                 st = ps.get_status(prev_cpu_sample=prev)
                 # Persist the fresh sample for the next tick's delta.
                 self._cpu_sample = st.cpu_sample
                 line = ps.worker_load_line(st)
+                panel = ps.worker_panel(st)
             except Exception:
                 log.debug("worker-load refresh failed", exc_info=True)
-            try:
-                self.call_from_thread(
-                    self.query_one("#worker-load", Static).update, line
-                )
-            except Exception:
-                pass
+            for selector, text in (("#worker-load", line),
+                                   ("#worker-panel", panel)):
+                try:
+                    self.call_from_thread(
+                        self.query_one(selector, Static).update, text
+                    )
+                except Exception:
+                    pass
 
         try:
             self.run_worker(_work, exclusive=False, thread=True)

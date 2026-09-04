@@ -463,8 +463,32 @@ def active_word_index(text: str, frac: float) -> int:
     return min(len(words) - 1, int(f * len(words)))
 
 
+def widen(text: str) -> str:
+    """Convert ASCII to Unicode fullwidth forms, i.e. double-size glyphs.
+
+    A terminal cannot change font size per line, so this is the one way to make
+    the active lyric genuinely bigger rather than merely bolder: fullwidth
+    characters occupy two cells and are drawn at roughly twice the width.
+
+    Unlike the mood glyphs that misaligned the sentiment bars, these are East-
+    Asian width class "F" — *always* two cells, never ambiguous — so the width
+    is predictable on every terminal.
+    """
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0x21 <= code <= 0x7E:          # printable ASCII -> fullwidth block
+            out.append(chr(code - 0x21 + 0xFF01))
+        elif ch == " ":
+            out.append("　")          # ideographic space, also 2 cells
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
-                       mood: str = "neutral", word: Optional[int] = None) -> None:
+                       mood: str = "neutral", word: Optional[int] = None,
+                       big: bool = False) -> None:
     """Append one lyric line to a Rich Text body.
 
     kind: 'active' (current line — highlight the current word in purple over a
@@ -483,17 +507,21 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
     bg = _MOOD_BG.get(mood, "on blue")
     base = f"bold white {bg}"
     wi = active_word_index(line, frac) if word is None else word
+    # `big` doubles the glyph width. Applied per word so the highlight still
+    # lands on word boundaries.
+    grow = widen if big else (lambda s: s)
+    space = "　" if big else " "
     body.append("♪ ", style=base)
     if wi < 0:
-        body.append(line + "\n", style=base)
+        body.append(grow(line) + "\n", style=base)
         return
     words = line.split()
     for j, w in enumerate(words):
         if j == wi:
-            body.append(w, style="bold white on magenta")
+            body.append(grow(w), style="bold white on magenta")
         else:
-            body.append(w, style=base)
-        body.append(" " if j < len(words) - 1 else "\n", style=base)
+            body.append(grow(w), style=base)
+        body.append(space if j < len(words) - 1 else "\n", style=base)
 
 
 def _gap_marker(progress: float, width: int = 24) -> str:
@@ -504,22 +532,6 @@ def _gap_marker(progress: float, width: int = 24) -> str:
     """
     filled = max(0, min(width, int(round(progress * width))))
     return "♪ " + "─" * filled + "•" + " " * (width - filled)
-
-
-def _append_big_line(body, blocks, *, word: int, mood: str) -> None:
-    """Append big-type rows, highlighting the column range of the active word.
-
-    Every glyph cell is a single-width character, so a span's column range is
-    also a slice of the row string.
-    """
-    bg = _MOOD_BG.get(mood, "on blue")
-    base = f"bold white {bg}"
-    for block in blocks:
-        for row in block.rows:
-            for span in block.spans:
-                style = "bold white on magenta" if span.word == word else base
-                body.append(row[span.start:span.end], style=style)
-            body.append("\n", style=base)
 
 
 def _render_body(body, tl: "LyricTimeline", elapsed: float,
@@ -545,14 +557,12 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
     frac = tl.active_fraction(elapsed)
     in_gap = tl.in_gap(elapsed)
 
-    big = None
+    # Double-width the active line when it still fits the panel. Checked in
+    # cells, not characters: a widened line is exactly twice as wide, so a long
+    # lyric would otherwise be cropped mid-word.
+    big = False
     if big_width and not in_gap and 0 <= active < len(tl.lines):
-        from . import bigtext
-        big = bigtext.render(tl.lines[active][1], big_width)
-        if big is not None and big_height:
-            rows = sum(len(b.rows) for b in big)
-            before, after = bigtext.context_window(big_height, rows)
-            after += 1          # `after` is exclusive of the active line below
+        big = len(tl.lines[active][1]) * 2 + 2 <= big_width
 
     lo = max(0, active - before)
     hi = min(len(tl.lines), active + after)
@@ -565,17 +575,10 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
                 _append_lyric_line(body, line, kind="past")
                 body.append(_gap_marker(tl.gap_progress(elapsed)) + "\n",
                             style="cyan")
-            elif big is not None:
-                word = tl.word_index(elapsed)
-                if word is None:
-                    word = active_word_index(line, frac)
-                _append_big_line(body, big, word=word, mood=mood)
-                # A plain copy underneath: the safety net when a line wraps or
-                # loses a character the font cannot draw.
-                body.append("  " + line + "\n", style="dim")
             else:
                 _append_lyric_line(body, line, kind="active", frac=frac,
-                                   mood=mood, word=tl.word_index(elapsed))
+                                   mood=mood, word=tl.word_index(elapsed),
+                                   big=big)
         elif i < active:
             _append_lyric_line(body, line, kind="past")
         else:

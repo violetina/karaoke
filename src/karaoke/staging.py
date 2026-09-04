@@ -82,8 +82,27 @@ def _row_to_item(row: sqlite3.Row) -> StagedLyrics:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create staged-lyrics tables in the existing local cache DB."""
+    """Create staged-lyrics tables in the existing local cache DB.
+
+    Also enforces one row per (track, source): staging used to be a bare
+    INSERT, so re-staging the same track appended another identical row and the
+    review queue filled with copies of one song. Existing duplicates are folded
+    into the newest row before the unique index is added, since the index cannot
+    be created while they are present.
+    """
     conn.executescript(_SCHEMA)
+    conn.execute(
+        """
+        DELETE FROM staged_lyrics
+        WHERE id NOT IN (
+            SELECT max(id) FROM staged_lyrics GROUP BY key, source_kind
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_staged_lyrics_unique "
+        "ON staged_lyrics(key, source_kind)"
+    )
     conn.commit()
 
 
@@ -100,7 +119,15 @@ def stage_lyrics(
     notes: str = "",
     conn: Optional[sqlite3.Connection] = None,
 ) -> int:
-    """Insert a lower-trust lyrics candidate and return its staging id."""
+    """Stage a lower-trust lyrics candidate and return its staging id.
+
+    Upserts on (track, source): re-staging the same track from the same source
+    refreshes that candidate rather than adding another copy to the queue.
+
+    An existing decision is preserved — a candidate you already rejected stays
+    rejected and does not silently reappear as pending just because something
+    staged it again.
+    """
     if not (lyrics.synced_raw or lyrics.plain):
         raise ValueError("cannot stage empty lyrics")
     own = conn is None
@@ -108,13 +135,24 @@ def stage_lyrics(
     ensure_schema(c)
     now = time.time()
     try:
-        cur = c.execute(
+        c.execute(
             """
             INSERT INTO staged_lyrics
                 (key, artist, title, album, duration, source_kind, source_url,
                  confidence, status, plain_lyrics, synced_lyrics, notes,
                  created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            ON CONFLICT(key, source_kind) DO UPDATE SET
+                artist        = excluded.artist,
+                title         = excluded.title,
+                album         = excluded.album,
+                duration      = excluded.duration,
+                source_url    = excluded.source_url,
+                confidence    = excluded.confidence,
+                plain_lyrics  = excluded.plain_lyrics,
+                synced_lyrics = excluded.synced_lyrics,
+                notes         = excluded.notes,
+                updated_at    = excluded.updated_at
             """,
             (
                 localcache._key(artist, title), artist, title, album, duration,
@@ -123,9 +161,13 @@ def stage_lyrics(
             ),
         )
         c.commit()
-        if cur.lastrowid is None:
-            raise RuntimeError("staged lyrics insert did not return an id")
-        return int(cur.lastrowid)
+        row = c.execute(
+            "SELECT id FROM staged_lyrics WHERE key = ? AND source_kind = ?",
+            (localcache._key(artist, title), source_kind),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("staged lyrics upsert did not yield an id")
+        return int(row[0])
     finally:
         if own:
             c.close()

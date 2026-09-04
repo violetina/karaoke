@@ -33,11 +33,13 @@ class PostprocessStatus:
     consumers: int = 0
     deliver_rate: float = 0.0
     publish_rate: float = 0.0
-    # worker
+    # workers
     worker_running: bool = False
-    worker_cpu: Optional[float] = None   # percent of one core
-    worker_rss_mb: Optional[float] = None
-    cpu_sample: Optional[tuple] = None    # (pid, proc_jiffies, total_jiffies) for next delta
+    workers: int = 0                     # how many worker processes are up
+    worker_pids: tuple[int, ...] = ()
+    worker_cpu: Optional[float] = None   # summed percent of one core
+    worker_rss_mb: Optional[float] = None  # summed resident MB
+    cpu_sample: Optional[tuple] = None   # per-pid samples for the next delta
 
     @property
     def queued(self) -> int:
@@ -67,11 +69,17 @@ def _fetch_queue(timeout: float = 1.5) -> Optional[dict]:
         return json.loads(resp.read().decode())
 
 
-def _find_worker_pid() -> Optional[int]:
-    """Find the postprocess worker PID by scanning /proc cmdlines (Linux)."""
+def find_worker_pids() -> list[int]:
+    """Every postprocess worker PID, by scanning /proc cmdlines (Linux).
+
+    Workers scale horizontally (``karaoke-postprocess@{1..N}``), so this
+    deliberately returns all of them: reporting one worker's CPU while twelve
+    are running would understate the load by an order of magnitude.
+    """
     proc = "/proc"
     if not os.path.isdir(proc):
-        return None
+        return []
+    pids = []
     for name in os.listdir(proc):
         if not name.isdigit():
             continue
@@ -80,9 +88,16 @@ def _find_worker_pid() -> Optional[int]:
                 cmd = fh.read().replace(b"\x00", b" ").decode(errors="ignore")
         except OSError:
             continue
-        if "postprocess_worker" in cmd:
-            return int(name)
-    return None
+        # Match the module invocation, not any shell that merely mentions it.
+        if "postprocess_worker" in cmd and "python" in cmd:
+            pids.append(int(name))
+    return sorted(pids)
+
+
+def _find_worker_pid() -> Optional[int]:
+    """First worker PID, or None. Kept for single-worker callers."""
+    pids = find_worker_pids()
+    return pids[0] if pids else None
 
 
 def _proc_cpu_times(pid: int) -> Optional[tuple[int, int]]:
@@ -124,6 +139,50 @@ def _worker_cpu_percent(pid: int, interval: float = 0.15) -> Optional[float]:
     return _cpu_from_samples((pid,) + s1, (pid,) + s2)
 
 
+def _workers_cpu_percent(pids: list[int],
+                         interval: float = 0.15) -> Optional[float]:
+    """Summed CPU% across workers over one short blocking interval.
+
+    Sampled together rather than per worker, so N workers still cost a single
+    `interval`, not N of them.
+    """
+    before = {p: _proc_cpu_times(p) for p in pids}
+    before = {p: s for p, s in before.items() if s is not None}
+    if not before:
+        return None
+    time.sleep(interval)
+    prev = tuple((p,) + s for p, s in sorted(before.items()))
+    after = {p: _proc_cpu_times(p) for p in before}
+    after = {p: s for p, s in after.items() if s is not None}
+    if not after:
+        return None
+    cur = tuple((p,) + s for p, s in sorted(after.items()))
+    return _cpu_from_multi(prev, cur)
+
+
+def _cpu_from_multi(prev, cur) -> Optional[float]:
+    """Summed CPU% from two multi-worker sample tuples.
+
+    Only PIDs present in BOTH samples contribute: a worker that started or was
+    restarted between polls has no meaningful delta, and counting it would show
+    a spike that never happened.
+    """
+    if not prev or not cur:
+        return None
+    prev_by_pid = {s[0]: s for s in prev}
+    total = 0.0
+    seen = False
+    for sample in cur:
+        old = prev_by_pid.get(sample[0])
+        if old is None:
+            continue
+        pct = _cpu_from_samples(old, sample)
+        if pct is not None:
+            total += pct
+            seen = True
+    return total if seen else None
+
+
 def _cpu_from_samples(prev, cur) -> Optional[float]:
     """CPU% (of one core) from two (pid, proc_jiffies, total_jiffies) samples."""
     if not prev or not cur:
@@ -151,18 +210,25 @@ def get_status(*, sample_cpu: bool = True, prev_cpu_sample=None) -> PostprocessS
     """
     st = PostprocessStatus()
 
-    # Worker process (independent of RabbitMQ reachability).
-    pid = _find_worker_pid()
-    if pid is not None:
+    # Worker processes (independent of RabbitMQ reachability). CPU and memory
+    # are summed across every worker: with a dozen running, one worker's usage
+    # would badly understate the real load.
+    pids = find_worker_pids()
+    st.workers = len(pids)
+    if pids:
         st.worker_running = True
-        cur = _proc_cpu_times(pid)
-        if cur is not None:
-            st.cpu_sample = (pid,) + cur
+        st.worker_pids = tuple(pids)
+        samples = {p: _proc_cpu_times(p) for p in pids}
+        fresh = {p: s for p, s in samples.items() if s is not None}
+        if fresh:
+            st.cpu_sample = tuple((p,) + s for p, s in sorted(fresh.items()))
         if prev_cpu_sample is not None and st.cpu_sample is not None:
-            st.worker_cpu = _cpu_from_samples(prev_cpu_sample, st.cpu_sample)
+            st.worker_cpu = _cpu_from_multi(prev_cpu_sample, st.cpu_sample)
         elif sample_cpu:
-            st.worker_cpu = _worker_cpu_percent(pid)
-        st.worker_rss_mb = _proc_rss_mb(pid)
+            st.worker_cpu = _workers_cpu_percent(pids)
+        rss = [_proc_rss_mb(p) for p in pids]
+        rss = [r for r in rss if r is not None]
+        st.worker_rss_mb = sum(rss) if rss else None
 
     # Queue via management API.
     try:
@@ -219,3 +285,51 @@ def worker_load_line(st: PostprocessStatus, bar_width: int = 10) -> str:
         parts.append("broker unreachable")
 
     return "worker-load: " + " · ".join(parts)
+
+
+def worker_panel(st: PostprocessStatus, width: int = 30) -> str:
+    """Multi-line worker/queue read-out for the side panel.
+
+    Labels are ASCII and left-aligned in a fixed column so the values line up
+    whatever the terminal does with symbol glyphs — the same rule that keeps the
+    sentiment bars aligned.
+
+    Example::
+
+        workers   12 up
+        cpu       [####______]  38%
+        mem       675 MB
+        queue     4  (1 busy)
+        rate      2.2 in / 1.8 out
+    """
+    # One wider than the longest label ("consumers"), so a value never abuts it.
+    label_w = 10
+    bar_w = max(6, min(12, width - label_w - 8))
+
+    def row(label: str, value: str) -> str:
+        return f"{label:<{label_w}s}{value}"
+
+    lines = []
+    if st.worker_running:
+        lines.append(row("workers", f"{st.workers} up"))
+        cpu = f"{st.worker_cpu:.0f}%" if st.worker_cpu is not None else "--"
+        lines.append(row("cpu", f"[{_cpu_bar(st.worker_cpu, bar_w)}] {cpu}"))
+        if st.worker_rss_mb is not None:
+            lines.append(row("mem", f"{st.worker_rss_mb:.0f} MB"))
+    else:
+        lines.append(row("workers", "none running"))
+
+    if st.available:
+        q = str(st.queued)
+        if st.unacked:
+            q += f"  ({st.unacked} busy)"
+        lines.append(row("queue", q))
+        lines.append(row("consumers", str(st.consumers)))
+        if st.deliver_rate or st.publish_rate:
+            lines.append(row("rate", f"{st.publish_rate:.1f} in / "
+                                     f"{st.deliver_rate:.1f} out"))
+        lines.append(row("state", "working" if st.busy else "idle"))
+    else:
+        lines.append(row("broker", "unreachable"))
+
+    return "\n".join(lines)

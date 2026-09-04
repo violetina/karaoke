@@ -177,3 +177,49 @@ def test_ctrl_play_surfaces_launch_failure(monkeypatch):
         "/api/play", json={"url": "https://youtu.be/abc"}
     )
     assert resp.status_code == 500
+
+
+# --- worker / queue stats endpoint -----------------------------------------
+
+def test_workers_endpoint_reports_queue_and_workers(monkeypatch):
+    from fastapi.testclient import TestClient
+    from karaoke import postprocess_status as ps
+    from karaoke.api import app
+
+    monkeypatch.setattr(ps, "find_worker_pids", lambda: [1, 2, 3])
+    monkeypatch.setattr(ps, "_proc_rss_mb", lambda pid: 50.0)
+    monkeypatch.setattr(ps, "_proc_cpu_times", lambda pid: (1, 100))
+    monkeypatch.setattr(ps, "_fetch_queue", lambda *a, **k: {
+        "messages_ready": 7, "messages_unacknowledged": 2, "consumers": 3,
+        "message_stats": {"deliver_get_details": {"rate": 1.5},
+                          "publish_details": {"rate": 0.5}},
+    })
+
+    body = TestClient(app).get("/api/workers").json()
+    assert body["available"] is True
+    assert body["workers"]["count"] == 3
+    assert body["workers"]["rss_mb"] == 150.0
+    assert body["queue"]["ready"] == 7
+    assert body["queue"]["queued"] == 9        # ready + unacked
+    assert body["queue"]["busy"] is True
+    assert body["queue"]["deliver_rate"] == 1.5
+
+
+def test_workers_endpoint_degrades_when_broker_is_down(monkeypatch):
+    """A broker outage must not fail the request or the rest of the API."""
+    from fastapi.testclient import TestClient
+    from karaoke import postprocess_status as ps
+    from karaoke.api import app
+
+    monkeypatch.setattr(ps, "find_worker_pids", lambda: [])
+
+    def boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(ps, "_fetch_queue", boom)
+
+    r = TestClient(app).get("/api/workers")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is False
+    assert "unreachable" in body["reason"]
+    assert body["workers"]["count"] == 0

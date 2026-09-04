@@ -112,6 +112,15 @@ def open_song_url(url: str, kind: str | None) -> int | None:
         if vid:
             url = f"https://music.youtube.com/watch?v={vid}"
             kind = "youtube_music"
+        elif "/results?search_query=" in url:
+            # A search URL has no video id to convert, but its query does carry
+            # over — so the no-URL fallback lands in the same player as
+            # everything else instead of dropping the user into plain YouTube.
+            from urllib.parse import parse_qs, quote_plus, urlparse
+            query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
+            if query:
+                url = f"https://music.youtube.com/search?q={quote_plus(query)}"
+                kind = "youtube_music_search"
 
     # Try to navigate an active kiosk/debugging browser first to avoid tab clutter!
     if try_chrome_cdp_navigate(url):

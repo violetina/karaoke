@@ -536,16 +536,25 @@ def test_no_big_kwargs_leaves_output_unchanged():
     assert _big_body(3.0).plain == _big_body(3.0, big_width=None).plain
 
 
-def test_big_width_renders_block_glyphs():
+def test_big_width_widens_the_active_line():
+    """Fullwidth forms are the only way a terminal can draw a line larger."""
     plain = _big_body(3.0, big_width=200, big_height=16).plain
-    assert "_" in plain and "|" in plain
-    assert plain.count("\n") > len(_BIG_LINES)      # block rows added
+    assert "Ｌｉｔｔｌｅ" in plain
+    assert "Little fish in a great big sea" not in plain   # active line widened
 
 
-def test_big_line_keeps_a_plain_caption():
-    """The readable fallback under the block rows."""
-    assert "Little fish in a great big sea" in _big_body(
-        3.0, big_width=200, big_height=16).plain
+def test_widened_line_is_exactly_twice_as_wide():
+    from rich.cells import cell_len
+    from karaoke.player import widen
+
+    line = "Little fish"
+    assert cell_len(widen(line)) == 2 * cell_len(line)
+
+
+def test_context_lines_are_not_widened():
+    """Only the active line grows; the surrounding lines stay normal."""
+    plain = _big_body(15.0, big_width=200, big_height=20).plain
+    assert "Little fish in a great big sea" in plain       # a context line
 
 
 def test_context_lines_survive_around_the_big_line():
@@ -581,3 +590,40 @@ def test_no_big_type_during_an_instrumental_gap():
     _render_body(body, tl, 30.0, big_width=200, big_height=16)
     assert "♪" in body.plain
     assert "|___" not in body.plain
+
+
+def test_long_line_is_not_widened_past_the_panel():
+    """Widening doubles the width, so a long line must stay normal size."""
+    from karaoke.player import LyricTimeline, _render_body
+    from rich.text import Text
+
+    long_line = "a very long lyric line that would not fit when doubled at all"
+    tl = LyricTimeline([(0.0, long_line), (30.0, "next")])
+    body = Text(no_wrap=True, overflow="crop")
+    _render_body(body, tl, 1.0, big_width=60, big_height=16)
+    assert long_line in body.plain          # rendered normally
+    assert "Ａ" not in body.plain and "ｖ" not in body.plain
+
+
+def test_widen_leaves_non_ascii_alone():
+    from karaoke.player import widen
+    assert widen("café") == "ｃａｆé"        # the accent has no fullwidth form
+
+
+def test_widened_line_keeps_the_word_highlight():
+    from rich.text import Text
+    from karaoke.player import LyricTimeline, _render_body
+
+    # Lines 3s apart, so the whole span counts as "being sung". A wider spacing
+    # would put the later sample inside an instrumental break, where the
+    # highlight is correctly suppressed.
+    tl = LyricTimeline([(0.0, "one two three four"), (3.0, "next")])
+
+    def cols(t):
+        b = Text(no_wrap=True, overflow="crop")
+        _render_body(b, tl, t, big_width=200, big_height=16)
+        return [s.start for s in b.spans if "magenta" in str(s.style)]
+
+    early, late = cols(0.2), cols(2.6)
+    assert early and late
+    assert min(late) > min(early)
