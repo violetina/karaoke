@@ -121,3 +121,70 @@ def test_settings_panel_is_gone(app):
             assert app.query_one("#worker-load")     # statusbar
             assert app.query_one("#filter-select")   # overlay
     _run(go())
+
+
+# --- responsive chrome -----------------------------------------------------
+#
+# The way to get bigger lyrics in a terminal is a bigger terminal font, which
+# costs cells. At 80x24 the fixed panels took 72% of the screen and the lyrics
+# 28%, so the chrome has to yield rather than squeeze them into a corner.
+
+def _lyric_share(app, w, h):
+    region = app.query_one("#lyrics").region
+    return round(100 * region.width * region.height / (w * h))
+
+
+def test_narrow_terminal_hides_the_visuals_column(app):
+    """34 fixed columns is 42% of an 80-wide screen."""
+    async def go():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert not app.query_one("#visuals").display
+            assert _lyric_share(app, 80, 24) > 70
+    _run(go())
+
+
+def test_wide_terminal_keeps_the_visuals_column(app):
+    async def go():
+        async with app.run_test(size=(150, 38)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#visuals").display
+    _run(go())
+
+
+def test_short_terminal_compacts_the_now_playing_panel(app):
+    async def go():
+        async with app.run_test(size=(150, 24)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#now-playing").region.height <= 3
+    _run(go())
+
+
+def test_resizing_reapplies_the_breakpoints(app):
+    """Classes must follow a live resize, not just the initial mount."""
+    async def go():
+        async with app.run_test(size=(150, 38)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#visuals").display
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            assert not app.query_one("#visuals").display
+            await pilot.resize_terminal(150, 38)
+            await pilot.pause()
+            assert app.query_one("#visuals").display
+    _run(go())
+
+
+def test_focus_mode_leaves_only_the_lyrics(app):
+    async def go():
+        async with app.run_test(size=(150, 38)) as pilot:
+            await pilot.pause()
+            await pilot.press("F")
+            await pilot.pause()
+            for sel in ("#visuals", "#now-playing", "#statusbar"):
+                assert not app.query_one(sel).display, sel
+            assert _lyric_share(app, 150, 38) > 90
+            await pilot.press("F")
+            await pilot.pause()
+            assert app.query_one("#now-playing").display
+    _run(go())

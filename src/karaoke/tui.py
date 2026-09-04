@@ -91,6 +91,13 @@ def _default_sync_offset(mode: str = "scan") -> float:
 
 SYNC_OFFSET_STEP = 0.1
 
+# Below these the chrome gives way to the lyrics. The way to make lyrics bigger
+# in a terminal is a bigger terminal font, which costs cells — and measuring the
+# real layout at 80x24 showed the fixed panels taking 72% of the screen, so they
+# have to yield rather than squeeze the lyrics into a corner.
+NARROW_COLS = 110
+SHORT_ROWS = 32
+
 # Mic (radio) mode. songrec needs a few seconds of audio; re-identifying every
 # ~30s corrects drift and catches track changes without hammering the service.
 MIC_REIDENTIFY_S = 30.0
@@ -265,6 +272,20 @@ class KaraokeTui(App):
         background: $surface; padding: 1 2;
     }
     #browse-overlay.-visible { display: block; }
+
+    /* Responsive chrome. A bigger terminal font means fewer cells, so the
+       fixed-size panels crowd out the lyrics exactly when they can least
+       afford it: at 80x24 the visuals column alone is 42% of the width and
+       lyrics got 28% of the screen. These classes are applied on resize. */
+    Screen.-narrow #visuals { display: none; }
+    Screen.-short #now-playing { height: 3; padding: 0 1; margin-bottom: 0; }
+    Screen.-short Header { display: none; }
+
+    /* Focus mode: nothing but the lyrics, at any size. */
+    Screen.-focus #visuals { display: none; }
+    Screen.-focus #now-playing { display: none; }
+    Screen.-focus #statusbar { display: none; }
+    Screen.-focus Header { display: none; }
     #browse-head { height: 3; }
     #browse-head > Static { width: 8; content-align: left middle; }
     #filter-select { width: 34; }
@@ -277,6 +298,7 @@ class KaraokeTui(App):
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("R", "toggle_mic", "Mic/radio"),
+        ("F", "toggle_focus", "Focus"),
         ("question_mark", "help", "Keys"),
         Binding("escape", "hide_browse", "Close browse", show=False),
         ("r", "refresh", "Refresh"),
@@ -354,6 +376,7 @@ class KaraokeTui(App):
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
+        self.apply_size_classes(self.size.width, self.size.height)
         self._poll_detection()
         self._refresh_worker_load()
 
@@ -477,6 +500,26 @@ class KaraokeTui(App):
         """escape: close the overlay if open, otherwise do nothing."""
         if self._browse_open():
             self._hide_browse()
+
+    # -- responsive chrome ------------------------------------------------
+    def apply_size_classes(self, width: int, height: int) -> None:
+        """Shrink the surrounding panels when there are few cells to spend.
+
+        The way to get bigger lyrics in a terminal is a bigger terminal font,
+        which costs cells — so the fixed-size chrome has to give ground rather
+        than squeeze the lyrics into a corner.
+        """
+        self.screen.set_class(width < NARROW_COLS, "-narrow")
+        self.screen.set_class(height < SHORT_ROWS, "-short")
+
+    def on_resize(self, event) -> None:
+        self.apply_size_classes(event.size.width, event.size.height)
+
+    def action_toggle_focus(self) -> None:
+        """`F`: lyrics only, hiding every other panel."""
+        on = not self.screen.has_class("-focus")
+        self.screen.set_class(on, "-focus")
+        self.notify("Focus mode" if on else "Focus mode off")
 
     # -- mic / radio mode -------------------------------------------------
     def mic_elapsed(self, now: float | None = None) -> float | None:
