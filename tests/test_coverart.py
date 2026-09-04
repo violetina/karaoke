@@ -1,6 +1,8 @@
 """Tests for cover art as coloured terminal cells (no ffmpeg needed)."""
 from pathlib import Path
 
+import pytest
+
 from karaoke import coverart
 
 
@@ -75,19 +77,94 @@ def test_rows_are_newline_separated_without_a_trailing_blank():
     assert text.plain.count("\n") == 1
 
 
-def test_render_keeps_the_aspect_ratio(monkeypatch):
-    """Terminal cells are ~2:1, so a square cover needs half as many rows."""
+# --- aspect ratio ----------------------------------------------------------
+
+def _visual_aspect(cols, rows):
+    """Height:width as actually drawn, accounting for the 2:1 cell shape."""
+    return (rows * coverart.CELL_ASPECT) / cols
+
+
+def test_square_source_renders_square():
+    """Cells are ~2:1 tall, so a square image needs half as many rows."""
+    assert coverart.fit((120, 120), 28, 37) == (28, 14)
+
+
+def test_landscape_source_keeps_its_shape():
+    cols, rows = coverart.fit((1920, 1080), 28, 37)
+    assert _visual_aspect(cols, rows) == pytest.approx(1080 / 1920, abs=0.05)
+
+
+def test_portrait_source_keeps_its_shape():
+    cols, rows = coverart.fit((1000, 1500), 28, 37)
+    assert _visual_aspect(cols, rows) == pytest.approx(1.5, abs=0.05)
+
+
+def test_a_tall_image_shrinks_in_both_dimensions_rather_than_stretching():
+    """Clamping height alone would squash the image; width follows it down."""
+    cols, rows = coverart.fit((1000, 2000), 28, 8)
+    assert rows <= 8
+    assert cols < 28
+    assert _visual_aspect(cols, rows) == pytest.approx(2.0, abs=0.1)
+
+
+def test_fit_never_exceeds_either_bound():
+    for src in ((120, 120), (1920, 1080), (500, 2000), (2000, 500)):
+        cols, rows = coverart.fit(src, 28, 12)
+        assert 1 <= cols <= 28 and 1 <= rows <= 12, src
+
+
+def test_fit_rejects_nonsense():
+    assert coverart.fit((0, 0), 28, 12) is None
+    assert coverart.fit((100, 100), 0, 12) is None
+
+
+def test_narrow_image_is_centred_in_the_panel():
+    text = coverart.to_text([[(255, 0, 0)] * 8], pad_to=28)
+    assert text.plain.startswith(" " * 10)          # (28 - 8) // 2
+
+
+def test_no_padding_when_the_image_fills_the_panel():
+    text = coverart.to_text([[(1, 2, 3)] * 8], pad_to=8)
+    assert len(text.plain) == 8
+
+
+# --- render ----------------------------------------------------------------
+
+def test_render_measures_the_source_before_scaling(monkeypatch):
     seen = {}
+    monkeypatch.setattr(coverart, "probe_size", lambda *a, **k: (1920, 1080))
 
     def fake_sample(path, cols, rows, **kw):
         seen.update(cols=cols, rows=rows)
         return [[(0, 0, 0)] * cols for _ in range(rows)]
     monkeypatch.setattr(coverart, "sample", fake_sample)
 
-    coverart.render(Path("x"), 20)
-    assert seen == {"cols": 20, "rows": 10}
+    coverart.render(Path("x"), 28, 37)
+    assert seen["cols"] == 28
+    assert seen["rows"] == 8            # 16:9, not a forced half-height box
+
+
+def test_render_returns_none_when_the_source_cannot_be_measured(monkeypatch):
+    """An audio-only file has no video stream to size."""
+    monkeypatch.setattr(coverart, "probe_size", lambda *a, **k: None)
+    assert coverart.render(Path("x"), 20) is None
 
 
 def test_render_returns_none_when_decoding_fails(monkeypatch):
+    monkeypatch.setattr(coverart, "probe_size", lambda *a, **k: (100, 100))
     monkeypatch.setattr(coverart, "sample", lambda *a, **k: None)
     assert coverart.render(Path("x"), 20) is None
+
+
+def test_probe_size_survives_a_missing_ffprobe(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("ffprobe")
+    monkeypatch.setattr(coverart.subprocess, "run", boom)
+    assert coverart.probe_size(Path("x")) is None
+
+
+def test_probe_size_handles_a_stream_with_no_video(monkeypatch):
+    class _P:
+        stdout = ""
+    monkeypatch.setattr(coverart.subprocess, "run", lambda *a, **k: _P())
+    assert coverart.probe_size(Path("x")) is None

@@ -68,12 +68,59 @@ def sample(path: Path, cols: int, rows: int,
     return out
 
 
-def to_text(pixels: list[list[tuple[int, int, int]]]):
-    """Render sampled pixels as a Rich Text of background-coloured spaces."""
+def probe_size(path: Path, *, timeout: float = 5.0) -> Optional[tuple[int, int]]:
+    """Pixel dimensions of an image or video stream, via ffprobe."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = proc.stdout.strip().split(",")
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def fit(src: tuple[int, int], max_cols: int,
+        max_rows: int) -> Optional[tuple[int, int]]:
+    """Cell dimensions that preserve the source's aspect within the panel.
+
+    Terminal cells are about twice as tall as they are wide, so a square image
+    needs half as many rows as columns to still look square. Width leads;
+    height follows from the aspect and is then clamped, with the width reduced
+    to match rather than letting the image stretch.
+    """
+    src_w, src_h = src
+    if src_w <= 0 or src_h <= 0 or max_cols < 1 or max_rows < 1:
+        return None
+    cols = max_cols
+    rows = max(1, round(cols * (src_h / src_w) / CELL_ASPECT))
+    if rows > max_rows:
+        rows = max_rows
+        cols = max(1, round(rows * CELL_ASPECT * (src_w / src_h)))
+        cols = min(cols, max_cols)
+    return cols, rows
+
+
+def to_text(pixels: list[list[tuple[int, int, int]]], *, pad_to: int = 0):
+    """Render sampled pixels as a Rich Text of background-coloured spaces.
+
+    ``pad_to`` centres the image in a wider panel with plain spaces, so a
+    portrait cover sits in the middle instead of hugging the left edge.
+    """
     from rich.text import Text
 
     text = Text(no_wrap=True, overflow="crop")
+    width = len(pixels[0]) if pixels else 0
+    left = max(0, (pad_to - width) // 2)
     for y, row in enumerate(pixels):
+        if left:
+            text.append(" " * left)
         for (r, g, b) in row:
             text.append(" ", style=f"on rgb({r},{g},{b})")
         if y < len(pixels) - 1:
@@ -81,9 +128,20 @@ def to_text(pixels: list[list[tuple[int, int, int]]]):
     return text
 
 
-def render(source: Path, cols: int, rows: Optional[int] = None):
-    """Cover art sized for a panel, or None when it cannot be rendered."""
-    if rows is None:
-        rows = max(1, cols // CELL_ASPECT)
+def render(source: Path, max_cols: int, max_rows: Optional[int] = None):
+    """Cover art fitted to a panel, aspect preserved, or None if unrenderable.
+
+    The source is measured first so a 16:9 frame and a square cover both keep
+    their proportions instead of being squashed into a fixed box.
+    """
+    if max_rows is None:
+        max_rows = max(1, max_cols // CELL_ASPECT)
+    src = probe_size(source)
+    if src is None:
+        return None
+    size = fit(src, max_cols, max_rows)
+    if size is None:
+        return None
+    cols, rows = size
     pixels = sample(source, cols, rows)
-    return to_text(pixels) if pixels else None
+    return to_text(pixels, pad_to=max_cols) if pixels else None
