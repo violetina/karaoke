@@ -36,7 +36,7 @@ K8S_NAMESPACE ?= karaoke
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
         mq-port-forward postprocess-worker postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
-        auth-spotify auth-youtube auth-status sample \
+        auth-spotify auth-youtube auth-status sample audio-check \
         recordings recording-show recording-analyse
 
 help: ## Show available targets
@@ -176,6 +176,14 @@ _auth-window:
 	@echo "Opening $(WHAT) sign-in in $(KIOSK_PROFILE)."
 	@echo "Sign in by hand, then close the window; the session persists for 'make tui'."
 	@$(CHROME) --user-data-dir=$(KIOSK_PROFILE) "$(URL)" >/dev/null 2>&1 &
+
+audio-check: ## Report whether audio analysis is available (and from where)
+	@$(PYTHON) -c "from karaoke import analyze; \
+	  local = analyze.stack_available(); other = analyze.audio_python(); \
+	  print('in-process DSP stack :', 'yes' if local else 'no'); \
+	  print('audio venv fallback  :', other or 'not found'); \
+	  print('analysis available   :', 'yes' if (local or other) else \
+	        'NO -- run: make install-audio')"
 
 auth-status: ## Report Spotify token validity and playback-window state
 	$(PYTHON) scripts/auth_status.py
