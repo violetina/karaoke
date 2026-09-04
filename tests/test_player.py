@@ -405,3 +405,57 @@ def test_synced_lyrics_do_not_queue_a_gap(tmp_path, monkeypatch):
         use_cache=False, stats_mode="radio",
     )
     assert _gap_rows(conn) == []
+
+
+def test_force_transcribe_preserves_supplied_plain_lyrics(tmp_path, monkeypatch):
+    """Whisper supplies TIMING; known-good text must survive it.
+
+    transcribe_to_lrc takes `text` as an initial_prompt bias, not a forced
+    alignment, so its transcription drifts ("up to do" -> "up to doom") and
+    carries music-note artifacts. Storing that would replace correct LRCLIB
+    lyrics with a worse copy.
+    """
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+
+    good = "They bring you up to do\nLike your daddy done"
+    lyrics_file = tmp_path / "lyrics.txt"
+    lyrics_file.write_text(good)
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(
+        "karaoke.whisper_sync.transcribe_to_lrc",
+        lambda *a, **k: "[00:01.00] 🎵They bring you\n[00:05.00] up to doom 🎵",
+    )
+
+    ly = player.get_synced(
+        SongRef(artist="Bruce Springsteen", title="The River",
+                path=str(tmp_path / "a.webm"), source="backfill"),
+        force_transcribe=True, lyrics_file=str(lyrics_file),
+    )
+
+    assert ly.plain == good                 # correct words kept
+    assert "🎵" not in ly.plain
+    assert ly.synced_raw.startswith("[00:01.00]")   # timings still taken
+
+
+def test_force_transcribe_without_lyrics_file_uses_whisper_text(tmp_path, monkeypatch):
+    """With no known-good text, Whisper's own transcription is all we have."""
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(
+        "karaoke.whisper_sync.transcribe_to_lrc",
+        lambda *a, **k: "[00:01.00] heard words\n[00:05.00] more words",
+    )
+
+    ly = player.get_synced(
+        SongRef(artist="Unknown", title="Track",
+                path=str(tmp_path / "a.webm"), source="backfill"),
+        force_transcribe=True,
+    )
+
+    assert ly.plain == "heard words\nmore words"

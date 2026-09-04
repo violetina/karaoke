@@ -250,8 +250,14 @@ def get_synced(
                 plain_lyrics = f.read()
 
         lrc = transcribe_to_lrc(audio_path, text=plain_lyrics)
+        # Preserve the supplied plain lyrics: Whisper is here for TIMING, and a
+        # known-good source (LRCLIB/Genius) is a better transcription than its
+        # output, which carries "🎵"/"// Music //" artifacts and misheard words.
+        # `text` is only an initial_prompt bias, not a forced alignment, so
+        # storing Whisper's words would overwrite correct lyrics with worse
+        # ones. Same rule upgrade_timings.upgrade_track follows for captions.
         ly = Lyrics(
-            plain="\n".join(t for _, t in parse_lrc(lrc)),
+            plain=(plain_lyrics or "").strip() or "\n".join(t for _, t in parse_lrc(lrc)),
             synced_raw=lrc, source="whisper", lines=parse_lrc(lrc),
         ) if lrc.strip() else Lyrics()
         if ly.synced_raw or ly.plain:
