@@ -249,3 +249,66 @@ def test_no_bpm_stays_a_single_static_row():
 
 def test_a_zero_width_bar_does_not_raise():
     assert "bpm" in visuals.rhythm_bar(120, elapsed=1.0, width=0)
+
+
+# --- cartwheel: rolls back, and lands on the beat --------------------------
+
+def _wheel(bpm, elapsed, width=24):
+    """(left offset, airborne, height) of the cartwheel figure."""
+    lines = visuals.cartwheel_frame(bpm, elapsed, width).split("\n")
+    body = [ln for ln in lines if ln.strip()]
+    offset = len(body[0]) - len(body[0].lstrip()) if body else 0
+    return offset, lines[-1] == "", len(lines)
+
+
+def test_the_cartwheel_rolls_back_instead_of_teleporting():
+    """It used to slide right and jump to the start; the eye followed the jump."""
+    beat = 60.0 / 120.0
+    span = visuals.CARTWHEEL_BEATS * beat
+    offsets = [_wheel(120, t * span / 8.0)[0] for t in range(17)]
+    assert offsets[:9] == sorted(offsets[:9])                 # out
+    assert offsets[8:] == sorted(offsets[8:], reverse=True)   # and back
+    assert offsets[0] == offsets[-1]
+
+
+def test_the_cartwheel_is_airborne_on_the_beat():
+    for beat_index in range(4):
+        assert _wheel(120, beat_index * 0.5)[1] is True
+
+
+def test_the_cartwheel_lands_between_beats():
+    beat = 60.0 / 120.0
+    assert _wheel(120, beat * 0.6)[1] is False
+    assert _wheel(120, beat * 0.95)[1] is False
+
+
+def test_the_cartwheel_keeps_a_constant_height():
+    """The hop must not shift whatever is rendered below it."""
+    heights = {_wheel(120, t / 10.0)[2] for t in range(40)}
+    assert len(heights) == 1
+
+
+def test_the_spin_reverses_with_the_travel():
+    """A wheel rolling leftwards does not keep turning clockwise."""
+    beat = 60.0 / 120.0
+    span = visuals.CARTWHEEL_BEATS * beat
+    # Same point within a beat, once heading out and once heading back.
+    going = visuals.cartwheel_frame(120, beat * 0.5, 24)
+    coming = visuals.cartwheel_frame(120, span + beat * 0.5, 24)
+    assert going != coming
+
+
+def test_the_cartwheel_survives_a_missing_bpm():
+    """Falls back to a default tempo rather than dividing by zero."""
+    assert visuals.cartwheel_frame(None, 1.0, 24)
+    assert visuals.cartwheel_frame(0, 1.0, 24)
+
+
+def test_the_cartwheel_fits_a_narrow_panel():
+    offset, _, _ = _wheel(120, 1.0, width=6)
+    assert offset >= 0
+
+
+def test_the_same_instant_renders_the_same_wheel():
+    assert (visuals.cartwheel_frame(137, 9.87, 24)
+            == visuals.cartwheel_frame(137, 9.87, 24))
