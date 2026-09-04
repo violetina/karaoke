@@ -188,3 +188,46 @@ def test_focus_mode_leaves_only_the_lyrics(app):
             await pilot.pause()
             assert app.query_one("#now-playing").display
     _run(go())
+
+
+def test_left_sidebar_balances_the_layout(app):
+    """Two equal side columns put the lyrics in the middle of the screen."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            left = app.query_one("#sidebar").region
+            right = app.query_one("#visuals").region
+            lyrics = app.query_one("#lyrics").region
+            assert left.width == right.width
+            gap_left = lyrics.x - left.right
+            gap_right = right.x - lyrics.right
+            assert abs(gap_left - gap_right) <= 2       # visually centred
+    _run(go())
+
+
+def test_worker_panel_lives_in_the_left_sidebar(app):
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#worker-panel")
+            assert panel in app.query_one("#sidebar").walk_children()
+    _run(go())
+
+
+def test_beat_art_space_is_reserved(app):
+    """Held empty on purpose, for beat-driven visuals later."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            art = app.query_one("#beat-art").region
+            assert art.height > 5      # real space, not a collapsed widget
+    _run(go())
+
+
+def test_sidebars_both_hide_on_a_narrow_terminal(app):
+    async def go():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert not app.query_one("#sidebar").display
+            assert not app.query_one("#visuals").display
+    _run(go())

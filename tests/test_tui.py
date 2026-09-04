@@ -546,3 +546,40 @@ def test_context_window_scales_to_the_panel_height():
 
     assert shown(12) > 8            # more than the old hard-coded window
     assert shown(40) > shown(12)    # and it keeps scaling
+
+
+# --- figlet title banner ---------------------------------------------------
+
+def _banner(title, width, height=99, artist="Gotye"):
+    from karaoke.tui import KaraokeTui
+    return KaraokeTui.__new__(KaraokeTui).title_banner(artist, title, width, height)
+
+
+def test_title_renders_as_block_type_when_it_fits():
+    """A header is one short string with space around it — block type suits it."""
+    out = _banner("Golden Brown", 150)
+    assert "♪" not in out
+    assert out.count("\n") >= 3          # several block rows
+    assert out.strip().endswith("Gotye")  # artist under the title
+
+
+def test_title_falls_back_to_plain_when_too_narrow():
+    assert _banner("Somebody That I Used To Know", 60) == \
+        "♪ Gotye - Somebody That I Used To Know"
+
+
+def test_title_falls_back_when_the_header_is_compacted():
+    """On a short terminal now-playing shrinks to 3 rows; a banner cannot fit."""
+    assert _banner("Golden Brown", 150, height=3).startswith("♪ ")
+
+
+def test_title_falls_back_for_a_title_too_long_to_fit_one_line():
+    long_title = "A Really Very Extremely Long Song Title That Cannot Possibly Fit"
+    assert _banner(long_title, 120).startswith("♪ ")
+
+
+def test_title_banner_never_wraps_to_a_second_block():
+    """max_rows=1: a header that wrapped would push the status line out."""
+    out = _banner("Disappearer", 150)
+    rows = out.splitlines()
+    assert len({len(r) for r in rows[:-1]}) == 1     # block rows equal width

@@ -242,9 +242,11 @@ class KaraokeTui(App):
     CSS = """
     Screen { layout: vertical; layers: base overlay; }
     #workspace { height: 1fr; }
+    #sidebar { width: 34; padding: 0 1; }
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
-    #now-playing { height: 8; border: round green; padding: 1; margin-bottom: 1; }
+    /* Tall enough for the figlet title banner (5 rows + artist + status). */
+    #now-playing { height: 11; border: round green; padding: 0 1; margin-bottom: 1; }
     /* overflow-y is hidden, not auto: a scrollbar appearing mid-song steals a
        column and shears the block glyphs, and #lyrics is a non-focusable
        Static so the scrollbar is unreachable by keyboard anyway. */
@@ -258,9 +260,10 @@ class KaraokeTui(App):
     }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
-    #worker-panel {
-        height: auto; border: round cyan; padding: 0 1; margin-top: 1;
-    }
+    #worker-panel { height: auto; border: round cyan; padding: 0 1; }
+    /* Takes the rest of the column so the reserved space is visibly held. */
+    #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1;
+                margin-top: 1; }
 
     /* Browse overlay. On its own layer so showing it never resizes #workspace.
        The offset centres it by arithmetic (Screen is layout: vertical, so
@@ -278,11 +281,13 @@ class KaraokeTui(App):
        afford it: at 80x24 the visuals column alone is 42% of the width and
        lyrics got 28% of the screen. These classes are applied on resize. */
     Screen.-narrow #visuals { display: none; }
+    Screen.-narrow #sidebar { display: none; }
     Screen.-short #now-playing { height: 3; padding: 0 1; margin-bottom: 0; }
     Screen.-short Header { display: none; }
 
     /* Focus mode: nothing but the lyrics, at any size. */
     Screen.-focus #visuals { display: none; }
+    Screen.-focus #sidebar { display: none; }
     Screen.-focus #now-playing { display: none; }
     Screen.-focus #statusbar { display: none; }
     Screen.-focus Header { display: none; }
@@ -343,6 +348,15 @@ class KaraokeTui(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="workspace"):
+            # Left column balances the right one so the lyrics sit centred
+            # rather than pushed against the screen edge.
+            with Vertical(id="sidebar"):
+                yield Static("workers  —", id="worker-panel")
+                # Reserved for beat-driven visuals: sampled video frames as
+                # ASCII, or generated art matching the lyric's sentiment.
+                # Empty for now so the column keeps its width and the lyrics
+                # stay centred.
+                yield Static("", id="beat-art")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
@@ -353,7 +367,6 @@ class KaraokeTui(App):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("key: —\nbpm: —", id="keybpm")
                 yield Static("sentiment / rhythm", id="ascii-visual")
-                yield Static("workers  —", id="worker-panel")
         # Floats on its own layer above #workspace, so revealing it costs the
         # lyrics no space and does not reflow them.
         with Container(id="browse-overlay") as overlay:
@@ -500,6 +513,27 @@ class KaraokeTui(App):
         """escape: close the overlay if open, otherwise do nothing."""
         if self._browse_open():
             self._hide_browse()
+
+    def title_banner(self, artist: str, title: str, width: int,
+                     height: int = 99) -> str:
+        """The song title in figlet block type, or plain text if it will not fit.
+
+        This is where block type earns its keep: a header is one short string
+        with space around it, unlike a lyric line that has to stay legible and
+        in rhythm with its neighbours.
+
+        Falls back to plain text whenever the banner would not fit — a narrow
+        panel, a long title, or a compacted header on a short terminal.
+        """
+        from . import bigtext
+
+        plain = f"♪ {artist} - {title}"
+        if width < bigtext.MIN_WIDTH or height < 6:
+            return plain
+        rendered = bigtext.render(title, width, max_rows=1)
+        if rendered is None or len(rendered[0].rows) + 1 > height:
+            return plain
+        return "\n".join((*rendered[0].rows, f"  {artist}"))
 
     # -- responsive chrome ------------------------------------------------
     def apply_size_classes(self, width: int, height: int) -> None:
@@ -1007,11 +1041,13 @@ class KaraokeTui(App):
                 log.debug("postprocess enqueue dispatch failed", exc_info=True)
         if lyrics is not None and lyrics.has_synced:
             self._timeline = timeline_from_lyrics(lyrics)
+            size = now.content_size
+            banner = self.title_banner(display_artist, display_title,
+                                       size.width or 0, (size.height or 0) - 1)
             now.update(
-                f"♪ {display_artist} - {display_title}\n"
-                f"mode: {det.mode}  player: {det.player or '—'}\n"
-                f"{keybpm_line}\n"
-                f"synced lyrics · {lyrics.source} · offset {self._sync_offset:+.1f}s (, / .)"
+                f"{banner}\n"
+                f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
+                f"{lyrics.source} · offset {self._sync_offset:+.1f}s (, / .)"
             )
         else:
             self._timeline = LyricTimeline([])
