@@ -356,3 +356,52 @@ def test_active_word_index_blank_line():
     assert active_word_index("", 0.5) == -1
     assert active_word_index("   ", 0.5) == -1
 
+
+
+# --- gap queueing for un-timed tracks --------------------------------------
+
+def _gap_rows(conn):
+    return [(r["artist"], r["title"])
+            for r in conn.execute("SELECT artist, title FROM lyric_gaps")]
+
+
+def test_plain_only_lyrics_still_queue_a_gap(tmp_path, monkeypatch):
+    """Plain text cannot drive a karaoke session, so it must be queued.
+
+    These used to be cached and forgotten: they report as "has lyrics", so
+    nothing revisited them and Whisper alignment never got a chance.
+    """
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+    from karaoke.lyrics import Lyrics
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(player, "fetch_lrclib",
+                        lambda *a, **k: Lyrics(plain="just words", source="lrclib"))
+
+    player.get_synced(
+        SongRef(artist="Cypress Hill", title="When the Ship Goes Down",
+                source="radio"),
+        use_cache=False, stats_mode="radio",
+    )
+    assert ("Cypress Hill", "When the Ship Goes Down") in _gap_rows(conn)
+
+
+def test_synced_lyrics_do_not_queue_a_gap(tmp_path, monkeypatch):
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+    from karaoke.lyrics import Lyrics, parse_lrc
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    lrc = "[00:01.00] a\n[00:05.00] b"
+    monkeypatch.setattr(player, "fetch_lrclib",
+                        lambda *a, **k: Lyrics(plain="a\nb", synced_raw=lrc,
+                                               source="lrclib", lines=parse_lrc(lrc)))
+
+    player.get_synced(
+        SongRef(artist="Sonic Youth", title="Disappearer", source="radio"),
+        use_cache=False, stats_mode="radio",
+    )
+    assert _gap_rows(conn) == []

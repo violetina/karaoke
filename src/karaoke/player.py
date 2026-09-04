@@ -298,12 +298,18 @@ def get_synced(
 
     if not (ly.synced_raw or ly.plain):
         _log("no_lyrics", ly)
-        if stats_mode in ("radio", "player"):
-            try:
-                with localcache.connect() as conn:
-                    localcache.log_lyric_gap(artist, title, conn)
-            except Exception:
-                pass
+
+    # Queue a gap whenever the track cannot drive a karaoke session — that means
+    # NO TIMINGS, not merely no lyrics. Plain-text-only lyrics used to be cached
+    # and silently forgotten: they report as "has lyrics", so nothing ever
+    # revisited them, and backfill's Whisper alignment — which exists precisely
+    # to time plain text against audio — never saw them.
+    if not ly.synced_raw and stats_mode in ("radio", "player"):
+        try:
+            with localcache.connect() as conn:
+                localcache.log_lyric_gap(artist, title, conn)
+        except Exception:
+            pass
     
     # Write-through to local cache
     if use_cache and (ly.synced_raw or ly.plain):
