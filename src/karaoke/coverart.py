@@ -107,18 +107,48 @@ def resolve_art(art_url: str) -> Optional[Path]:
     return art_path_from_url(art_url) or fetch_remote_art(art_url)
 
 
-def sample(path: Path, cols: int, rows: int,
-           *, timeout: float = 5.0) -> Optional[list[list[tuple[int, int, int]]]]:
-    """Decode and downscale an image (or a video's first frame) to RGB cells.
+def duration(path: Path, *, timeout: float = 5.0) -> Optional[float]:
+    """Length of a media file in seconds, or None.
+
+    A plain probe on purpose. ``recording_worker.probe_duration`` is deliberately
+    paranoid because the segment muxer writes FLAC with no duration header;
+    ordinary downloaded media carries one, and borrowing that machinery here
+    would mean decoding whole videos to learn something the header already says.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=timeout, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        value = float(out)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def sample(path: Path, cols: int, rows: int, *, seek: float = 0.0,
+           timeout: float = 5.0) -> Optional[list[list[tuple[int, int, int]]]]:
+    """Decode and downscale an image (or one video frame) to RGB cells.
+
+    ``seek`` picks a moment inside a video rather than its first frame, which
+    for a music video is usually a title card or black.
 
     Returns rows of (r, g, b), or None if ffmpeg cannot read the source.
     """
     if cols < 1 or rows < 1:
         return None
+    # -ss BEFORE -i seeks by keyframe rather than decoding from the start: the
+    # difference between roughly a tenth of a second and several seconds on a
+    # long video, which matters when several frames are sampled per track.
+    seek_args = ["-ss", f"{max(0.0, seek):.3f}"] if seek > 0 else []
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", str(path),
-             # -frames:v 1 makes this work on a video file too, taking frame one.
+            ["ffmpeg", "-v", "error", *seek_args, "-i", str(path),
+             # -frames:v 1 makes this work on a video file too.
              "-frames:v", "1",
              "-vf", f"scale={cols}:{rows}",
              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],

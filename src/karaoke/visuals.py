@@ -136,19 +136,51 @@ def sentiment_bars(profile: SentimentProfile, width: int = 12) -> str:
     return "\n".join(lines)
 
 
-def rhythm_bar(bpm: float | None, elapsed: float = 0.0, width: int = 16) -> str:
-    """A tiny animated rhythm indicator driven by BPM and elapsed time.
+# How much of each beat the pulse spends in the air. Short: the hop should read
+# as a strike on the beat, not as hovering between them.
+HOP_FRACTION = 0.35
 
-    Returns a bar with a moving pulse whose position advances one beat at a
-    time. With no BPM, returns a static dashed bar.
+# Beats per traverse of the bar. Two gives a visible sweep at ordinary tempos
+# without the pulse becoming a blur at fast ones.
+BOUNCE_BEATS = 2.0
+
+
+def rhythm_bar(bpm: float | None, elapsed: float = 0.0, width: int = 16) -> str:
+    """An animated rhythm indicator driven by BPM and elapsed time.
+
+    Two rows. The pulse travels left and right and **reverses at each end**
+    rather than wrapping: a sawtooth that teleports back to the start reads as
+    drift, and the eye follows the jump rather than the beat.
+
+    On each beat the pulse is drawn on the upper row and lands on the lower one
+    between beats. The horizontal travel alone is what a metronome does not
+    have; the hop is what actually marks time.
+
+    Depends only on ``elapsed``, so the same instant always renders identically
+    and the caller's timer interval cannot introduce jitter.
+
+    With no BPM there is no beat to keep, so it stays a single static bar.
     """
     if not bpm or bpm <= 0:
         return "‑" * width + "  (bpm ?)"
+    if width < 1:
+        return f"  {bpm:.0f} bpm"
+
     beat = 60.0 / bpm
-    pos = int((elapsed / beat) % width) if beat > 0 else 0
-    cells = ["·"] * width
-    cells[pos] = "●"
-    return "".join(cells) + f"  {bpm:.0f} bpm"
+    beats = elapsed / beat
+
+    # Triangle wave over BOUNCE_BEATS: 0 -> 1 -> 0, so the pulse turns around at
+    # the ends instead of jumping back to the start.
+    phase = (beats / BOUNCE_BEATS) % 2.0
+    travel = phase if phase <= 1.0 else 2.0 - phase
+    pos = min(width - 1, int(travel * (width - 1) + 0.5))
+
+    airborne = (beats % 1.0) < HOP_FRACTION
+    upper = ["·"] * width
+    lower = ["·"] * width
+    (upper if airborne else lower)[pos] = "●"
+    return ("".join(upper) + "\n"
+            + "".join(lower) + f"  {bpm:.0f} bpm")
 
 
 def tempo_word(bpm: float | None) -> str:

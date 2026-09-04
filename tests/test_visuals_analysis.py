@@ -181,3 +181,71 @@ def test_pad_cells_pads_to_display_width_not_len():
 
 def test_pad_cells_never_truncates():
     assert visuals.pad_cells("abcdef", 2) == "abcdef"
+
+
+# --- rhythm: bounce and hop ------------------------------------------------
+#
+# The old bar walked left and teleported back to the start. A sawtooth reads as
+# drift -- the eye follows the jump rather than the beat -- and nothing marked
+# the downbeat at all.
+
+def _pulse(bpm, elapsed, width=12):
+    """(row_index, column) of the pulse, or None if it is not drawn."""
+    rows = visuals.rhythm_bar(bpm, elapsed=elapsed, width=width).split("\n")
+    for i, row in enumerate(rows):
+        if "●" in row:
+            return (i, row.index("●"))
+    return None
+
+
+def test_the_pulse_reverses_instead_of_wrapping():
+    """It should turn around at the ends, not jump back to the start."""
+    beat = 60.0 / 120.0
+    span = visuals.BOUNCE_BEATS * beat
+    columns = [_pulse(120, t * span / 10.0)[1] for t in range(21)]
+    assert columns[:11] == sorted(columns[:11])            # out
+    assert columns[10:] == sorted(columns[10:], reverse=True)   # and back
+    assert columns[0] == 0 and columns[10] == 11
+
+
+def test_the_pulse_is_airborne_on_the_beat():
+    """The hop is what marks time; the travel alone is just drift."""
+    assert _pulse(120, 0.0)[0] == 0            # on the beat -> upper row
+    assert _pulse(120, 0.5)[0] == 0            # next beat
+    assert _pulse(120, 1.0)[0] == 0
+
+
+def test_the_pulse_lands_between_beats():
+    beat = 60.0 / 120.0
+    assert _pulse(120, beat * 0.6)[0] == 1     # past the hop -> lower row
+    assert _pulse(120, beat * 0.9)[0] == 1
+
+
+def test_the_hop_follows_the_tempo():
+    """At half the BPM a beat lasts twice as long, so the hop lasts longer."""
+    slow_beat = 60.0 / 60.0
+    assert _pulse(60, slow_beat * 0.2)[0] == 0
+    assert _pulse(60, slow_beat * 0.8)[0] == 1
+
+
+def test_both_rows_are_the_same_width():
+    rows = visuals.rhythm_bar(120, elapsed=0.3, width=10).split("\n")
+    assert len(rows) == 2
+    assert visuals.cell_width(rows[0]) == 10
+    assert rows[1].startswith("·" * 0)          # label follows the cells
+    assert visuals.cell_width(rows[1].split("  ")[0]) == 10
+
+
+def test_the_same_instant_always_renders_identically():
+    """The regression guard: the 1.5s and 0.2s timers must not add jitter."""
+    assert visuals.rhythm_bar(137, 12.34, 16) == visuals.rhythm_bar(137, 12.34, 16)
+
+
+def test_no_bpm_stays_a_single_static_row():
+    """With no beat to keep there is nothing to hop to."""
+    out = visuals.rhythm_bar(None, width=8)
+    assert "\n" not in out and "bpm ?" in out
+
+
+def test_a_zero_width_bar_does_not_raise():
+    assert "bpm" in visuals.rhythm_bar(120, elapsed=1.0, width=0)
