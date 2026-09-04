@@ -1,0 +1,20 @@
+[Unit]
+Description=Karaoke post-processing workers (resource-capped background work)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+Before=slices.target
+
+[Slice]
+# The cap applies to every karaoke-postprocess@N instance combined, so the
+# number of workers becomes a throughput knob rather than a risk to playback.
+# Twelve workers saturated a 24-thread machine and made the browser's audio
+# stutter; 600% keeps roughly a quarter of the machine for background work.
+CPUQuota=600%
+
+# Below the default weight of 100, so whenever playback or the UI wants CPU
+# they win, and workers only use what is genuinely idle.
+CPUWeight=20
+IOWeight=20
+
+# Downloads and librosa are memory-light per task, but a large fan-out adds up.
+MemoryHigh=8G
+MemoryMax=12G

@@ -30,5 +30,15 @@ Restart=always
 RestartSec=5
 SyslogIdentifier=karaoke-postprocess-%i
 
+# Background work must never starve playback. Analysis is pure CPU, and enough
+# workers to saturate the machine will stall the browser's audio thread and
+# make the music stutter. Nice lets a worker yield instantly to anything
+# interactive.
+Nice=15
+# All instances share one slice, so the ceiling applies to the fan-out as a
+# whole rather than per worker — a per-unit CPUQuota would grant each instance
+# its own budget, which is the opposite of a cap.
+Slice=karaoke-postprocess.slice
+
 [Install]
 WantedBy=karaoke.target
