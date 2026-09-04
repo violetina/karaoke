@@ -1049,8 +1049,13 @@ class KaraokeTui(App):
         active = tl.active_index(elapsed)
         mood = mood_of(tl.lines[active][1]) if active >= 0 else "neutral"
         lyrics_widget = self.query_one("#lyrics", Static)
+        # Fill the panel. _render_body defaults to 8 lines total, which left
+        # most of a full-height pane empty. Weighted towards what is coming up,
+        # and the active line is kept off the very top and bottom edges.
+        rows = max(0, lyrics_widget.content_size.height)
+        before, after = (3, 5) if rows < 10 else (rows // 3, rows - rows // 3)
         body = Text()
-        _render_body(body, tl, elapsed, mood=mood)
+        _render_body(body, tl, elapsed, mood=mood, before=before, after=after)
         lyrics_widget.update(body)
         
         nxt = tl.next_time(elapsed)

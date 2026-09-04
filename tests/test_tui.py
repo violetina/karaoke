@@ -528,3 +528,21 @@ def test_toggle_mic_off_clears_state(monkeypatch):
     assert app._mic_ref is None
     assert app._sync_key is None          # forces a re-resolve back to MPRIS
     assert notes == ["Mic off"]
+
+
+def test_context_window_scales_to_the_panel_height():
+    """A full-height pane showed 8 lines and left the rest empty."""
+    from rich.text import Text
+    from karaoke.player import LyricTimeline, _render_body
+
+    lines = [(float(i * 4), f"lyric line {i}") for i in range(40)]
+    tl = LyricTimeline(lines)
+
+    def shown(rows):
+        before, after = (3, 5) if rows < 10 else (rows // 3, rows - rows // 3)
+        body = Text()
+        _render_body(body, tl, 60.0, before=before, after=after)
+        return len(body.plain.rstrip().splitlines())
+
+    assert shown(12) > 8            # more than the old hard-coded window
+    assert shown(40) > shown(12)    # and it keeps scaling
