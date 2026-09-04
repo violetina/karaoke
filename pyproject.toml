@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karaoke"
-version = "0.4.3"
+version = "0.5.0"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -46,6 +46,7 @@ karaoke-analyze = "karaoke.cli:analyze_main"
 karaoke-upgrade-timings = "karaoke.upgrade_timings:upgrade_main"
 karaoke-postprocess-worker = "karaoke.postprocess_worker:main"
 karaoke-spotify-playlist = "karaoke.spotify_playlist:playlist_main"
+karaoke-find-sources = "karaoke.find_sources:find_sources_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

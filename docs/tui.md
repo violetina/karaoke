@@ -138,6 +138,24 @@ If that block looks taller than it is wide, raise the value; if squat, lower it:
 export KARAOKE_CELL_ASPECT=2.4
 ```
 
+## Sourcing
+
+Lyrics and sources arrive by different routes. Radio discovery and backfill
+resolve a track against LRCLIB by artist/title, which fills in the *words* and
+records no *URL* — so the track looks complete, but `Enter` opens a search page
+instead of playing it, and post-processing cannot analyse it because key/BPM
+needs the audio.
+
+```bash
+karaoke-find-sources --dry-run     # see what it would store
+karaoke-find-sources --limit 50    # store them
+```
+
+It searches YouTube per track and stores the best match using the same verified
+picker the backfill uses, so a wrong video is not saved. Where the track has no
+stored duration, the last synced lyric acts as evidence — a song cannot be
+shorter than its own words, and one several times longer is an album rip.
+
 ## Environment
 
 | variable | default | meaning |
