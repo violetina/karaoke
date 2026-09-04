@@ -14,6 +14,7 @@ hvac
 python-dotenv
 requests>=2.32.0
 rich>=13.8.0
+pyfiglet>=1.0
 mkdocs-graphviz>=1.5.3
 mkdocs-mermaid2-plugin
 mkdocs-glightbox>=0.5.2
