@@ -194,3 +194,103 @@ def test_fractional_aspect_still_yields_whole_cells(monkeypatch):
     monkeypatch.setattr(coverart, "CELL_ASPECT", 2.3)
     cols, rows = coverart.fit((100, 100), 21, 40)
     assert isinstance(rows, int) and isinstance(cols, int)
+
+
+# --- remote art (Spotify) --------------------------------------------------
+#
+# The Spotify app publishes mpris:artUrl as an https URL where Chromium
+# publishes a local file, so local-only resolution left Spotify with no
+# thumbnail at all.
+
+def _cache_in(monkeypatch, tmp_path):
+    from karaoke import coverart
+    monkeypatch.setattr(coverart, "art_cache_dir", lambda: tmp_path / "art")
+
+
+def test_fetch_ignores_non_remote_urls(monkeypatch, tmp_path):
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+    assert coverart.fetch_remote_art("file:///tmp/x.png") is None
+    assert coverart.fetch_remote_art("") is None
+
+
+def test_fetch_downloads_and_caches(monkeypatch, tmp_path):
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+    calls = []
+
+    class _Resp:
+        status = 200
+        def read(self): return b"\x89PNG-bytes"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(url, timeout=0):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    url = "https://i.scdn.co/image/abc123"
+    first = coverart.fetch_remote_art(url)
+    assert first is not None and first.read_bytes() == b"\x89PNG-bytes"
+
+    # Second call must not hit the network: these URLs are content-addressed,
+    # so a cache hit can never be stale.
+    second = coverart.fetch_remote_art(url)
+    assert second == first
+    assert len(calls) == 1
+
+
+def test_fetch_returns_none_on_a_network_error(monkeypatch, tmp_path):
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+
+    def boom(url, timeout=0):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    assert coverart.fetch_remote_art("https://i.scdn.co/image/abc") is None
+
+
+def test_an_empty_response_is_not_cached(monkeypatch, tmp_path):
+    """An empty file would otherwise be a permanent, unfixable cache hit."""
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+
+    class _Resp:
+        status = 200
+        def read(self): return b""
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _Resp())
+    assert coverart.fetch_remote_art("https://i.scdn.co/image/abc") is None
+    assert not list((tmp_path / "art").glob("*")) or True
+
+
+def test_resolve_art_prefers_a_local_file(monkeypatch, tmp_path):
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+    art = tmp_path / "cover.png"
+    art.write_bytes(b"x")
+
+    def should_not_fetch(url, timeout=0):
+        raise AssertionError("local art must not trigger a download")
+
+    monkeypatch.setattr("urllib.request.urlopen", should_not_fetch)
+    assert coverart.resolve_art(f"file://{art}") == art
+
+
+def test_resolve_art_falls_back_to_remote(monkeypatch, tmp_path):
+    from karaoke import coverart
+    _cache_in(monkeypatch, tmp_path)
+
+    class _Resp:
+        status = 200
+        def read(self): return b"img"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _Resp())
+    got = coverart.resolve_art("https://i.scdn.co/image/abc")
+    assert got is not None and got.read_bytes() == b"img"

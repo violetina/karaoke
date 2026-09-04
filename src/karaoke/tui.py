@@ -1408,7 +1408,7 @@ class KaraokeTui(App):
             )
 
     def _tick_lyrics(self) -> None:
-        if not (self._det.is_active and self._timeline.lines):
+        if not self._det.is_active:
             return
         # Radio mode has no MPRIS player to ask; the playhead is dead-reckoned
         # from where songrec last heard us.
@@ -1420,7 +1420,14 @@ class KaraokeTui(App):
         # ahead of audible output, so lyrics would otherwise lead the sound.
         elapsed = max(0.0, pos - self._sync_offset)
         self._elapsed = elapsed
-        self._render_synced(elapsed)
+        if self._timeline.lines:
+            self._render_synced(elapsed)      # also refreshes the visuals
+            return
+        # No synced lyrics for this track -- common in Spotify mode -- but the
+        # beat animation only needs BPM and elapsed time. Gating it on the
+        # timeline froze the rhythm bar and cartwheel while the BPM read-out
+        # beside them kept updating, which just looked broken.
+        self._render_visuals(self._current_song_row(), "", elapsed)
 
     def _render_synced(self, elapsed: float) -> None:
         tl = self._timeline
@@ -1538,7 +1545,10 @@ class KaraokeTui(App):
         """
         from . import coverart
 
-        path = coverart.art_path_from_url(playerctl.art_url(self._control_player()) or "")
+        # resolve_art, not art_path_from_url: the Spotify app publishes a
+        # remote https artUrl where Chromium publishes a local file, so
+        # local-only resolution left Spotify with no thumbnail at all.
+        path = coverart.resolve_art(playerctl.art_url(self._control_player()) or "")
         if path is not None:
             return path
         vid = localcache.extract_youtube_id(url or "")

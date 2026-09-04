@@ -1,9 +1,11 @@
 """Cover art as coloured terminal cells.
 
-The player already has the artwork: Chromium writes YouTube Music's cover to a
-local file and advertises it over MPRIS as ``mpris:artUrl``, so nothing has to
-be downloaded. When there is no art but the track's audio is in the YouTube
-cache, the first video frame stands in.
+The player usually has the artwork already: Chromium writes YouTube Music's
+cover to a local file and advertises it over MPRIS as ``mpris:artUrl``, so
+nothing has to be downloaded. The Spotify app does not — it advertises a remote
+``https://i.scdn.co/...`` URL — so remote art is fetched once into a small
+on-disk cache and used the same way. When there is no art at all but the
+track's audio is in the YouTube cache, the first video frame stands in.
 
 Decoding is delegated to ffmpeg, which is already required for downloads. That
 avoids adding an image library and, more usefully, handles whatever the source
@@ -20,6 +22,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
+
+from .logger import log
 
 # How many times taller than wide a terminal cell is. A square image needs
 # `cols / CELL_ASPECT` rows to still look square.
@@ -47,6 +51,60 @@ def art_path_from_url(art_url: str) -> Optional[Path]:
         return None                      # remote art is not fetched here
     path = Path(unquote(parsed.path or art_url))
     return path if path.is_file() else None
+
+
+# Remote art is cached here rather than re-fetched on every track change.
+def art_cache_dir() -> Path:
+    from .config import settings
+    return Path(settings.data_dir) / "art"
+
+
+def fetch_remote_art(art_url: str, *, timeout: float = 5.0) -> Optional[Path]:
+    """Download remote cover art into the cache and return its path.
+
+    The Spotify desktop app publishes ``mpris:artUrl`` as an https URL, where
+    Chromium publishes a local file, so without this Spotify simply has no
+    thumbnail.
+
+    Those URLs are content-addressed (the id *is* a hash of the image), which
+    makes the URL a perfect cache key: a hit can never be stale, so a cached
+    file is used without revalidation.
+    """
+    if not art_url.lower().startswith(("http://", "https://")):
+        return None
+    import hashlib
+    import urllib.request
+
+    name = hashlib.sha256(art_url.encode()).hexdigest()[:32]
+    dest = art_cache_dir() / name
+    if dest.is_file() and dest.stat().st_size > 0:
+        return dest
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(art_url, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
+            data = resp.read()
+    except Exception:
+        log.debug("cover art fetch failed: %s", art_url, exc_info=True)
+        return None
+    if not data:
+        return None
+    # Write then rename, so an interrupted fetch cannot leave a truncated file
+    # that would be treated as a valid cache hit forever.
+    tmp = dest.with_suffix(".part")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    except OSError:
+        log.debug("cover art cache write failed", exc_info=True)
+        return None
+    return dest
+
+
+def resolve_art(art_url: str) -> Optional[Path]:
+    """A local path for any ``mpris:artUrl``, fetching remote art if needed."""
+    return art_path_from_url(art_url) or fetch_remote_art(art_url)
 
 
 def sample(path: Path, cols: int, rows: int,
