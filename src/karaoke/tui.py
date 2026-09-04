@@ -561,6 +561,9 @@ class KaraokeTui(App):
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
+        self._mood_art = None      # rendered picture for the current mood
+        self._mood_source = ""     # 'cover' or 'generated'
+        self._mood_shown = ""      # mood the picture was rendered for
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1601,9 +1604,58 @@ class KaraokeTui(App):
 
     # -- visuals ----------------------------------------------------------
     def _update_mood(self, mood: str) -> None:
-        self.query_one("#mood-square", Static).update(
-            f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
-        )
+        """Show the mood, as a picture when one has been rendered for it.
+
+        The mood *word* stays above the image. The picture carries the feeling,
+        but it should not be the only thing naming it -- the word is what makes
+        a wrong match obviously wrong rather than merely odd, and it is the only
+        thing that still works on a terminal without colour.
+        """
+        panel = self.query_one("#mood-square", Static)
+        if mood != self._mood_shown or self._mood_art is None:
+            # A new mood needs a new picture; rendering happens off the UI
+            # thread, so fall back to the glyph block until it arrives.
+            if mood != self._mood_shown:
+                self._mood_shown = mood
+                self._refresh_mood_art(mood)
+        if self._mood_art is None:
+            panel.update(
+                f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
+            )
+            return
+        label = Text(f"{mood.upper()}  ", style="bold")
+        label.append(self._mood_source, style="dim")
+        panel.update(Text("\n").join([label, self._mood_art]))
+
+    def _refresh_mood_art(self, mood: str) -> None:
+        """Render a picture for this mood in a worker thread.
+
+        Scoring the cover pool costs a handful of ffmpeg calls, so this runs on
+        a mood change only -- never on the 0.2s lyric tick, which is what reads
+        the result.
+        """
+        def _work() -> None:
+            from . import coverart, moodframe
+            try:
+                panel = self.query_one("#mood-square", Static)
+                cols = max(0, panel.content_size.width)
+                rows = max(0, panel.content_size.height - 1)   # the mood word
+                if cols < 4 or rows < 2:
+                    return
+                analysis = self._lookup_analysis(self._current_song_row())
+                pixels, source = moodframe.image_for(mood, analysis, cols, rows)
+                if not pixels:
+                    return
+                self._mood_art = coverart.to_text(pixels)
+                self._mood_source = source
+                self.call_from_thread(self._update_mood, mood)
+            except Exception:
+                log.debug("mood art refresh failed", exc_info=True)
+
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            log.debug("mood art dispatch failed", exc_info=True)
 
     def _update_keybpm(self, song: SongMapping | None) -> None:
         panel = self.query_one("#keybpm", Static)

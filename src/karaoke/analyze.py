@@ -11,6 +11,7 @@ a single window (intro/bridge) is a coin flip. Confidence is reported honestly.
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
@@ -18,8 +19,10 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator, Optional
 
+from .logger import log
 from .musictheory import Key, parse_key
 
 # Bump when the algorithm changes so a cache of stale answers is recomputed.
@@ -257,13 +260,88 @@ def _detect_key_wav(audio_path: str, *, sample_rate: int, windows: int,
                      full_key, "essentia-edma-vote")
 
 
+def stack_available() -> bool:
+    """Whether this interpreter can run the DSP stack itself."""
+    try:
+        import essentia  # noqa: F401
+        import librosa   # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def audio_python() -> Optional[str]:
+    """An interpreter that has the DSP stack, when this one does not.
+
+    The heavy stack lives in an isolated venv on purpose (``make
+    install-audio``), but analysis imports it in-process -- so every venv that
+    wants to analyse has ended up needing a duplicate copy, and a worktree
+    whose venv lacks it fails at the point of use with nothing to suggest why.
+    Finding the audio venv and delegating to it is what makes the isolation
+    actually work.
+
+    ``KARAOKE_AUDIO_PYTHON`` overrides the search.
+    """
+    override = os.environ.get("KARAOKE_AUDIO_PYTHON")
+    if override:
+        return override if Path(override).is_file() else None
+    # src/karaoke/analyze.py -> the checkout root, which is where the Makefile
+    # puts .venv-audio. Worktrees each get their own, so this resolves per tree.
+    root = Path(__file__).resolve().parents[2]
+    candidate = root / ".venv-audio" / "bin" / "python"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _analyze_out_of_process(audio_path: str, interpreter: str) -> Optional[AudioAnalysis]:
+    """Run the analysis in the audio venv and bring the numbers back."""
+    from .musictheory import parse_key
+
+    try:
+        proc = subprocess.run(
+            [interpreter, "-m", "karaoke.analyze", "--json", audio_path],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("out-of-process analysis failed: %s", exc)
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        log.debug("out-of-process analysis returned nothing: %s",
+                  (proc.stderr or "")[-200:])
+        return None
+    try:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return AudioAnalysis(
+        key=parse_key(data["key"]) if data.get("key") else None,
+        key_confidence=float(data.get("key_confidence") or 0.0),
+        key_agreement=str(data.get("key_agreement") or "0/0"),
+        bpm=data.get("bpm"),
+        method=str(data.get("method") or "unavailable"),
+        energy=data.get("energy"),
+        brightness=data.get("brightness"),
+        version=int(data.get("version") or 0),
+    )
+
+
 def analyze_audio(audio_path: str) -> AudioAnalysis:
     """Full local analysis: key (voted) + tempo + energy. Degrades gracefully.
 
     Transcodes once to WAV (when needed) and reuses it for the essentia key
     detection and all librosa features, so webm/opus downloads analyze without
     repeated ffmpeg round-trips.
+
+    When this interpreter lacks the DSP stack, the work is handed to the audio
+    venv rather than reported as unavailable -- see :func:`audio_python`.
     """
+    if not stack_available():
+        interpreter = audio_python()
+        if interpreter:
+            result = _analyze_out_of_process(audio_path, interpreter)
+            if result is not None:
+                return result
+
     with _as_wav(audio_path) as path:
         if path is None:
             return AudioAnalysis(None, 0.0, "0/0", None, "unavailable")
@@ -278,3 +356,33 @@ def analyze_audio(audio_path: str) -> AudioAnalysis:
         energy=feats.get("energy"),
         brightness=feats.get("brightness"),
     )
+
+
+def _json_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
+    """``python -m karaoke.analyze --json FILE`` -- the out-of-process entry.
+
+    Prints one JSON object so the calling interpreter can rebuild the result
+    without importing anything heavy.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="karaoke.analyze")
+    ap.add_argument("--json", dest="path", required=True)
+    args = ap.parse_args(argv)
+
+    result = analyze_audio(args.path)
+    print(json.dumps({
+        "key": result.key.name if result.key else None,
+        "key_confidence": result.key_confidence,
+        "key_agreement": result.key_agreement,
+        "bpm": result.bpm,
+        "method": result.method,
+        "energy": result.energy,
+        "brightness": result.brightness,
+        "version": result.version,
+    }))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_json_main())

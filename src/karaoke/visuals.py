@@ -136,19 +136,55 @@ def sentiment_bars(profile: SentimentProfile, width: int = 12) -> str:
     return "\n".join(lines)
 
 
-def rhythm_bar(bpm: float | None, elapsed: float = 0.0, width: int = 16) -> str:
-    """A tiny animated rhythm indicator driven by BPM and elapsed time.
+# How much of each beat the pulse spends in the air. Short: the hop should read
+# as a strike on the beat, not as hovering between them.
+HOP_FRACTION = 0.35
 
-    Returns a bar with a moving pulse whose position advances one beat at a
-    time. With no BPM, returns a static dashed bar.
+# Beats per traverse of the bar. Two gives a visible sweep at ordinary tempos
+# without the pulse becoming a blur at fast ones.
+BOUNCE_BEATS = 2.0
+
+# Beats for the cartwheel to cross the panel. Slower than the bar's sweep: the
+# figure is seven cells wide and a fast traverse turns it into a smear.
+CARTWHEEL_BEATS = 4.0
+
+
+def rhythm_bar(bpm: float | None, elapsed: float = 0.0, width: int = 16) -> str:
+    """An animated rhythm indicator driven by BPM and elapsed time.
+
+    Two rows. The pulse travels left and right and **reverses at each end**
+    rather than wrapping: a sawtooth that teleports back to the start reads as
+    drift, and the eye follows the jump rather than the beat.
+
+    On each beat the pulse is drawn on the upper row and lands on the lower one
+    between beats. The horizontal travel alone is what a metronome does not
+    have; the hop is what actually marks time.
+
+    Depends only on ``elapsed``, so the same instant always renders identically
+    and the caller's timer interval cannot introduce jitter.
+
+    With no BPM there is no beat to keep, so it stays a single static bar.
     """
     if not bpm or bpm <= 0:
         return "‑" * width + "  (bpm ?)"
+    if width < 1:
+        return f"  {bpm:.0f} bpm"
+
     beat = 60.0 / bpm
-    pos = int((elapsed / beat) % width) if beat > 0 else 0
-    cells = ["·"] * width
-    cells[pos] = "●"
-    return "".join(cells) + f"  {bpm:.0f} bpm"
+    beats = elapsed / beat
+
+    # Triangle wave over BOUNCE_BEATS: 0 -> 1 -> 0, so the pulse turns around at
+    # the ends instead of jumping back to the start.
+    phase = (beats / BOUNCE_BEATS) % 2.0
+    travel = phase if phase <= 1.0 else 2.0 - phase
+    pos = min(width - 1, int(travel * (width - 1) + 0.5))
+
+    airborne = (beats % 1.0) < HOP_FRACTION
+    upper = ["·"] * width
+    lower = ["·"] * width
+    (upper if airborne else lower)[pos] = "●"
+    return ("".join(upper) + "\n"
+            + "".join(lower) + f"  {bpm:.0f} bpm")
 
 
 def tempo_word(bpm: float | None) -> str:
@@ -220,32 +256,49 @@ _CARTWHEEL_FRAMES = [
 
 
 def cartwheel_frame(bpm: float | None, elapsed: float, max_width: int = 24) -> str:
-    """Return an animated ASCII art cartwheel frame driven by the beat.
+    """An ASCII cartwheel that rolls with the beat.
 
-    The figure rolls from left to right over a 4-beat cycle.
+    Like :func:`rhythm_bar`, the figure **turns back** at each end rather than
+    teleporting to the start, and it **hops on the beat**: it sits a row higher
+    for the first part of each beat and lands for the rest. A figure that only
+    slides across reads as drift; the landing is what marks time.
+
+    The rotation reverses with the travel, because a wheel rolling leftwards
+    does not keep spinning clockwise. Without that the figure looks like it is
+    being dragged backwards rather than rolling.
+
+    Total height is constant, so the panel below never shifts as it hops.
     """
     if not bpm or bpm <= 0:
         bpm = 120.0  # default to a nice 120 BPM tempo
-    
+
     beat_duration = 60.0 / bpm
     if beat_duration <= 0:
         beat_duration = 0.5
-    
-    # Progress through a single beat (drives the 9-frame cartwheel rotation)
-    progress = (elapsed % beat_duration) / beat_duration
-    frame_idx = int(progress * len(_CARTWHEEL_FRAMES)) % len(_CARTWHEEL_FRAMES)
-    
-    # Progress through a 4-beat cycle (drives the left-to-right travel)
-    cycle_duration = 4.0 * beat_duration
-    cycle_progress = (elapsed % cycle_duration) / cycle_duration
-    
-    # Calculate horizontal displacement (padding)
-    # The figure itself is 7 chars wide. With max_width=24, max padding is 24 - 7 = 17.
+
+    beats = elapsed / beat_duration
+    within_beat = beats % 1.0
+
+    # Triangle over CARTWHEEL_BEATS: out and back, reversing at the ends.
+    phase = (beats / CARTWHEEL_BEATS) % 2.0
+    forward = phase <= 1.0
+    travel = phase if forward else 2.0 - phase
+
+    # One full rotation per beat, spinning the way it is travelling.
+    index = int(within_beat * len(_CARTWHEEL_FRAMES))
+    if not forward:
+        index = len(_CARTWHEEL_FRAMES) - 1 - index
+    frame = _CARTWHEEL_FRAMES[index % len(_CARTWHEEL_FRAMES)]
+
     figure_width = 7
     max_padding = max(0, max_width - figure_width)
-    padding_size = int(cycle_progress * max_padding)
-    padding = " " * padding_size
-    
-    # Prepend padding to each line of the selected frame
-    lines = [padding + line for line in _CARTWHEEL_FRAMES[frame_idx]]
+    padding = " " * int(travel * max_padding)
+
+    lines = [padding + line for line in frame]
+    # Airborne on the beat, landed between. The blank row moves from below to
+    # above so the block keeps its height and nothing below it jumps.
+    if within_beat < HOP_FRACTION:
+        lines = lines + [""]
+    else:
+        lines = [""] + lines
     return "\n".join(lines)

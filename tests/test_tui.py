@@ -876,3 +876,62 @@ def test_nothing_ticks_without_a_position(monkeypatch):
     monkeypatch.setattr(playerctl, "position", lambda p="": None)
     app._tick_lyrics()
     assert rendered == []
+
+
+# --- mood art --------------------------------------------------------------
+
+def _mood_app(monkeypatch, *, art=None, source="", shown=""):
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._mood_art = art
+    app._mood_source = source
+    app._mood_shown = shown
+    updates = []
+
+    class _Panel:
+        def update(self, value):
+            updates.append(value)
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **kw: _Panel(), raising=False)
+    monkeypatch.setattr(app, "_refresh_mood_art",
+                        lambda mood: updates.append(("refresh", mood)),
+                        raising=False)
+    return app, updates
+
+
+def test_mood_falls_back_to_the_glyph_block_before_art_arrives(monkeypatch):
+    """Rendering happens off the UI thread; the panel must not be blank meanwhile."""
+    app, updates = _mood_app(monkeypatch)
+    app._update_mood("happy")
+    assert ("refresh", "happy") in updates
+    assert any("HAPPY" in str(u) for u in updates if not isinstance(u, tuple))
+
+
+def test_a_new_mood_triggers_a_rerender(monkeypatch):
+    app, updates = _mood_app(monkeypatch, shown="sad")
+    app._update_mood("angry")
+    assert ("refresh", "angry") in updates
+    assert app._mood_shown == "angry"
+
+
+def test_the_same_mood_does_not_rerender(monkeypatch):
+    """Scoring the pool costs ffmpeg calls; it must not run on every tick."""
+    from rich.text import Text
+
+    app, updates = _mood_app(monkeypatch, art=Text("x"), source="cover",
+                             shown="happy")
+    app._update_mood("happy")
+    assert not any(isinstance(u, tuple) for u in updates)
+
+
+def test_the_mood_word_survives_alongside_the_picture(monkeypatch):
+    """The word is what makes a wrong match obviously wrong."""
+    from rich.text import Text
+
+    app, updates = _mood_app(monkeypatch, art=Text("art"), source="generated",
+                             shown="tender")
+    app._update_mood("tender")
+    rendered = str(updates[-1])
+    assert "TENDER" in rendered
+    assert "generated" in rendered      # provenance is stated, not implied
