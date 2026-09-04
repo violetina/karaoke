@@ -306,6 +306,40 @@ def stop(recording_id: int) -> None:
     log.info("recording %d stopped", recording_id)
 
 
+def reconcile_stale(conn: Optional[object] = None) -> list[int]:
+    """Close out rows left at 'recording' by a process that did not exit cleanly.
+
+    A session only lives in the process that started it, so a row still marked
+    'recording' with nothing running is a crash or a kill -- not a live capture.
+    Leaving it makes the listing lie about what is happening, and hides the fact
+    that its audio is complete and analysable.
+
+    Returns the ids that were closed out.
+    """
+    own = conn is None
+    c = conn or localcache.connect()
+    try:
+        rows = c.execute(
+            "SELECT recording_id FROM recordings WHERE status = 'recording'"
+        ).fetchall()
+        running = set(active_sessions())
+        stale = [int(r["recording_id"]) for r in rows
+                 if int(r["recording_id"]) not in running]
+        for recording_id in stale:
+            c.execute(
+                "UPDATE recordings SET status = 'complete', ended_at = ?,"
+                " note = COALESCE(note, 'closed out: capture was not running')"
+                " WHERE recording_id = ?",
+                (time.time(), recording_id))
+        if stale:
+            c.commit()
+            log.info("closed out %d stale recording(s): %s", len(stale), stale)
+        return stale
+    finally:
+        if own:
+            c.close()
+
+
 def stop_all() -> None:
     """Stop every running session — used when the app exits."""
     for recording_id in active_sessions():

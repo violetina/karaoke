@@ -67,7 +67,9 @@ def test_recording_span_of_nothing_is_none():
 def test_segment_files_reads_the_wall_clock_from_the_name(tmp_path, monkeypatch):
     """Capture names each file for when it was opened, which is the timeline."""
     (tmp_path / "seg-20260904-210303.flac").write_bytes(b"x")
-    monkeypatch.setattr(rw, "probe_duration", lambda p: 600.0)
+    # A lone file is also the *final* file, which is measured by decoding: its
+    # header carries the whole session's length rather than its own.
+    monkeypatch.setattr(rw, "decoded_duration", lambda p: 600.0)
     files = rw.segment_files(tmp_path)
     assert len(files) == 1
     import time
@@ -76,11 +78,37 @@ def test_segment_files_reads_the_wall_clock_from_the_name(tmp_path, monkeypatch)
     assert files[0].end_wall == expected + 600.0
 
 
-def test_unreadable_segments_are_skipped(tmp_path, monkeypatch):
+def test_an_unmeasurable_final_segment_is_skipped(tmp_path, monkeypatch):
     """Usually the file being written when the process died."""
     (tmp_path / "seg-20260904-210303.flac").write_bytes(b"x")
-    monkeypatch.setattr(rw, "probe_duration", lambda p: None)
+    monkeypatch.setattr(rw, "decoded_duration", lambda p: None)
     assert rw.segment_files(tmp_path) == []
+
+
+def test_durations_come_from_the_next_segments_start(tmp_path, monkeypatch):
+    """The FLAC segment muxer writes no duration header.
+
+    Every finished segment reports N/A and the last reports the whole session,
+    so 11 of 12 files were dropped and the 12th stretched the span by hours.
+    Consecutive start times give the answer exactly, for free.
+    """
+    for name in ("seg-20260904-210000.flac", "seg-20260904-211000.flac",
+                 "seg-20260904-212000.flac"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(rw, "decoded_duration", lambda p: 300.0)
+    monkeypatch.setattr(rw, "probe_duration",
+                        lambda p: pytest.fail("must not probe a mid-session file"))
+    files = rw.segment_files(tmp_path)
+    assert [f.duration for f in files] == [600.0, 600.0, 300.0]
+    assert rw.recording_span(files)[1] - rw.recording_span(files)[0] == 1500.0
+
+
+def test_a_wildly_long_final_segment_is_capped(tmp_path, monkeypatch):
+    """The bogus header measured 7004s for a 405s segment."""
+    (tmp_path / "seg-20260904-210000.flac").write_bytes(b"x")
+    monkeypatch.setattr(rw, "decoded_duration", lambda p: 7004.8)
+    files = rw.segment_files(tmp_path)
+    assert files[0].duration == rw.SEGMENT_SECONDS * 1.5
 
 
 def test_unrelated_files_are_ignored(tmp_path, monkeypatch):

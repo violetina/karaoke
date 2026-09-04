@@ -257,3 +257,60 @@ def test_session_source_and_elapsed_are_none_when_not_running():
     assert recorder.session_source(9999) is None
     assert recorder.elapsed(9999) is None
     assert recorder.session_directory(9999) is None
+
+
+# --- surviving an unclean exit ---------------------------------------------
+
+def test_reconcile_closes_a_row_left_recording(db):
+    """The orphan case: ffmpeg outlived the TUI, the row never closed.
+
+    Observed live -- a capture ran unparented for 1h51m while a second TUI
+    started another on the same source.
+    """
+    with localcache.connect() as c:
+        c.execute("INSERT INTO recordings (recording_id, started_at, source, dir,"
+                  " status) VALUES (7, 1000.0, 'x.monitor', '/tmp/x', 'recording')")
+        c.commit()
+
+    assert recorder.reconcile_stale() == [7]
+
+    with localcache.connect() as c:
+        row = c.execute("SELECT status, ended_at, note FROM recordings"
+                        " WHERE recording_id = 7").fetchone()
+    assert row["status"] == "complete"
+    assert row["ended_at"] is not None
+    assert "not running" in (row["note"] or "")
+
+
+def test_reconcile_leaves_a_genuinely_running_session_alone(db, monkeypatch):
+    """Only rows with no live session are stale."""
+    with localcache.connect() as c:
+        c.execute("INSERT INTO recordings (recording_id, started_at, source, dir,"
+                  " status) VALUES (8, 1000.0, 'x.monitor', '/tmp/x', 'recording')")
+        c.commit()
+    monkeypatch.setattr(recorder, "active_sessions", lambda: [8])
+    assert recorder.reconcile_stale() == []
+
+
+def test_reconcile_ignores_finished_recordings(db):
+    with localcache.connect() as c:
+        c.execute("INSERT INTO recordings (recording_id, started_at, source, dir,"
+                  " status) VALUES (9, 1000.0, 'x', '/tmp/x', 'analysed')")
+        c.commit()
+    assert recorder.reconcile_stale() == []
+
+
+def test_the_tui_stops_recordings_on_exit():
+    """Without this the ffmpeg child outlives the app and is never closed out."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    called = []
+    import karaoke.recorder as r
+    original = r.stop_all
+    r.stop_all = lambda: called.append(True)
+    try:
+        app.on_unmount()
+    finally:
+        r.stop_all = original
+    assert called == [True]

@@ -35,6 +35,7 @@ from typing import Optional
 
 from . import localcache
 from .logger import log
+from .recorder import SEGMENT_SECONDS
 from .recording_slice import Segment, is_confident, segments
 
 # Marks the analysis as recording-derived, so it is never mistaken for one done
@@ -62,15 +63,40 @@ class SegmentFile:
 
 
 def probe_duration(path: Path) -> Optional[float]:
-    """Length of an audio file in seconds, via ffprobe."""
+    """Length of an audio file in seconds.
+
+    ffprobe's ``format=duration`` is not usable on its own here: the segment
+    muxer streams FLAC without seeking back to patch the header, so every
+    finished segment reports ``N/A`` and the final one reports the *session*
+    length rather than its own. Falling back to decoding is slow but exact, and
+    only ever needed for one file per recording — see :func:`segment_files`.
+    """
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", str(path)],
             capture_output=True, text=True, timeout=30, check=True).stdout.strip()
-        return float(out) if out else None
+        if out and out.upper() != "N/A":
+            return float(out)
     except (subprocess.SubprocessError, FileNotFoundError, ValueError):
         return None
+    return decoded_duration(path)
+
+
+def decoded_duration(path: Path) -> Optional[float]:
+    """Exact length, by decoding. Used when the header carries no duration."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-stats", "-i", str(path), "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    # -stats writes "time=HH:MM:SS.ms" progress to stderr; the last one is the end.
+    matches = re.findall(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)", proc.stderr or "")
+    if not matches:
+        return None
+    hours, minutes, seconds = matches[-1]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def segment_files(directory: Path) -> list[SegmentFile]:
@@ -80,7 +106,7 @@ def segment_files(directory: Path) -> list[SegmentFile]:
     is what lets the audio be located from a marker with no extra bookkeeping and
     with no dependence on the recorder still running.
     """
-    found: list[SegmentFile] = []
+    starts: list[tuple[float, Path]] = []
     for path in sorted(directory.glob("seg-*.flac")):
         match = _SEG_NAME.search(path.name)
         if not match:
@@ -90,12 +116,33 @@ def segment_files(directory: Path) -> list[SegmentFile]:
                                               "%Y%m%d%H%M%S"))
         except ValueError:
             continue
-        duration = probe_duration(path)
-        if duration is None:
-            # An unreadable file is usually the one being written when the
-            # process died; skipping it is better than guessing its length.
-            log.debug("skipping unreadable segment %s", path)
-            continue
+        starts.append((stamp, path))
+    if not starts:
+        return []
+    starts.sort()
+
+    # Each segment runs until the next one begins. That is exact, costs nothing,
+    # and sidesteps the missing duration headers entirely -- only the final
+    # segment has no successor and has to be measured.
+    found: list[SegmentFile] = []
+    for i, (stamp, path) in enumerate(starts):
+        if i + 1 < len(starts):
+            duration = starts[i + 1][0] - stamp
+        else:
+            # Decoded, not probed: the final segment's header carries the whole
+            # session's length rather than its own, so it is wrong without
+            # being N/A and would silently stretch the span by hours.
+            duration = decoded_duration(path) or 0.0
+            # A segment cannot outlast the muxer's own cut point; anything
+            # longer means the measurement is wrong, not the recording.
+            ceiling = SEGMENT_SECONDS * 1.5
+            if duration > ceiling:
+                log.warning("final segment %s measured %.0fs; capping at %.0fs",
+                            path.name, duration, ceiling)
+                duration = ceiling
+            if duration <= 0:
+                log.debug("could not measure final segment %s", path)
+                continue
         found.append(SegmentFile(path=path, start_wall=stamp, duration=duration))
     return found
 

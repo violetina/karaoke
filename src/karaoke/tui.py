@@ -610,6 +610,13 @@ class KaraokeTui(App):
         self.set_interval(3.0, self._refresh_worker_load)
         self.set_interval(1.0, self._refresh_record_status)
         self.apply_size_classes(self.size.width, self.size.height)
+        # A row still marked 'recording' with nothing running is a crash, not a
+        # live capture. Close it out so the listing does not lie and its audio
+        # becomes analysable.
+        try:
+            recorder.reconcile_stale()
+        except Exception:
+            log.debug("reconciling stale recordings failed", exc_info=True)
         self._poll_detection()
         self._refresh_worker_load()
 
@@ -991,6 +998,20 @@ class KaraokeTui(App):
         self.call_from_thread(self.notify, f"{artist} - {title}: {key}, {bpm} BPM")
         # The analysis panel reads from the DB, so refresh it now the row exists.
         self.call_from_thread(self._refresh_track_info, None)
+
+    def on_unmount(self) -> None:
+        """Stop any capture when the app exits.
+
+        Without this the ffmpeg child outlives the TUI: it keeps writing audio
+        with nothing supervising it, its `recordings` row stays 'recording'
+        forever, and the next TUI -- seeing no session of its own -- starts a
+        second recorder on the same source. Observed in the wild: a capture
+        orphaned for 1h51m alongside a live one.
+        """
+        try:
+            recorder.stop_all()
+        except Exception:
+            log.debug("stopping recordings on exit failed", exc_info=True)
 
     def action_toggle_record(self) -> None:
         """`O`: record the output continuously, marking what plays on it.
