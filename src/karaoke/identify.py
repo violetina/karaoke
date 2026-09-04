@@ -58,16 +58,18 @@ def _default_source(mic: bool) -> Optional[str]:
     """Resolve the pactl source name: mic (default) or output monitor."""
     if not shutil.which("pactl"):
         return None
+    if not mic:
+        # Deliberately not `pactl get-default-sink`: with a Bluetooth speaker
+        # paired alongside built-in output, the default sink is regularly not
+        # where the music is routed, and listening to the wrong monitor records
+        # silence. sample_audio picks the sink actually carrying a stream.
+        from .sample_audio import monitor_source
+        return monitor_source() or None
     try:
-        if mic:
-            out = subprocess.run(["pactl", "get-default-source"],
-                                 capture_output=True, text=True, timeout=5)
-            name = out.stdout.strip()
-            return name or None
-        out = subprocess.run(["pactl", "get-default-sink"],
+        out = subprocess.run(["pactl", "get-default-source"],
                              capture_output=True, text=True, timeout=5)
-        sink = out.stdout.strip()
-        return f"{sink}.monitor" if sink else None
+        name = out.stdout.strip()
+        return name or None
     except (subprocess.SubprocessError, OSError):
         return None
 
@@ -102,7 +104,8 @@ def robust_offset(matches: list[dict]) -> Optional[float]:
     return float(statistics.median(best))
 
 
-def identify_live(mic: bool = True, timeout: int = 30) -> Optional[SongRef]:
+def identify_live(mic: bool = True, timeout: int = 30,
+                  source: str = "") -> Optional[SongRef]:
     """Listen and identify the currently playing song via songrec.
 
     mic=True listens to the microphone (room audio); mic=False uses the
@@ -112,7 +115,9 @@ def identify_live(mic: bool = True, timeout: int = 30) -> Optional[SongRef]:
     """
     if not shutil.which("songrec"):
         raise RuntimeError("songrec not installed (emerge media-sound/songrec)")
-    src = _default_source(mic)
+    # An explicit source wins: a caller already recording a specific monitor
+    # must identify against that same one, not whatever the default resolves to.
+    src = source or _default_source(mic)
     cmd = ["songrec", "recognize", "-j"]
     if src:
         cmd = ["songrec", "recognize", "-d", src, "-j"]

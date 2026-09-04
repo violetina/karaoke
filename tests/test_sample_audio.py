@@ -160,7 +160,7 @@ def test_sampled_analyses_are_marked_as_such(monkeypatch, tmp_path):
 def test_analyse_without_a_track_does_not_store(monkeypatch, tmp_path):
     class FakeResult:
         key = None
-        bpm = None
+        bpm = 120.0          # a real result, so it is not "unavailable"
 
     monkeypatch.setattr("karaoke.analyze.analyze_audio", lambda p: FakeResult())
     sample = sample_audio.Sample(path=tmp_path / "s.wav", seconds=45.0, source="x")
@@ -201,3 +201,46 @@ def test_sample_key_refuses_to_start_twice():
     app.notify = lambda msg, **kw: notes.append(msg)
     app.action_sample_key()
     assert "Already sampling" in notes[0]
+
+
+def test_an_unavailable_analysis_is_not_stored(monkeypatch, tmp_path):
+    """analyze_audio degrades to method="unavailable" rather than raising.
+
+    Storing that writes a row with a NULL key and BPM that looks analysed and
+    is then skipped by every "needs analysis" query -- worse than no row.
+    """
+    class Unavailable:
+        key = None
+        bpm = None
+        method = "unavailable"
+
+    monkeypatch.setattr("karaoke.analyze.analyze_audio", lambda p: Unavailable())
+    sample = sample_audio.Sample(path=tmp_path / "s.wav", seconds=45.0, source="x")
+    with pytest.raises(sample_audio.AnalysisUnavailable, match="install-audio"):
+        sample_audio.analyse_sample(sample, "A", "B")
+
+
+def test_a_partial_analysis_is_still_stored(monkeypatch, tmp_path):
+    """librosa without essentia gives a real BPM and no key; keep the BPM."""
+    from karaoke import localcache
+
+    class PartialResult:
+        key = None
+        key_confidence = 0.0
+        key_agreement = ""
+        bpm = 129.2
+        method = "unavailable"
+        energy = None
+        brightness = None
+        version = 1
+
+    conn = localcache.connect(tmp_path / "t.db")
+    monkeypatch.setattr("karaoke.analyze.analyze_audio", lambda p: PartialResult())
+    sample = sample_audio.Sample(path=tmp_path / "s.wav", seconds=45.0, source="x")
+    try:
+        sample_audio.analyse_sample(sample, "A", "B", conn=conn)
+        tid = localcache.find_track_id("A", "B", conn)
+        from karaoke import track_analysis
+        assert track_analysis.get_analysis(tid, conn).bpm == 129.2
+    finally:
+        conn.close()

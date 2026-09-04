@@ -63,6 +63,36 @@ CREATE TABLE IF NOT EXISTS lyric_gaps (
     UNIQUE(artist, title)
 );
 
+CREATE TABLE IF NOT EXISTS recordings (
+    recording_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   REAL NOT NULL,
+    ended_at     REAL,
+    source       TEXT NOT NULL,
+    dir          TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'recording',
+                 -- recording | complete | analysed | discarded | failed
+    keep_audio   INTEGER NOT NULL DEFAULT 0,
+    note         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS recording_marks (
+    mark_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id INTEGER NOT NULL,
+    at_wall      REAL NOT NULL,   -- when the identification landed
+    at_mono      REAL,            -- monotonic pair, so clock drift is measurable
+    at_offset    REAL,            -- position within the track, per songrec
+    artist       TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    -- Failed identifications are stored rather than dropped: a gap in the marks
+    -- is evidence about the recording (silence, speech, an unknown track), and
+    -- discarding it makes the timeline look continuous when it is not.
+    ok           INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY(recording_id) REFERENCES recordings(recording_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recording_marks_rec
+    ON recording_marks (recording_id, at_wall);
+
 CREATE TABLE IF NOT EXISTS spotify_lookups (
     track_id   INTEGER PRIMARY KEY,
     -- NULL means Spotify was asked and had no match. That is a real result and
@@ -170,6 +200,35 @@ def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
 # transient failure deserves one retry; more than that and we are just spending
 # quota on a song Spotify does not have.
 SPOTIFY_LOOKUP_ATTEMPTS = 2
+
+
+def ensure_recording_tables(conn: sqlite3.Connection) -> None:
+    """Create the record-mode tables in databases predating them."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS recordings (
+            recording_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at   REAL NOT NULL,
+            ended_at     REAL,
+            source       TEXT NOT NULL,
+            dir          TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'recording',
+            keep_audio   INTEGER NOT NULL DEFAULT 0,
+            note         TEXT
+        );
+        CREATE TABLE IF NOT EXISTS recording_marks (
+            mark_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            recording_id INTEGER NOT NULL,
+            at_wall      REAL NOT NULL,
+            at_mono      REAL,
+            at_offset    REAL,
+            artist       TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL DEFAULT '',
+            ok           INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_recording_marks_rec
+            ON recording_marks (recording_id, at_wall);
+    """)
+    conn.commit()
 
 
 def ensure_spotify_lookup_table(conn: sqlite3.Connection) -> None:
@@ -302,6 +361,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_gap_columns(conn)
     ensure_sync_offset_columns(conn)
     ensure_spotify_lookup_table(conn)
+    ensure_recording_tables(conn)
     return conn
 
 

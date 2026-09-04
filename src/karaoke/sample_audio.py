@@ -47,6 +47,14 @@ class CaptureError(RuntimeError):
     """Raised when audio could not be captured."""
 
 
+class AnalysisUnavailable(RuntimeError):
+    """Raised when the audio analysis stack is not installed.
+
+    Distinct from a failed analysis: the audio is fine, this interpreter simply
+    cannot examine it.
+    """
+
+
 @dataclass(frozen=True)
 class Sample:
     """A captured excerpt and where it came from."""
@@ -144,6 +152,13 @@ def analyse_sample(sample: Sample, artist: str = "", title: str = "",
     from .analyze import analyze_audio
 
     result = analyze_audio(str(sample.path))
+    # analyze_audio degrades to method="unavailable" when librosa/essentia are
+    # missing rather than raising. Storing that would write a row with a NULL
+    # key and BPM that looks analysed, and would then be skipped by every
+    # "needs analysis" query -- worse than no row at all.
+    if result.key is None and result.bpm is None:
+        raise AnalysisUnavailable(
+            "audio analysis stack not installed (make install-audio)")
     if not (artist and title):
         return result
 

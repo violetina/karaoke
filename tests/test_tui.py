@@ -813,3 +813,66 @@ def test_load_spotify_returns_only_spotify_sourced_rows(tmp_path):
     assert [r["title"] for r in app._song_data] == ["Has Both"]
     assert app._song_data[0]["kind"] == "spotify"
     assert app._song_data[0]["url"] == "spotify:track:abc"
+
+
+# --- the beat animation runs without lyrics --------------------------------
+
+def _ticking_app(monkeypatch, *, lines):
+    """A KaraokeTui wired just enough to run _tick_lyrics."""
+    from karaoke import detect, playerctl
+    from karaoke.player import LyricTimeline
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._det = detect.Detection(mode="spotify", player="spotify",
+                                artist="A", title="B")
+    app._timeline = LyricTimeline(lines=lines)
+    app._sync_offset = 0.0
+    app._elapsed = 0.0
+    app._sync_mood = "neutral"
+    monkeypatch.setattr(app, "_control_player", lambda: "spotify", raising=False)
+    monkeypatch.setattr(playerctl, "position", lambda p="": 42.0)
+    rendered = []
+    monkeypatch.setattr(app, "_render_visuals",
+                        lambda song, preview, elapsed: rendered.append(elapsed),
+                        raising=False)
+    monkeypatch.setattr(app, "_render_synced",
+                        lambda e: rendered.append(("synced", e)), raising=False)
+    return app, rendered
+
+
+def test_visuals_tick_without_synced_lyrics(monkeypatch):
+    """The regression: the rhythm bar froze whenever a track had no lyrics.
+
+    It only needs BPM and elapsed time, but it was gated on the timeline, so in
+    Spotify mode the BPM read-out kept updating beside a motionless animation.
+    """
+    app, rendered = _ticking_app(monkeypatch, lines=[])
+    app._tick_lyrics()
+    assert rendered == [42.0]
+    assert app._elapsed == 42.0
+
+
+def test_synced_lyrics_still_drive_the_visuals(monkeypatch):
+    """With a timeline, _render_synced runs and refreshes the visuals itself."""
+    app, rendered = _ticking_app(monkeypatch, lines=[(0.0, "hello")])
+    app._tick_lyrics()
+    assert rendered == [("synced", 42.0)]
+
+
+def test_nothing_ticks_when_no_player_is_active(monkeypatch):
+    from karaoke import detect
+
+    app, rendered = _ticking_app(monkeypatch, lines=[])
+    app._det = detect.Detection(mode="browse")
+    app._tick_lyrics()
+    assert rendered == []
+
+
+def test_nothing_ticks_without_a_position(monkeypatch):
+    from karaoke import playerctl
+
+    app, rendered = _ticking_app(monkeypatch, lines=[])
+    monkeypatch.setattr(playerctl, "position", lambda p="": None)
+    app._tick_lyrics()
+    assert rendered == []

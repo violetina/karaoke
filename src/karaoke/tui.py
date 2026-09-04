@@ -42,8 +42,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
 
-from . import (detect, localcache, playerctl, sample_audio, staging,
-               track_analysis, visuals)
+from . import (detect, localcache, playerctl, recorder, sample_audio,
+               staging, track_analysis, visuals)
 from .browse import open_song_url
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
@@ -158,6 +158,49 @@ def track_info(*, source: str = "", duration: float | None = None,
         return ""
     width = max(len(label) for label, _ in rows) + 2
     return "\n".join(f"{label:<{width}s}{value}" for label, value in rows)
+
+
+def short_source(name: str, width: int = 26) -> str:
+    """Shorten a PipeWire source name while keeping both informative ends.
+
+    These run long — "bluez_output.1C_5E_82_70_03_6F.1.monitor" — and the two
+    ends are what identify it: the device kind at the front and ".monitor" (as
+    opposed to a microphone) at the back. A plain truncation would drop exactly
+    the part that says whether the right thing is being recorded.
+    """
+    name = (name or "").strip()
+    if len(name) <= width:
+        return name
+    tail = ".monitor" if name.endswith(".monitor") else name[-8:]
+    head = name[:max(1, width - len(tail) - 1)]
+    return f"{head}…{tail}"
+
+
+def record_panel(*, recording_id: int, elapsed_s: float = 0.0,
+                 marks_ok: int = 0, marks_total: int = 0,
+                 size_bytes: int = 0, source: str = "",
+                 blink: bool = True) -> str:
+    """The recording indicator for the sidebar.
+
+    ASCII labels in a fixed column, like track_info, so nothing shifts as the
+    numbers change. The dot alternates on each refresh: a still display gives
+    no sign that capture is actually alive, and this is the one panel where
+    that distinction matters.
+    """
+    dot = "●" if blink else "○"
+    mins, secs = divmod(int(max(0.0, elapsed_s)), 60)
+    hours, mins = divmod(mins, 60)
+    clock = (f"{hours}:{mins:02d}:{secs:02d}" if hours
+             else f"{mins:02d}:{secs:02d}")
+    rows = [
+        ("marks", f"{marks_ok}/{marks_total}"),
+        ("size", f"{size_bytes / 1e6:.0f} MB"),
+    ]
+    if source:
+        rows.append(("src", short_source(source)))
+    width = max(len(label) for label, _ in rows) + 2
+    body = "\n".join(f"{label:<{width}s}{value}" for label, value in rows)
+    return f"{dot} REC {recording_id}  {clock}\n{body}"
 
 
 def binding_rows(bindings, *, key_display=None) -> list[tuple[str, str]]:
@@ -412,6 +455,11 @@ class KaraokeTui(App):
     }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
+    /* Recording indicator. Hidden entirely when idle rather than shown empty,
+       so the sidebar layout is unchanged until it matters. */
+    #record-panel { display: none; height: auto; border: round red;
+                    padding: 0 1; margin-top: 1; color: $error; }
+    #record-panel.-on { display: block; }
     #worker-panel { height: auto; border: round cyan; padding: 0 1;
                     margin-top: 1; }
     /* Takes the rest of the column so the reserved space is visibly held. */
@@ -459,6 +507,7 @@ class KaraokeTui(App):
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
+        ("O", "toggle_record", "Record"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
         ("T", "stats", "Stats"),
@@ -506,6 +555,9 @@ class KaraokeTui(App):
         # single failure cannot become a lookup storm across a listening session.
         self._spotify_off = False
         self._sampling = False     # a capture is running (real time)
+        self._recording_id: int | None = None
+        self._record_tick = 0
+        self._record_marks: tuple[int, int] | None = None
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
@@ -522,6 +574,8 @@ class KaraokeTui(App):
                 yield Static("", id="beat-art")
                 yield Static("", id="track-info")
                 yield Static("workers  —", id="worker-panel")
+                # Empty and hidden until recording, so it costs no space.
+                yield Static("", id="record-panel")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
@@ -554,7 +608,15 @@ class KaraokeTui(App):
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
+        self.set_interval(1.0, self._refresh_record_status)
         self.apply_size_classes(self.size.width, self.size.height)
+        # A row still marked 'recording' with nothing running is a crash, not a
+        # live capture. Close it out so the listing does not lie and its audio
+        # becomes analysable.
+        try:
+            recorder.reconcile_stale()
+        except Exception:
+            log.debug("reconciling stale recordings failed", exc_info=True)
         self._poll_detection()
         self._refresh_worker_load()
 
@@ -917,6 +979,12 @@ class KaraokeTui(App):
             self.call_from_thread(self.notify, f"Sample failed: {exc}",
                                   severity="error")
             return
+        except sample_audio.AnalysisUnavailable as exc:
+            # The recording worked; this interpreter just cannot analyse it.
+            # Say so plainly rather than reporting an unknown key.
+            log.warning("sample not analysed: %s", exc)
+            self.call_from_thread(self.notify, str(exc), severity="warning")
+            return
         except Exception as exc:
             log.exception("sample analysis failed")
             self.call_from_thread(self.notify, f"Analysis failed: {exc}",
@@ -930,6 +998,81 @@ class KaraokeTui(App):
         self.call_from_thread(self.notify, f"{artist} - {title}: {key}, {bpm} BPM")
         # The analysis panel reads from the DB, so refresh it now the row exists.
         self.call_from_thread(self._refresh_track_info, None)
+
+    def on_unmount(self) -> None:
+        """Stop any capture when the app exits.
+
+        Without this the ffmpeg child outlives the TUI: it keeps writing audio
+        with nothing supervising it, its `recordings` row stays 'recording'
+        forever, and the next TUI -- seeing no session of its own -- starts a
+        second recorder on the same source. Observed in the wild: a capture
+        orphaned for 1h51m alongside a live one.
+        """
+        try:
+            recorder.stop_all()
+        except Exception:
+            log.debug("stopping recordings on exit failed", exc_info=True)
+
+    def action_toggle_record(self) -> None:
+        """`O`: record the output continuously, marking what plays on it.
+
+        Unlike `k`, which samples one track in real time, this runs unattended:
+        songrec is asked what is playing every so often and each answer is
+        stored as a marker, so the session can be cut back into tracks and
+        analysed afterwards.
+        """
+        if self._recording_id is not None:
+            recorded, total = recorder.mark_count(self._recording_id)
+            recorder.stop(self._recording_id)
+            self.notify(f"Recording {self._recording_id} stopped "
+                        f"({recorded}/{total} tracks identified)")
+            self._recording_id = None
+            self._record_marks = None
+            self._refresh_record_status()
+            return
+        try:
+            session = recorder.start()
+        except recorder.RecorderError as exc:
+            self.notify(f"Cannot record: {exc}", severity="error")
+            return
+        except Exception as exc:
+            log.exception("failed to start recording")
+            self.notify(f"Record failed: {exc}", severity="error")
+            return
+        self._recording_id = session.recording_id
+        self.notify(f"Recording {session.recording_id} to {session.directory.name}")
+        self._refresh_record_status()
+
+    def _refresh_record_status(self) -> None:
+        """Keep the recording indicator current; also catches a died recorder."""
+        panel = self.query_one("#record-panel", Static)
+        if self._recording_id is None:
+            panel.set_class(False, "-on")
+            panel.update("")
+            return
+        if not recorder.is_running(self._recording_id):
+            # The capture died on its own (ffmpeg exited, or a cap was hit).
+            self.notify(f"Recording {self._recording_id} ended", severity="warning")
+            self._recording_id = None
+            panel.set_class(False, "-on")
+            panel.update("")
+            return
+
+        self._record_tick += 1
+        # The clock and the blink want a fast refresh; the mark count is a
+        # database round trip and does not, so it is sampled every fifth tick.
+        if self._record_tick % 5 == 1 or self._record_marks is None:
+            self._record_marks = recorder.mark_count(self._recording_id)
+        directory = recorder.session_directory(self._recording_id)
+        panel.set_class(True, "-on")
+        panel.update(record_panel(
+            recording_id=self._recording_id,
+            elapsed_s=recorder.elapsed(self._recording_id) or 0.0,
+            marks_ok=self._record_marks[0], marks_total=self._record_marks[1],
+            size_bytes=recorder.directory_size(directory) if directory else 0,
+            source=recorder.session_source(self._recording_id) or "",
+            blink=self._record_tick % 2 == 1,
+        ))
 
     def action_approve_postprocess(self) -> None:
         """`A`: post-process whatever is playing, on demand.
@@ -1408,7 +1551,7 @@ class KaraokeTui(App):
             )
 
     def _tick_lyrics(self) -> None:
-        if not (self._det.is_active and self._timeline.lines):
+        if not self._det.is_active:
             return
         # Radio mode has no MPRIS player to ask; the playhead is dead-reckoned
         # from where songrec last heard us.
@@ -1420,7 +1563,14 @@ class KaraokeTui(App):
         # ahead of audible output, so lyrics would otherwise lead the sound.
         elapsed = max(0.0, pos - self._sync_offset)
         self._elapsed = elapsed
-        self._render_synced(elapsed)
+        if self._timeline.lines:
+            self._render_synced(elapsed)      # also refreshes the visuals
+            return
+        # No synced lyrics for this track -- common in Spotify mode -- but the
+        # beat animation only needs BPM and elapsed time. Gating it on the
+        # timeline froze the rhythm bar and cartwheel while the BPM read-out
+        # beside them kept updating, which just looked broken.
+        self._render_visuals(self._current_song_row(), "", elapsed)
 
     def _render_synced(self, elapsed: float) -> None:
         tl = self._timeline
@@ -1538,7 +1688,10 @@ class KaraokeTui(App):
         """
         from . import coverart
 
-        path = coverart.art_path_from_url(playerctl.art_url(self._control_player()) or "")
+        # resolve_art, not art_path_from_url: the Spotify app publishes a
+        # remote https artUrl where Chromium publishes a local file, so
+        # local-only resolution left Spotify with no thumbnail at all.
+        path = coverart.resolve_art(playerctl.art_url(self._control_player()) or "")
         if path is not None:
             return path
         vid = localcache.extract_youtube_id(url or "")

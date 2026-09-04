@@ -11,6 +11,7 @@ alongside the user's desktop session.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -183,6 +184,103 @@ def get_stats() -> dict[str, Any]:
         "top_tracks": summary.top_tracks,
         "top_artists": summary.top_artists,
         "by_mode": summary.by_mode,
+    }
+
+
+@app.get("/api/recordings")
+def list_recordings() -> dict[str, Any]:
+    """Record-mode sessions, newest first.
+
+    Read-only over SQLite like the rest of this service. Starting and stopping
+    a capture needs PipeWire and a desktop audio session, so that lives in the
+    control API instead.
+    """
+    from . import recorder
+
+    with localcache.connect() as conn:
+        rows = conn.execute(
+            "SELECT r.recording_id, r.started_at, r.ended_at, r.status,"
+            "       r.source, r.dir, r.keep_audio, r.note,"
+            "       (SELECT count(*) FROM recording_marks m"
+            "         WHERE m.recording_id = r.recording_id) AS marks,"
+            "       (SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m"
+            "         WHERE m.recording_id = r.recording_id) AS identified"
+            " FROM recordings r ORDER BY r.recording_id DESC"
+        ).fetchall()
+
+    out = []
+    for row in rows:
+        directory = Path(row["dir"])
+        size = (sum(f.stat().st_size for f in directory.glob("seg-*.flac")
+                    if f.is_file()) if directory.is_dir() else 0)
+        out.append({
+            "recording_id": row["recording_id"],
+            "started_at": row["started_at"],
+            "ended_at": row["ended_at"],
+            "status": row["status"],
+            "source": row["source"],
+            "marks": row["marks"],
+            "identified": row["identified"],
+            "audio_bytes": size,
+            "keep_audio": bool(row["keep_audio"]),
+            "note": row["note"],
+            # Whether a capture is live in *this* process. A row can read
+            # 'recording' after a crash, so the flag and the status disagree
+            # on purpose rather than one being derived from the other.
+            "running": recorder.is_running(int(row["recording_id"])),
+        })
+    return {"recordings": out, "count": len(out)}
+
+
+@app.get("/api/recordings/{recording_id}")
+def get_recording(recording_id: int) -> dict[str, Any]:
+    """One session with the track list its markers resolve to.
+
+    The segments are derived on read rather than stored: they are a function of
+    the markers, and recomputing keeps the two from drifting apart.
+    """
+    from . import recorder, recording_worker
+    from .recording_slice import is_confident, segments
+
+    record = recording_worker.load_recording(recording_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    marks = recorder.load_marks(recording_id)
+    files = recording_worker.segment_files(Path(record["dir"]))
+    span = recording_worker.recording_span(files)
+
+    tracks = []
+    for segment in segments(marks):
+        window = recording_worker.clamp(segment, span) if span else None
+        tracks.append({
+            "artist": segment.artist,
+            "title": segment.title,
+            "start_wall": segment.start_wall,
+            "end_wall": segment.end_wall,
+            "duration_s": segment.duration,
+            "marks": segment.marks,
+            # How far the per-marker start estimates disagree. Low means the
+            # boundary is corroborated; high means the track was changed,
+            # repeated or seeked, and it is gated out of analysis.
+            "spread_s": None if segment.spread == float("inf") else segment.spread,
+            "confident": is_confident(segment),
+            "audio_available": window is not None,
+        })
+
+    ok, total = recorder.mark_count(recording_id)
+    return {
+        "recording_id": recording_id,
+        "status": record["status"],
+        "started_at": record["started_at"],
+        "ended_at": record["ended_at"],
+        "source": record["source"],
+        "marks": total,
+        "identified": ok,
+        "segment_files": len(files),
+        "captured_s": (span[1] - span[0]) if span else 0.0,
+        "running": recorder.is_running(recording_id),
+        "tracks": tracks,
     }
 
 

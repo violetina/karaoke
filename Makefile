@@ -36,7 +36,8 @@ K8S_NAMESPACE ?= karaoke
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
         mq-port-forward postprocess-worker postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
-        auth-spotify auth-youtube auth-status sample
+        auth-spotify auth-youtube auth-status sample \
+        recordings recording-show recording-analyse
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -143,6 +144,15 @@ tui: ## Launch the clean karaoke control-surface TUI prototype
 sample: ## Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
 	$(PYTHON) -m karaoke.sample_audio --seconds $${SECS:-45} \
 		$${ARTIST:+--artist "$(ARTIST)"} $${TITLE:+--title "$(TITLE)"}
+
+recordings: ## List record-mode sessions
+	$(PYTHON) -m karaoke.recording_worker --list
+
+recording-show: ## Show a recording's derived track list (ID=...)
+	$(PYTHON) -m karaoke.recording_worker --show $(ID)
+
+recording-analyse: ## Decompile a recording into the DB (ID=...); needs the audio venv
+	PYTHONPATH=src $(AUDIO_PY) -m karaoke.recording_worker --analyse $(ID)
 
 analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 	$(PYTHON) -c "import sys; from karaoke.cli import analyze_main; sys.exit(analyze_main(['--file','$(FILE)','--artist','$(ARTIST)','--title','$(TITLE)']))"
