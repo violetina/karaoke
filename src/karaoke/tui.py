@@ -1,24 +1,29 @@
 """Player-aware Textual TUI for the karaoke library.
 
-Default behavior is automatic: the app watches the desktop via MPRIS/playerctl
-and picks a mode.
+Watches the desktop over MPRIS and picks a mode automatically:
 
-- Spotify playing  -> ``spotify`` mode: sync + control Spotify.
-- Browser/desktop player playing a YouTube / YT Music tab, VLC, etc.
-  -> ``scan`` mode: sync lyrics to the player's position and control it.
-- Nothing playing  -> ``browse`` mode: drive the library list; Enter opens the
-  source in the browser (the old "youtube" behavior).
+- Spotify playing -> ``spotify``: sync and control Spotify.
+- Any other player (browser tab, VLC) -> ``scan``: sync to its position.
+- Microphone (``R``) -> ``radio``: songrec identifies room audio, which is the
+  one case MPRIS cannot cover since external audio has no player publishing
+  metadata. The playhead is dead-reckoned from songrec's own offset.
+- Nothing playing -> ``browse``: drive the library list.
 
-Press ``m`` to cycle a manual mode override (auto -> browse -> spotify -> scan).
-Forcing ``spotify`` launches the Spotify desktop app if it isn't already running.
+Layout is two equal side columns around the lyrics, so they sit centred. The
+left column carries worker stats, cover art and a per-track read-out; the right
+carries mood, key/BPM and the sentiment/rhythm visuals. Both give way on a small
+terminal — the way to get bigger lyrics is a bigger terminal FONT, which costs
+cells, so the chrome has to yield. ``F`` hides it entirely.
 
-Tracks with no cached lyrics are recorded as gaps (for backfill / staging) and,
-by default, hidden from the library so only working songs are listed. A filter
-selector switches between working songs, all songs, and the staging queue; in the
-staging view Enter asks to whitelist (approve) a candidate into the working list.
+``H`` opens the library over the lyrics on its own layer, costing them no space;
+picking a song closes it. ``?`` shows a key reference generated from BINDINGS so
+it cannot drift. ``A`` queues the playing track for post-processing.
 
-The right-hand visual space shows detected musical key, BPM/tempo and a live
-sentiment + rhythm read-out for the current lyrics.
+Tracks with no cached lyrics are recorded as gaps for backfill, and looked up
+again in the background against LRCLIB — the cache only holds what someone has
+already fetched.
+
+See ``docs/tui.md``.
 """
 from __future__ import annotations
 

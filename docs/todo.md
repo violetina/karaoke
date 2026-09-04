@@ -7,7 +7,12 @@ This page tracks planned features, ongoing enhancements, and accuracy improvemen
 - [x] **Phase 1: Line Duration Capping** — Prevent stale line highlighting during long instrumental gaps.
 - [x] **Phase 2: Learn Mode** — Keyboard shortcuts (`e` for line-end, `SPACE` for word tapping) to author Enhanced LRC.
 - [x] **Phase 3: Real Word Timings** — Extract and backfill per-word timings from YouTube `json3` caption payloads (`json3_to_enhanced_lrc`).
-- [ ] **TUI Word-Level Playhead Rendering** — Render real word-level Enhanced LRC timestamps in the Textual TUI player.
+- [x] **TUI Word-Level Playhead Rendering** — word highlight tracks real
+  Enhanced-LRC timings, interpolating where only line timings exist.
+- [ ] **Beat-driven visuals** — the left column reserves space (`#beat-art`,
+  currently the cover art). Sample video frames on beat, or generate art from
+  the line's sentiment. See `docs/tui.md`.
+- [ ] **Old: TUI Word-Level Playhead Rendering** — Render real word-level Enhanced LRC timestamps in the Textual TUI player.
 - [ ] **Automated OpenSearch Backfill Cron** — Background worker to sync new SQLite tracks and lyric lines into OpenSearch indices automatically.
 - [ ] **Whisper GPU Acceleration Tuning** — Optimize local Whisper transcription worker configuration for faster offline fallback.
 

@@ -15,14 +15,24 @@ cannot shift by a column on a terminal that draws those glyphs wide.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
-# Terminal cells are roughly twice as tall as they are wide, so a square cover
-# needs half as many rows as columns to keep its proportions.
-CELL_ASPECT = 2
+# How many times taller than wide a terminal cell is. A square image needs
+# `cols / CELL_ASPECT` rows to still look square.
+#
+# 2.0 is the usual figure, but it depends on the font and on any line spacing
+# the terminal adds — with extra leading, cells get taller and art rendered for
+# 2.0 comes out stretched vertically. There is no way to query this from inside
+# a TUI, so it is tunable: raise it if the cover looks too tall, lower it if it
+# looks squashed. `python -m karaoke.coverart` prints a calibration square.
+try:
+    CELL_ASPECT = float(os.environ.get("KARAOKE_CELL_ASPECT", "2.0"))
+except ValueError:
+    CELL_ASPECT = 2.0
 
 
 def art_path_from_url(art_url: str) -> Optional[Path]:
@@ -107,6 +117,22 @@ def fit(src: tuple[int, int], max_cols: int,
     return cols, rows
 
 
+def _calibration() -> str:  # pragma: no cover - manual visual check
+    """Print a square, to calibrate KARAOKE_CELL_ASPECT by eye.
+
+    If the block below looks taller than it is wide, raise the value; if it
+    looks squat, lower it. Run as `python -m karaoke.coverart`.
+    """
+    cols = 20
+    rows = max(1, round(cols / CELL_ASPECT))
+    block = "\n".join("#" * cols for _ in range(rows))
+    return (f"KARAOKE_CELL_ASPECT={CELL_ASPECT}  ->  {cols}x{rows} cells\n"
+            f"{block}\n"
+            "This should look SQUARE. Taller than wide? Raise the value.\n"
+            "Wider than tall? Lower it.  e.g. KARAOKE_CELL_ASPECT=2.4")
+
+
+
 def to_text(pixels: list[list[tuple[int, int, int]]], *, pad_to: int = 0):
     """Render sampled pixels as a Rich Text of background-coloured spaces.
 
@@ -135,7 +161,7 @@ def render(source: Path, max_cols: int, max_rows: Optional[int] = None):
     their proportions instead of being squashed into a fixed box.
     """
     if max_rows is None:
-        max_rows = max(1, max_cols // CELL_ASPECT)
+        max_rows = max(1, int(max_cols / CELL_ASPECT))
     src = probe_size(source)
     if src is None:
         return None
@@ -145,3 +171,7 @@ def render(source: Path, max_cols: int, max_rows: Optional[int] = None):
     cols, rows = size
     pixels = sample(source, cols, rows)
     return to_text(pixels, pad_to=max_cols) if pixels else None
+
+
+if __name__ == "__main__":  # pragma: no cover
+    print(_calibration())

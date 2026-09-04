@@ -168,3 +168,20 @@ def test_probe_size_handles_a_stream_with_no_video(monkeypatch):
         stdout = ""
     monkeypatch.setattr(coverart.subprocess, "run", lambda *a, **k: _P())
     assert coverart.probe_size(Path("x")) is None
+
+
+def test_cell_aspect_is_tunable(monkeypatch):
+    """Terminals with extra line spacing have taller cells than the 2.0 default.
+
+    Nothing can query that from inside a TUI, so it has to be settable.
+    """
+    monkeypatch.setattr(coverart, "CELL_ASPECT", 2.0)
+    assert coverart.fit((100, 100), 20, 40) == (20, 10)
+    monkeypatch.setattr(coverart, "CELL_ASPECT", 2.5)
+    assert coverart.fit((100, 100), 20, 40) == (20, 8)
+
+
+def test_fractional_aspect_still_yields_whole_cells(monkeypatch):
+    monkeypatch.setattr(coverart, "CELL_ASPECT", 2.3)
+    cols, rows = coverart.fit((100, 100), 21, 40)
+    assert isinstance(rows, int) and isinstance(cols, int)

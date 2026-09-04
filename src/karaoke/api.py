@@ -20,7 +20,7 @@ from . import localcache
 from .logger import LOG_FILE
 from .staging_api import router as staging_router
 
-API_VERSION = "0.2.0"
+API_VERSION = "0.3.0"
 
 app = FastAPI(
     title="Karaoke Library API",

@@ -66,6 +66,7 @@ nav:
   - API reference: api.md
   - Workflow poc: workflow.md
   - Makefile targets: makefile-targets.md
+  - The TUI: tui.md
   - Browser cookies: browser-cookies.md
   - Search how-to: search-howto.md
   - Troubleshooting: troubleshooting.md
