@@ -42,7 +42,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
 
-from . import detect, localcache, playerctl, staging, track_analysis, visuals
+from . import (detect, localcache, playerctl, sample_audio, staging,
+               track_analysis, visuals)
 from .browse import open_song_url
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
@@ -457,6 +458,7 @@ class KaraokeTui(App):
         ("q", "quit", "Quit"),
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
+        ("k", "sample_key", "Sample key/BPM"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
         ("T", "stats", "Stats"),
@@ -503,6 +505,7 @@ class KaraokeTui(App):
         # Set once Spotify is unusable (bad auth or an exhausted quota) so a
         # single failure cannot become a lookup storm across a listening session.
         self._spotify_off = False
+        self._sampling = False     # a capture is running (real time)
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
@@ -879,6 +882,54 @@ class KaraokeTui(App):
         if not publish_postprocess_task(artist, title, url):
             return False, "Broker unreachable — nothing queued"
         return True, f"Queued {title}: {', '.join(pending)}"
+
+    def action_sample_key(self) -> None:
+        """`k`: detect key/BPM by recording what is playing.
+
+        For Spotify there is no file to analyse, so those tracks can never be
+        post-processed the normal way. Recording the sink monitor gives a clean
+        digital copy of the audio and closes that gap.
+
+        Capture is real time and takes the better part of a minute, so it runs
+        in a worker and is guarded against being started twice.
+        """
+        det = self._det
+        if not (det.artist and det.title):
+            self.notify("Nothing playing to sample", severity="warning")
+            return
+        if self._sampling:
+            self.notify("Already sampling", severity="warning")
+            return
+        self._sampling = True
+        seconds = sample_audio.DEFAULT_SECONDS
+        self.notify(f"Sampling {seconds:.0f}s of {det.title}…")
+        self.run_worker(
+            lambda a=det.artist, t=det.title: self._background_sample(a, t),
+            exclusive=False, thread=True,
+        )
+
+    def _background_sample(self, artist: str, title: str) -> None:
+        """Record and analyse the playing audio, in a worker thread."""
+        try:
+            result = sample_audio.sample_and_analyse(artist, title)
+        except sample_audio.CaptureError as exc:
+            log.warning("sample failed: %s", exc)
+            self.call_from_thread(self.notify, f"Sample failed: {exc}",
+                                  severity="error")
+            return
+        except Exception as exc:
+            log.exception("sample analysis failed")
+            self.call_from_thread(self.notify, f"Analysis failed: {exc}",
+                                  severity="error")
+            return
+        finally:
+            self._sampling = False
+
+        key = result.key.name if result.key else "unknown"
+        bpm = f"{result.bpm:.0f}" if result.bpm else "?"
+        self.call_from_thread(self.notify, f"{artist} - {title}: {key}, {bpm} BPM")
+        # The analysis panel reads from the DB, so refresh it now the row exists.
+        self.call_from_thread(self._refresh_track_info, None)
 
     def action_approve_postprocess(self) -> None:
         """`A`: post-process whatever is playing, on demand.

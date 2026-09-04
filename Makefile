@@ -36,7 +36,7 @@ K8S_NAMESPACE ?= karaoke
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
         mq-port-forward postprocess-worker postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
-        auth-spotify auth-youtube auth-status
+        auth-spotify auth-youtube auth-status sample
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -139,6 +139,10 @@ tui: ## Launch the clean karaoke control-surface TUI prototype
 		sleep 1.5; \
 	fi
 	$(PYTHON) -m karaoke.tui
+
+sample: ## Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
+	$(PYTHON) -m karaoke.sample_audio --seconds $${SECS:-45} \
+		$${ARTIST:+--artist "$(ARTIST)"} $${TITLE:+--title "$(TITLE)"}
 
 analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 	$(PYTHON) -c "import sys; from karaoke.cli import analyze_main; sys.exit(analyze_main(['--file','$(FILE)','--artist','$(ARTIST)','--title','$(TITLE)']))"
