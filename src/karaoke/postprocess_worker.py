@@ -8,8 +8,9 @@ Consumes tasks published by :mod:`karaoke.postprocess_queue` and, per track:
    json3 captions (if missing).
 
 The queue is intentionally NON-persistent conceptually: if the broker is reset
-we can simply re-enqueue from SQLite. Tasks are ACKed only after processing so a
-crash re-delivers them.
+we can simply re-enqueue from SQLite. A task is ACKed only once it completes;
+a failure is requeued once and then dropped, so a crash re-delivers work while a
+permanently-failing track cannot spin the worker in a redelivery loop.
 
 Run:  ``karaoke-postprocess-worker``  (or ``python -m karaoke.postprocess_worker``)
 Env:  RABBITMQ_HOST (default localhost), RABBITMQ_USER/PASS (default guest).
@@ -82,8 +83,13 @@ def _run_analysis(track_id: int, audio_path: Path, conn) -> bool:
         return False
 
 
-def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> bool:
-    """Upgrade a track's synced lyrics to Enhanced LRC word timing."""
+def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> str:
+    """Upgrade a track's synced lyrics to Enhanced LRC word timing.
+
+    Returns the upgrade status: ``"upgraded"``, ``"no-captions"`` (terminal —
+    the video simply has none), ``"no-source"`` (nothing joinable in the DB) or
+    ``"error"`` (retryable).
+    """
     try:
         from .upgrade_timings import upgrade_track
         row = conn.execute(
@@ -99,13 +105,15 @@ def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> bo
             (track_id,),
         ).fetchone()
         if row is None:
-            return False
+            log.info("postprocess: no youtube source + approved lyrics for track %s",
+                     track_id)
+            return "no-source"
         res = upgrade_track(row, conn, cookies_from_browser=cookies_from_browser)
         log.info("postprocess: timings upgrade for track %s -> %s", track_id, res.status)
-        return res.status == "upgraded"
+        return res.status
     except Exception:
         log.exception("postprocess: timing upgrade failed for track %s", track_id)
-        return False
+        return "error"
 
 
 def process_task(payload: dict) -> None:
@@ -148,13 +156,60 @@ def process_task(payload: dict) -> None:
             if row:
                 url = row[0]
 
-        if "analysis" in pending and url:
-            audio = _ensure_download(url, cookies)
-            if audio:
-                _run_analysis(track_id, audio, conn)
+        failed: list[str] = []
+
+        if "analysis" in pending:
+            if not url:
+                log.warning("postprocess: no watchable URL for track %s; "
+                            "cannot run analysis", track_id)
+                failed.append("analysis")
+            else:
+                audio = _ensure_download(url, cookies)
+                if not audio:
+                    log.warning("postprocess: audio unavailable for track %s (%s)",
+                                track_id, url)
+                    failed.append("analysis")
+                elif not _run_analysis(track_id, audio, conn):
+                    failed.append("analysis")
 
         if "timings" in pending:
-            _run_timings(track_id, conn, cookies)
+            # "no-captions"/"no-source" are terminal: retrying cannot help.
+            if _run_timings(track_id, conn, cookies) == "error":
+                failed.append("timings")
+
+        if failed:
+            # Signal the consumer so the task is redelivered rather than dropped.
+            raise RuntimeError(
+                f"post-processing incomplete for track {track_id}: {', '.join(failed)}"
+            )
+
+
+def handle_message(ch, method, body) -> None:
+    """ACK/NACK one delivery according to whether its task completed.
+
+    Success ACKs. A failure is requeued once; a delivery that already came back
+    (``method.redelivered``) is treated as a poison task and dropped, so a
+    permanently-failing track cannot spin the worker in a hot redelivery loop.
+    A malformed body is dropped outright — retrying cannot make it parse.
+    """
+    try:
+        payload = json.loads(body)
+    except Exception:
+        log.exception("postprocess: dropping malformed task body")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        return
+
+    try:
+        process_task(payload)
+    except Exception:
+        log.exception("postprocess: task failed")
+        if method.redelivered:
+            log.error("postprocess: dropping task after retry: %s", payload)
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        else:
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+    else:
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
 def main() -> int:
@@ -174,13 +229,7 @@ def main() -> int:
     channel.basic_qos(prefetch_count=1)
 
     def _callback(ch, method, properties, body):
-        try:
-            payload = json.loads(body)
-            process_task(payload)
-        except Exception:
-            log.exception("postprocess: task failed")
-        finally:
-            ch.basic_ack(delivery_tag=method.delivery_tag)
+        handle_message(ch, method, body)
 
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=_callback)
     log.info("postprocess worker listening on %s@%s queue=%s", user, host, QUEUE_NAME)
