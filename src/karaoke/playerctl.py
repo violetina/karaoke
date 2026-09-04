@@ -116,11 +116,50 @@ def _metadata_format() -> str:
     return "{{artist}}\x1f{{title}}\x1f{{album}}\x1f{{xesam:url}}\x1f{{playerName}}"
 
 
-def current_metadata() -> Optional[PlayerMetadata]:
-    """Return active MPRIS metadata via playerctl, or None if unavailable."""
+def list_players() -> list[str]:
+    """MPRIS names of every player playerctl can see."""
+    out = _run(["playerctl", "--list-all"])
+    if not out:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def playing_players() -> list[str]:
+    """MPRIS names of the players whose status is Playing.
+
+    Bare ``playerctl metadata`` answers from whichever player playerctl happens
+    to pick first, with no regard for whether it is playing anything. With the
+    kiosk browser window left open for CDP — its normal resting state — that is
+    routinely a *paused* tab holding a stale track, which then shadows the
+    player actually making sound. Asking who is Playing is the fix.
+    """
+    names = list_players()
+    if len(names) < 2:
+        # Nothing to disambiguate; skip the per-player probes. This is the hot
+        # path (detection runs on a 1.5s timer) and the common case.
+        return names
+    return [n for n in names if (status(n) or "").strip() == "Playing"]
+
+
+def playing_player() -> str:
+    """One player that is currently Playing, or '' if none is."""
+    found = playing_players()
+    return found[0] if found else ""
+
+
+def current_metadata(player: str = "") -> Optional[PlayerMetadata]:
+    """Return MPRIS metadata via playerctl, or None if unavailable.
+
+    Targets ``player`` when given, otherwise lets playerctl choose. Note that
+    playerctl's own choice ignores playback status, so callers that care which
+    player is actually making sound should pass one — see
+    :func:`playing_players` and ``detect.preferred_player``. Selection is kept
+    out of here deliberately: this module is a thin wrapper over the binary and
+    holds no policy about which player matters.
+    """
     try:
         proc = subprocess.run(
-            ["playerctl", "metadata", "--format", _metadata_format()],
+            _base_cmd(player) + ["metadata", "--format", _metadata_format()],
             capture_output=True, text=True, timeout=5, check=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):

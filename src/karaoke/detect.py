@@ -106,9 +106,47 @@ def same_track(artist_a: str, title_a: str,
     return key_a == key_b
 
 
-def detect_active() -> Detection:
-    """Detect the currently-active desktop player and its karaoke mode."""
-    return classify(current_metadata())
+def preferred_player(candidates: list[str], mic_artist: str = "",
+                     mic_title: str = "") -> str:
+    """Choose between several simultaneously-playing MPRIS players.
+
+    Order matters: without a stable rule the choice follows playerctl's listing
+    order and the mode flaps between players mid-song.
+
+    1. The player whose track the microphone just identified — it is provably
+       the one making the sound in the room.
+    2. Spotify, which reports an exact position where a browser tab does not.
+    3. Whatever came first, so there is always an answer.
+    """
+    if not candidates:
+        return ""
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if mic_title:
+        for name in candidates:
+            meta = current_metadata(name)
+            if meta and same_track(meta.artist, meta.title, mic_artist, mic_title):
+                return name
+
+    for name in candidates:
+        # Chrome names its player per instance ("chromium.instance402904"), so
+        # only a prefix comparison is stable across restarts.
+        if name.lower().startswith("spotify"):
+            return name
+    return candidates[0]
+
+
+def detect_active(mic_artist: str = "", mic_title: str = "") -> Detection:
+    """Detect the currently-playing desktop player and its karaoke mode.
+
+    The mic hints are used only to break a tie between players that are *all*
+    playing; they never invent a detection on their own.
+    """
+    from . import playerctl
+
+    chosen = preferred_player(playerctl.playing_players(), mic_artist, mic_title)
+    return classify(current_metadata(chosen))
 
 
 def spotify_running() -> bool:

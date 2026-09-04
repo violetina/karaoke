@@ -1,5 +1,6 @@
 """Tests for active-player detection and mode selection."""
 
+from karaoke import detect
 from karaoke.detect import Detection, classify, is_youtube_url
 from karaoke.playerctl import PlayerMetadata
 
@@ -78,3 +79,67 @@ def test_record_gap_logs_when_artist_is_present(tmp_path):
     )
     rows = conn.execute("SELECT artist, title FROM lyric_gaps").fetchall()
     assert [(r["artist"], r["title"]) for r in rows] == [("Earth, Wind & Fire", "September")]
+
+
+# --- choosing between simultaneously-playing players -----------------------
+
+def _meta(artist, title, mpris="spotify"):
+    from karaoke.playerctl import PlayerMetadata
+    return PlayerMetadata(artist=artist, title=title, album="", url="",
+                          player=mpris, mpris_name=mpris)
+
+
+def test_preferred_player_is_the_only_candidate():
+    assert detect.preferred_player(["spotify"]) == "spotify"
+
+
+def test_preferred_player_with_no_candidates_is_blank():
+    assert detect.preferred_player([]) == ""
+
+
+def test_preferred_player_follows_the_mic(monkeypatch):
+    """The mic hears the room, so its track names the player making the sound."""
+    meta = {"chromium.instance1": _meta("Macy Gray", "I Try", "chromium.instance1"),
+            "spotify": _meta("Jethro Tull", "Aqualung")}
+    monkeypatch.setattr(detect, "current_metadata", lambda p="": meta.get(p))
+
+    assert detect.preferred_player(
+        ["chromium.instance1", "spotify"], "Macy Gray", "I Try",
+    ) == "chromium.instance1"
+
+
+def test_preferred_player_defaults_to_spotify(monkeypatch):
+    """No mic reference: Spotify reports an exact position, a browser tab does not."""
+    monkeypatch.setattr(detect, "current_metadata", lambda p="": None)
+    assert detect.preferred_player(["chromium.instance1", "spotify"]) == "spotify"
+
+
+def test_preferred_player_is_order_independent(monkeypatch):
+    """Otherwise the mode flaps with playerctl's listing order."""
+    monkeypatch.setattr(detect, "current_metadata", lambda p="": None)
+    a = detect.preferred_player(["chromium.instance1", "spotify"])
+    b = detect.preferred_player(["spotify", "chromium.instance1"])
+    assert a == b == "spotify"
+
+
+def test_preferred_player_falls_back_to_the_first(monkeypatch):
+    monkeypatch.setattr(detect, "current_metadata", lambda p="": None)
+    assert detect.preferred_player(["vlc", "mpv"]) == "vlc"
+
+
+def test_detect_active_ignores_a_paused_player(monkeypatch):
+    """End to end, the exact reported situation.
+
+    A paused kiosk Chrome holding a stale track must not shadow the Spotify
+    window that is actually playing.
+    """
+    from karaoke import playerctl
+
+    monkeypatch.setattr(playerctl, "playing_players", lambda: ["spotify"])
+    monkeypatch.setattr(
+        detect, "current_metadata",
+        lambda p="": _meta("Jethro Tull", "Aqualung") if p == "spotify" else None)
+
+    det = detect.detect_active()
+    assert det.mode == "spotify"
+    assert det.title == "Aqualung"

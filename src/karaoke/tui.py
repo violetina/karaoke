@@ -1191,7 +1191,9 @@ class KaraokeTui(App):
         mic still chose the song; only the clock changed.
         """
         if self._mic_ref is not None and self._mic_ref.title:
-            det = detect.detect_active()
+            # Pass the mic's track so that when several players are playing,
+            # the one actually making the sound in the room is chosen.
+            det = detect.detect_active(self._mic_ref.artist, self._mic_ref.title)
             if det.is_active and detect.same_track(
                     det.artist, det.title,
                     self._mic_ref.artist, self._mic_ref.title):

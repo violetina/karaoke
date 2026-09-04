@@ -113,7 +113,7 @@ def _app(mic_title="Glory Box", mic_artist="Portishead"):
 def test_player_clock_wins_when_it_has_the_same_song(monkeypatch):
     """The point of the change: use Spotify's exact position, not reckoning."""
     app = _app()
-    monkeypatch.setattr(detect, "detect_active", lambda: detect.Detection(
+    monkeypatch.setattr(detect, "detect_active", lambda *a: detect.Detection(
         "spotify", "spotify", "Portishead", "Glory Box"))
     det = app._effective_detection()
     assert det.mode == "spotify"
@@ -123,7 +123,7 @@ def test_player_clock_wins_when_it_has_the_same_song(monkeypatch):
 def test_radio_survives_when_the_player_has_a_different_song(monkeypatch):
     """Regression guard: the mic must still win when MPRIS is stale."""
     app = _app()
-    monkeypatch.setattr(detect, "detect_active", lambda: detect.Detection(
+    monkeypatch.setattr(detect, "detect_active", lambda *a: detect.Detection(
         "scan", "firefox", "Someone Else", "Another Song"))
     det = app._effective_detection()
     assert det.mode == "radio"
@@ -134,7 +134,7 @@ def test_radio_survives_when_the_player_has_a_different_song(monkeypatch):
 def test_radio_survives_when_nothing_is_playing(monkeypatch):
     app = _app()
     monkeypatch.setattr(detect, "detect_active",
-                        lambda: detect.Detection(mode="browse"))
+                        lambda *a: detect.Detection(mode="browse"))
     assert app._effective_detection().mode == "radio"
 
 

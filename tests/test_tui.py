@@ -493,8 +493,8 @@ def test_mic_identification_wins_over_mpris(monkeypatch):
 
     app = _mic_app(_ref("Otis Redding", "Dock of the Bay"))
     monkeypatch.setattr(detect, "detect_active",
-                        lambda: detect.Detection(mode="scan", artist="Other",
-                                                 title="Wrong Song"))
+                        lambda *a: detect.Detection(mode="scan", artist="Other",
+                                                    title="Wrong Song"))
     det = app._effective_detection()
     assert det.mode == "radio"
     assert (det.artist, det.title) == ("Otis Redding", "Dock of the Bay")
@@ -505,7 +505,7 @@ def test_mpris_is_used_when_the_mic_is_off(monkeypatch):
 
     app = _mic_app(None)
     monkeypatch.setattr(detect, "detect_active",
-                        lambda: detect.Detection(mode="scan", artist="X", title="Y"))
+                        lambda *a: detect.Detection(mode="scan", artist="X", title="Y"))
     assert app._effective_detection().mode == "scan"
 
 
