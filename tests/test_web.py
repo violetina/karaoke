@@ -63,3 +63,16 @@ def test_search_skips_results_without_url():
     with patch("karaoke.web.DDGS", return_value=fake_ddgs):
         results = web.search("q")
     assert results == [{"url": "https://ok.com", "title": "T"}]
+
+
+def test_search_returns_empty_on_ddgs_exception():
+    """A failing/empty DDGS search must not abort the caller's pipeline."""
+    with patch("karaoke.web.DDGS", side_effect=RuntimeError("No results found.")):
+        assert web.search("anything") == []
+
+
+def test_search_returns_empty_when_ddgs_text_raises():
+    ddgs = MagicMock()
+    ddgs.__enter__.return_value.text.side_effect = RuntimeError("No results found.")
+    with patch("karaoke.web.DDGS", return_value=ddgs):
+        assert web.search("anything") == []

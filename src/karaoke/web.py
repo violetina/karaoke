@@ -3,6 +3,8 @@ from __future__ import annotations
 import requests
 from bs4 import BeautifulSoup
 
+from .logger import log
+
 try:  # the package was renamed duckduckgo_search -> ddgs
     from ddgs import DDGS
 except ImportError:  # pragma: no cover - fallback for old installs
@@ -15,9 +17,18 @@ _UA = (
 
 
 def search(query: str, limit: int = 5) -> list[dict]:
-    """Search the web and return a list of {'url', 'title'} results."""
-    with DDGS() as ddgs:
-        results = list(ddgs.text(query, max_results=limit))
+    """Search the web and return a list of {'url', 'title'} results.
+
+    Best-effort: DDGS raises (``DDGSException: No results found``, rate limits,
+    transport errors) where callers only want "nothing found". An empty list is
+    returned instead so a dead search never aborts the caller's pipeline.
+    """
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=limit))
+    except Exception as exc:
+        log.debug("web.search failed for %r: %s", query, exc)
+        return []
     out: list[dict] = []
     for r in results:
         url = r.get("href") or r.get("url") or r.get("link")
