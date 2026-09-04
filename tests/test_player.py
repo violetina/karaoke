@@ -467,3 +467,47 @@ def test_force_transcribe_without_lyrics_file_uses_whisper_text(tmp_path, monkey
     )
 
     assert ly.plain == "heard words\nmore words"
+
+
+def test_new_track_is_queued_for_postprocessing(tmp_path, monkeypatch):
+    """Radio/player discoveries must queue derived work, not only the TUI's."""
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+    from karaoke.lyrics import Lyrics, parse_lrc
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    lrc = "[00:01.00] a\n[00:05.00] b"
+    monkeypatch.setattr(player, "fetch_lrclib",
+                        lambda *a, **k: Lyrics(plain="a\nb", synced_raw=lrc,
+                                               source="lrclib", lines=parse_lrc(lrc)))
+    seen = []
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed",
+                        lambda a, t, u="": seen.append((a, t, u)) or True)
+
+    player.get_synced(
+        SongRef(artist="Sonic Youth", title="Disappearer",
+                url="https://youtu.be/x", source="radio"),
+        stats_mode="radio",
+    )
+    assert seen == [("Sonic Youth", "Disappearer", "https://youtu.be/x")]
+
+
+def test_postprocess_enqueue_failure_never_breaks_playback(tmp_path, monkeypatch):
+    from karaoke import localcache, player
+    from karaoke.identify import SongRef
+    from karaoke.lyrics import Lyrics, parse_lrc
+
+    conn = localcache.connect(tmp_path / "karaoke.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    lrc = "[00:01.00] a"
+    monkeypatch.setattr(player, "fetch_lrclib",
+                        lambda *a, **k: Lyrics(plain="a", synced_raw=lrc,
+                                               source="lrclib", lines=parse_lrc(lrc)))
+    def boom(*a, **k):
+        raise RuntimeError("broker down")
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed", boom)
+
+    ly = player.get_synced(SongRef(artist="A", title="B", source="radio"),
+                           stats_mode="radio")
+    assert ly.synced_raw == lrc      # playback unaffected

@@ -335,7 +335,18 @@ def get_synced(
                 localcache.add_track_and_lyrics(artist, title, ly, album=album, duration=duration, url=ref.url, conn=conn)
         except Exception:
             pass
-            
+
+        # Queue derived work (key/BPM, word timings) for the track we just
+        # stored. Previously only the TUI did this, so anything discovered by
+        # radio/player never got analysed and the backlog grew every session.
+        # enqueue_if_needed is best-effort, bounded, and publishes nothing when
+        # the track is already complete.
+        try:
+            from .postprocess_queue import enqueue_if_needed
+            enqueue_if_needed(artist, title, ref.url or "")
+        except Exception:
+            pass
+
     return ly
 
 

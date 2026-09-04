@@ -1,0 +1,34 @@
+[Unit]
+# Templated worker: start N with `systemctl --user start karaoke-postprocess@{1..6}`.
+# RabbitMQ competing-consumers does the distribution — every instance subscribes
+# to the same queue with prefetch_count=1, so the broker hands each free worker
+# one task and no coordination between them is needed.
+Description=Karaoke post-processing worker %i (key/BPM analysis + word-timing upgrades)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target
+Requires=karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=RABBITMQ_HOST=localhost
+# Pull YouTube cookies from Firefox so downloads/captions authenticate as you.
+Environment=KARAOKE_COOKIES_FROM_BROWSER=firefox
+# Analysis is librosa/numpy, which spawn their own thread pools. Left alone,
+# every worker would try to use all cores and they would fight each other;
+# one thread per worker keeps parallelism at the process level where the
+# queue can actually balance it.
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.postprocess_worker
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-postprocess-%i
+
+[Install]
+WantedBy=karaoke.target
