@@ -41,8 +41,12 @@ class Detection:
 
     @property
     def is_active(self) -> bool:
-        """Whether a player is actually playing something to sync/control."""
-        return self.mode in ("spotify", "scan")
+        """Whether a player is actually playing something to sync/control.
+
+        "radio" is mic identification (songrec): there is no MPRIS player to
+        control, but there is a song to follow and sync lyrics to.
+        """
+        return self.mode in ("spotify", "scan", "radio")
 
 
 def is_youtube_url(url: str) -> bool:

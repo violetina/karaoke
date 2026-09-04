@@ -537,18 +537,32 @@ def test_no_big_kwargs_leaves_output_unchanged():
 
 
 def test_big_width_widens_the_active_line():
-    """Fullwidth forms are the only way a terminal can draw a line larger."""
     plain = _big_body(3.0, big_width=200, big_height=16).plain
-    assert "Ｌｉｔｔｌｅ" in plain
+    assert "L i t t l e" in plain
     assert "Little fish in a great big sea" not in plain   # active line widened
 
 
-def test_widened_line_is_exactly_twice_as_wide():
+def test_widened_line_uses_only_characters_the_font_has():
+    """Fullwidth forms were tried first and rendered as tofu boxes.
+
+    Most monospace terminal fonts have no glyphs for U+FF01-U+FF5E, so the
+    whole active line came out as empty rectangles. Spacing uses the line's own
+    characters and cannot fail that way.
+    """
+    from karaoke.player import widen
+
+    out = widen("Little fish")
+    assert out.isascii()
+    assert all(0x20 <= ord(c) <= 0x7E for c in out)
+
+
+def test_widened_line_is_about_twice_as_wide():
+    """Spacing inserts a gap between characters: 2n-1 cells for n characters."""
     from rich.cells import cell_len
     from karaoke.player import widen
 
     line = "Little fish"
-    assert cell_len(widen(line)) == 2 * cell_len(line)
+    assert cell_len(widen(line)) == 2 * cell_len(line) - 1
 
 
 def test_context_lines_are_not_widened():
@@ -601,13 +615,12 @@ def test_long_line_is_not_widened_past_the_panel():
     tl = LyricTimeline([(0.0, long_line), (30.0, "next")])
     body = Text(no_wrap=True, overflow="crop")
     _render_body(body, tl, 1.0, big_width=60, big_height=16)
-    assert long_line in body.plain          # rendered normally
-    assert "Ａ" not in body.plain and "ｖ" not in body.plain
+    assert long_line in body.plain          # rendered normally, not spaced out
 
 
-def test_widen_leaves_non_ascii_alone():
+def test_widen_preserves_the_original_characters():
     from karaoke.player import widen
-    assert widen("café") == "ｃａｆé"        # the accent has no fullwidth form
+    assert widen("café").replace(" ", "") == "café"
 
 
 def test_widened_line_keeps_the_word_highlight():

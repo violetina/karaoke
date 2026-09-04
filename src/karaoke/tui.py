@@ -23,6 +23,9 @@ sentiment + rhythm read-out for the current lyrics.
 from __future__ import annotations
 
 import os
+import subprocess
+import threading
+import time
 from collections.abc import Mapping
 from urllib.parse import quote_plus
 
@@ -87,6 +90,26 @@ def _default_sync_offset(mode: str = "scan") -> float:
 
 
 SYNC_OFFSET_STEP = 0.1
+
+# Mic (radio) mode. songrec needs a few seconds of audio; re-identifying every
+# ~30s corrects drift and catches track changes without hammering the service.
+MIC_REIDENTIFY_S = 30.0
+MIC_LISTEN_TIMEOUT = 20
+
+
+def _radio_cli_running() -> bool:
+    """True if `karaoke --radio` already holds the mic.
+
+    Two recognisers on one input just take turns failing, so the TUI declines
+    rather than fighting the CLI for it.
+    """
+    try:
+        out = subprocess.run(["pgrep", "-af", "karaoke"], capture_output=True,
+                             text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any((" -r" in line or "--radio" in line) and "tui" not in line
+               for line in out.splitlines())
 
 
 def binding_rows(bindings, *, key_display=None) -> list[tuple[str, str]]:
@@ -253,6 +276,7 @@ class KaraokeTui(App):
         ("q", "quit", "Quit"),
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
+        ("R", "toggle_mic", "Mic/radio"),
         ("question_mark", "help", "Keys"),
         Binding("escape", "hide_browse", "Close browse", show=False),
         ("r", "refresh", "Refresh"),
@@ -290,6 +314,8 @@ class KaraokeTui(App):
         self._cpu_sample: tuple | None = None
         self._current_song: tuple[str, str, str] | None = None
         self._lyrics_fetched: set[tuple[str, str]] = set()
+        self._mic_ref = None                       # last songrec identification
+        self._mic_stop: threading.Event | None = None
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -451,6 +477,73 @@ class KaraokeTui(App):
         """escape: close the overlay if open, otherwise do nothing."""
         if self._browse_open():
             self._hide_browse()
+
+    # -- mic / radio mode -------------------------------------------------
+    def mic_elapsed(self, now: float | None = None) -> float | None:
+        """Playhead position from the last mic identification, or None.
+
+        songrec reports where in the track it heard us, plus the monotonic
+        instant it finished listening. Everything since is dead reckoning off
+        that anchor — there is no MPRIS position to read in radio mode.
+        """
+        ref = self._mic_ref
+        if ref is None or ref.offset is None or ref.offset_mono is None:
+            return None
+        now = time.monotonic() if now is None else now
+        return max(0.0, ref.offset + (now - ref.offset_mono))
+
+    def _mic_loop(self) -> None:
+        """Identify room audio on a loop until the mic is switched off.
+
+        Each result either re-anchors the current song (correcting drift) or
+        swaps in a new one. A failed identification is ignored rather than
+        clearing the song: songrec returns nothing over speech and quiet
+        passages, and dropping the lyrics every time would be worse than
+        holding the last known track.
+        """
+        from .identify import identify_live
+
+        while not self._mic_stop.is_set():
+            try:
+                ref = identify_live(mic=True, timeout=MIC_LISTEN_TIMEOUT)
+            except Exception as exc:
+                log.debug("mic identify failed: %s", exc)
+                ref = None
+            if ref is not None and ref.title:
+                changed = (self._mic_ref is None
+                           or (ref.artist, ref.title)
+                           != (self._mic_ref.artist, self._mic_ref.title))
+                self._mic_ref = ref
+                if changed:
+                    # Force _poll_detection to re-resolve instead of
+                    # short-circuiting on an unchanged key.
+                    self._sync_key = None
+                    log.info("mic: %s - %s", ref.artist, ref.title)
+            self._mic_stop.wait(MIC_REIDENTIFY_S)
+
+    def action_toggle_mic(self) -> None:
+        """`R`: follow room audio via the microphone (songrec)."""
+        import shutil
+
+        if self._mic_stop is not None and not self._mic_stop.is_set():
+            self._mic_stop.set()
+            self._mic_ref = None
+            self._sync_key = None
+            self.notify("Mic off")
+            return
+
+        if not shutil.which("songrec"):
+            self.notify("songrec is not installed", severity="error")
+            return
+        if _radio_cli_running():
+            # Two recognisers on one mic just take turns failing.
+            self.notify("karaoke -r is already using the mic", severity="warning")
+            return
+
+        self._mic_stop = threading.Event()
+        self._mic_ref = None
+        self.run_worker(self._mic_loop, exclusive=False, thread=True)
+        self.notify("Mic on — listening…")
 
     # -- post-processing --------------------------------------------------
     def approve_postprocess(self, artist: str, title: str,
@@ -754,7 +847,17 @@ class KaraokeTui(App):
 
     # -- detection + live sync -------------------------------------------
     def _effective_detection(self) -> detect.Detection:
-        """Apply the manual mode override on top of auto-detection."""
+        """Apply the manual mode override on top of auto-detection.
+
+        A live mic identification wins outright: it hears what is actually in
+        the room, which is the whole reason to turn it on. MPRIS may be
+        reporting a different (or stale) track from some other player.
+        """
+        if self._mic_ref is not None and self._mic_ref.title:
+            return detect.Detection(
+                mode="radio", player="songrec",
+                artist=self._mic_ref.artist, title=self._mic_ref.title,
+            )
         det = detect.detect_active()
         if self._mode_override is None:
             return det
@@ -886,7 +989,10 @@ class KaraokeTui(App):
     def _tick_lyrics(self) -> None:
         if not (self._det.is_active and self._timeline.lines):
             return
-        pos = playerctl.position(self._control_player())
+        # Radio mode has no MPRIS player to ask; the playhead is dead-reckoned
+        # from where songrec last heard us.
+        pos = self.mic_elapsed() if self._det.mode == "radio" else \
+            playerctl.position(self._control_player())
         if pos is None:
             return
         # Pull the highlight back by the sync offset: browser MPRIS position runs

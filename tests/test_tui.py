@@ -432,3 +432,99 @@ def test_background_fetch_ignores_a_blank_track(monkeypatch, tmp_path):
     from karaoke.tui import KaraokeTui
     app = KaraokeTui.__new__(KaraokeTui)
     app._background_fetch_lyrics("", "")       # must not raise or hit the net
+
+
+# --- mic / radio mode ------------------------------------------------------
+
+def _mic_app(ref=None, stopped=True):
+    from karaoke.tui import KaraokeTui
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._mic_ref = ref
+    app._mic_stop = None if stopped else __import__("threading").Event()
+    app._mode_override = None
+    return app
+
+
+def _ref(artist="A", title="B", offset=30.0, mono=100.0):
+    from karaoke.identify import SongRef
+    return SongRef(artist=artist, title=title, source="songrec",
+                   offset=offset, offset_mono=mono)
+
+
+def test_mic_elapsed_dead_reckons_from_the_anchor():
+    """No MPRIS position exists in radio mode; it is offset + time since."""
+    app = _mic_app(_ref(offset=30.0, mono=100.0))
+    assert app.mic_elapsed(now=100.0) == 30.0
+    assert app.mic_elapsed(now=112.5) == 42.5
+
+
+def test_mic_elapsed_is_none_without_an_identification():
+    assert _mic_app(None).mic_elapsed() is None
+
+
+def test_mic_elapsed_is_none_when_songrec_gave_no_offset():
+    """songrec can name a track without locating the playhead in it."""
+    app = _mic_app(_ref(offset=None, mono=None))
+    assert app.mic_elapsed() is None
+
+
+def test_mic_identification_wins_over_mpris(monkeypatch):
+    """The mic hears the room — that is the point of switching it on."""
+    from karaoke import detect
+
+    app = _mic_app(_ref("Otis Redding", "Dock of the Bay"))
+    monkeypatch.setattr(detect, "detect_active",
+                        lambda: detect.Detection(mode="scan", artist="Other",
+                                                 title="Wrong Song"))
+    det = app._effective_detection()
+    assert det.mode == "radio"
+    assert (det.artist, det.title) == ("Otis Redding", "Dock of the Bay")
+
+
+def test_mpris_is_used_when_the_mic_is_off(monkeypatch):
+    from karaoke import detect
+
+    app = _mic_app(None)
+    monkeypatch.setattr(detect, "detect_active",
+                        lambda: detect.Detection(mode="scan", artist="X", title="Y"))
+    assert app._effective_detection().mode == "scan"
+
+
+def test_radio_detection_counts_as_active():
+    """There is no player to control, but there is a song to follow."""
+    from karaoke import detect
+    assert detect.Detection(mode="radio", artist="A", title="B").is_active
+
+
+def test_toggle_mic_refuses_when_the_cli_radio_holds_it(monkeypatch):
+    from karaoke import tui
+
+    app = _mic_app(None)
+    monkeypatch.setattr(tui.shutil if hasattr(tui, "shutil") else tui,
+                        "__name__", "tui", raising=False)
+    monkeypatch.setattr(tui, "_radio_cli_running", lambda: True)
+    notes = []
+    monkeypatch.setattr(app, "notify",
+                        lambda m, **k: notes.append((m, k.get("severity"))),
+                        raising=False)
+    started = []
+    monkeypatch.setattr(app, "run_worker",
+                        lambda *a, **k: started.append(a), raising=False)
+
+    app.action_toggle_mic()
+    assert not started
+    assert "already using the mic" in notes[0][0]
+
+
+def test_toggle_mic_off_clears_state(monkeypatch):
+    import threading
+    app = _mic_app(_ref(), stopped=False)
+    notes = []
+    monkeypatch.setattr(app, "notify", lambda m, **k: notes.append(m), raising=False)
+    app._sync_key = ("a", "b")
+
+    app.action_toggle_mic()
+    assert app._mic_stop.is_set()
+    assert app._mic_ref is None
+    assert app._sync_key is None          # forces a re-resolve back to MPRIS
+    assert notes == ["Mic off"]

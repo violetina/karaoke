@@ -464,26 +464,18 @@ def active_word_index(text: str, frac: float) -> int:
 
 
 def widen(text: str) -> str:
-    """Convert ASCII to Unicode fullwidth forms, i.e. double-size glyphs.
+    """Space out a line so it reads larger, using only its own characters.
 
-    A terminal cannot change font size per line, so this is the one way to make
-    the active lyric genuinely bigger rather than merely bolder: fullwidth
-    characters occupy two cells and are drawn at roughly twice the width.
+    A terminal cannot change font size per line. Unicode fullwidth forms
+    (Ｌｉｋｅ　ｔｈｉｓ) were tried first and are genuinely double-width, but
+    most monospace terminal fonts have no glyphs for that block and render the
+    whole line as tofu boxes — which is how it looked in practice.
 
-    Unlike the mood glyphs that misaligned the sentiment bars, these are East-
-    Asian width class "F" — *always* two cells, never ambiguous — so the width
-    is predictable on every terminal.
+    Letter spacing gets the prominence with characters the font already draws,
+    so it cannot fail that way. Doubles the width like the fullwidth version
+    did, so callers' fit checks are unchanged.
     """
-    out = []
-    for ch in text:
-        code = ord(ch)
-        if 0x21 <= code <= 0x7E:          # printable ASCII -> fullwidth block
-            out.append(chr(code - 0x21 + 0xFF01))
-        elif ch == " ":
-            out.append("　")          # ideographic space, also 2 cells
-        else:
-            out.append(ch)
-    return "".join(out)
+    return " ".join(text)
 
 
 def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
@@ -510,7 +502,9 @@ def _append_lyric_line(body, line: str, *, kind: str, frac: float = 0.0,
     # `big` doubles the glyph width. Applied per word so the highlight still
     # lands on word boundaries.
     grow = widen if big else (lambda s: s)
-    space = "　" if big else " "
+    # Three spaces between spaced-out words, so word boundaries stay obvious
+    # once the letters within a word are themselves separated.
+    space = "   " if big else " "
     body.append("♪ ", style=base)
     if wi < 0:
         body.append(grow(line) + "\n", style=base)
