@@ -252,6 +252,7 @@ class KaraokeTui(App):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("H", "toggle_browse", "Browse"),
+        ("A", "approve_postprocess", "Post-process"),
         ("question_mark", "help", "Keys"),
         Binding("escape", "hide_browse", "Close browse", show=False),
         ("r", "refresh", "Refresh"),
@@ -287,6 +288,7 @@ class KaraokeTui(App):
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
         self._cpu_sample: tuple | None = None
+        self._current_song: tuple[str, str, str] | None = None
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -448,6 +450,53 @@ class KaraokeTui(App):
         """escape: close the overlay if open, otherwise do nothing."""
         if self._browse_open():
             self._hide_browse()
+
+    # -- post-processing --------------------------------------------------
+    def approve_postprocess(self, artist: str, title: str,
+                            url: str = "") -> tuple[bool, str]:
+        """Queue the given track for post-processing. Returns (ok, message).
+
+        Pure enough to test: does the DB lookup and the publish, returns what
+        happened, and leaves the notifying to the caller.
+
+        Requires lyrics to exist. Post-processing derives word timings from the
+        approved lyrics and key/BPM from the audio; with no lyrics there is
+        nothing to upgrade, and the track is already queued as a lyric gap for
+        the backfill to pick up instead.
+        """
+        from .postprocess_queue import needs_postprocessing, publish_postprocess_task
+
+        if not (artist or title):
+            return False, "Nothing playing to approve"
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id(artist, title, conn)
+            if track_id is None:
+                return False, f"{artist} - {title} is not in the library yet"
+            cached = localcache.get_lyrics_by_track_id(track_id, conn)
+            if cached is None or not (cached.synced_raw or cached.plain):
+                return False, f"No lyrics for {title} yet — queued as a gap"
+            pending = needs_postprocessing(track_id, conn)
+        if not pending:
+            return False, f"{title} is already fully processed"
+        if not publish_postprocess_task(artist, title, url):
+            return False, "Broker unreachable — nothing queued"
+        return True, f"Queued {title}: {', '.join(pending)}"
+
+    def action_approve_postprocess(self) -> None:
+        """`A`: post-process whatever is playing, on demand.
+
+        The automatic enqueue in _poll_detection is silent and fires once per
+        session, so it cannot be retried if the broker was down at the time.
+        This is the deliberate version: it reports what happened and clears the
+        session guard so the track can be queued again.
+        """
+        if not self._current_song:
+            self.notify("Nothing playing to approve", severity="warning")
+            return
+        artist, title, url = self._current_song
+        self._postprocess_enqueued.discard((artist.lower(), title.lower()))
+        ok, message = self.approve_postprocess(artist, title, url)
+        self.notify(message, severity="information" if ok else "warning")
 
     def action_help(self) -> None:
         # get_key_display is the app's own formatter, so the help screen and
@@ -778,6 +827,9 @@ class KaraokeTui(App):
         display_artist = artist or det.artist
         display_title = title or det.title
         current_song = {"artist": display_artist, "title": display_title}
+        # Remembered so `A` can post-process whatever is playing without
+        # re-resolving it.
+        self._current_song = (display_artist, display_title, det.url or "")
         keybpm_line = self._format_keybpm_line(current_song)
         # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
         # if this track is missing derived assets. Best-effort; no-op if the

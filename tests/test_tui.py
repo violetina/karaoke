@@ -288,3 +288,84 @@ def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
 
     app._open_selected()
     assert overlay.has_class("-visible")
+
+
+# --- A: approve for post-processing ---------------------------------------
+
+def _approver(monkeypatch, tmp_path):
+    """A KaraokeTui wired to a temp DB, without booting the app."""
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "k.db")
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    app = KaraokeTui.__new__(KaraokeTui)
+    return app, conn
+
+
+def _add_track(conn, artist="A", title="B", *, synced=True, plain=True):
+    from karaoke import localcache
+    from karaoke.lyrics import Lyrics
+    localcache.add_track_and_lyrics(
+        artist, title,
+        Lyrics(plain="w" if plain else "",
+               synced_raw="[00:01.00] w" if synced else "", source="lrclib"),
+        url="https://youtu.be/x", conn=conn)
+
+
+def test_approve_refuses_when_nothing_is_playing(monkeypatch, tmp_path):
+    app, _ = _approver(monkeypatch, tmp_path)
+    ok, msg = app.approve_postprocess("", "")
+    assert not ok and "Nothing playing" in msg
+
+
+def test_approve_refuses_a_track_not_in_the_library(monkeypatch, tmp_path):
+    app, _ = _approver(monkeypatch, tmp_path)
+    ok, msg = app.approve_postprocess("Ghost", "Missing")
+    assert not ok and "not in the library" in msg
+
+
+def test_approve_refuses_when_there_are_no_lyrics(monkeypatch, tmp_path):
+    """"if text found" — with none, the gap queue is the right path, not this."""
+    app, conn = _approver(monkeypatch, tmp_path)
+    _add_track(conn, synced=False, plain=False)
+    ok, msg = app.approve_postprocess("A", "B")
+    assert not ok and "No lyrics" in msg
+
+
+def test_approve_queues_when_lyrics_exist(monkeypatch, tmp_path):
+    from karaoke import postprocess_queue as pq
+    app, conn = _approver(monkeypatch, tmp_path)
+    _add_track(conn)
+    published = []
+    monkeypatch.setattr(pq, "publish_postprocess_task",
+                        lambda a, t, u="": published.append((a, t, u)) or True)
+
+    ok, msg = app.approve_postprocess("A", "B", "https://youtu.be/x")
+    assert ok, msg
+    assert published == [("A", "B", "https://youtu.be/x")]
+    assert "analysis" in msg          # what it actually queued
+
+
+def test_approve_reports_an_unreachable_broker(monkeypatch, tmp_path):
+    from karaoke import postprocess_queue as pq
+    app, conn = _approver(monkeypatch, tmp_path)
+    _add_track(conn)
+    monkeypatch.setattr(pq, "publish_postprocess_task", lambda *a, **k: False)
+
+    ok, msg = app.approve_postprocess("A", "B")
+    assert not ok and "Broker unreachable" in msg
+
+
+def test_approve_clears_the_session_guard(monkeypatch, tmp_path):
+    """So a track can be re-queued after the broker comes back."""
+    from karaoke import postprocess_queue as pq
+    app, conn = _approver(monkeypatch, tmp_path)
+    _add_track(conn)
+    monkeypatch.setattr(pq, "publish_postprocess_task", lambda *a, **k: True)
+    app._current_song = ("A", "B", "")
+    app._postprocess_enqueued = {("a", "b")}
+    monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
+
+    app.action_approve_postprocess()
+    assert ("a", "b") not in app._postprocess_enqueued
