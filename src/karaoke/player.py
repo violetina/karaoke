@@ -249,16 +249,27 @@ def get_synced(
             with open(lyrics_file) as f:
                 plain_lyrics = f.read()
 
-        lrc = transcribe_to_lrc(audio_path, text=plain_lyrics)
-        # Preserve the supplied plain lyrics: Whisper is here for TIMING, and a
-        # known-good source (LRCLIB/Genius) is a better transcription than its
-        # output, which carries "🎵"/"// Music //" artifacts and misheard words.
-        # `text` is only an initial_prompt bias, not a forced alignment, so
-        # storing Whisper's words would overwrite correct lyrics with worse
-        # ones. Same rule upgrade_timings.upgrade_track follows for captions.
+        # Whisper is here for RHYTHM. Its words on sung audio are unreliable
+        # ("up to do" -> "up to doom", plus "🎵" artifacts), so when a known-good
+        # source supplied the lyrics we keep those words and take only the
+        # timings — the rule upgrade_timings.upgrade_track already follows for
+        # captions. Without supplied lyrics, Whisper's transcript is all we have.
+        known_good = (plain_lyrics or "").strip()
+        if known_good:
+            from .lyric_align import align_lyrics_to_lrc
+            from .whisper_sync import transcribe_to_words
+
+            whisper_words = transcribe_to_words(audio_path, text=plain_lyrics)
+            lrc = align_lyrics_to_lrc(known_good, whisper_words,
+                                      total_duration=duration)
+            plain_out, source = known_good, "whisper_aligned"
+        else:
+            lrc = transcribe_to_lrc(audio_path)
+            plain_out = "\n".join(t for _, t in parse_lrc(lrc))
+            source = "whisper"
+
         ly = Lyrics(
-            plain=(plain_lyrics or "").strip() or "\n".join(t for _, t in parse_lrc(lrc)),
-            synced_raw=lrc, source="whisper", lines=parse_lrc(lrc),
+            plain=plain_out, synced_raw=lrc, source=source, lines=parse_lrc(lrc),
         ) if lrc.strip() else Lyrics()
         if ly.synced_raw or ly.plain:
             try:

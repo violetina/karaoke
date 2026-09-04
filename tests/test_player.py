@@ -410,24 +410,29 @@ def test_synced_lyrics_do_not_queue_a_gap(tmp_path, monkeypatch):
 def test_force_transcribe_preserves_supplied_plain_lyrics(tmp_path, monkeypatch):
     """Whisper supplies TIMING; known-good text must survive it.
 
-    transcribe_to_lrc takes `text` as an initial_prompt bias, not a forced
+    Whisper's `text` argument is an initial_prompt bias, not a forced
     alignment, so its transcription drifts ("up to do" -> "up to doom") and
     carries music-note artifacts. Storing that would replace correct LRCLIB
-    lyrics with a worse copy.
+    lyrics with a worse copy; the real words are laid onto its timings instead.
     """
     from karaoke import localcache, player
     from karaoke.identify import SongRef
+    from karaoke.whisper_sync import Word
 
     good = "They bring you up to do\nLike your daddy done"
     lyrics_file = tmp_path / "lyrics.txt"
     lyrics_file.write_text(good)
 
+    # What Whisper actually hears: right rhythm, wrong words.
+    misheard = [Word(start=t, end=t + 0.4, text=w) for t, w in [
+        (1.0, "🎵They"), (1.5, "bring"), (2.0, "you"), (2.5, "up"), (3.0, "to"),
+        (3.5, "doom"), (5.0, "Like"), (5.5, "your"), (6.0, "daddy"), (6.5, "John"),
+    ]]
+
     conn = localcache.connect(tmp_path / "karaoke.db")
     monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
-    monkeypatch.setattr(
-        "karaoke.whisper_sync.transcribe_to_lrc",
-        lambda *a, **k: "[00:01.00] 🎵They bring you\n[00:05.00] up to doom 🎵",
-    )
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
+                        lambda *a, **k: misheard)
 
     ly = player.get_synced(
         SongRef(artist="Bruce Springsteen", title="The River",
@@ -435,9 +440,12 @@ def test_force_transcribe_preserves_supplied_plain_lyrics(tmp_path, monkeypatch)
         force_transcribe=True, lyrics_file=str(lyrics_file),
     )
 
-    assert ly.plain == good                 # correct words kept
-    assert "🎵" not in ly.plain
-    assert ly.synced_raw.startswith("[00:01.00]")   # timings still taken
+    assert ly.plain == good                       # correct words kept
+    assert "🎵" not in ly.synced_raw               # artifacts gone from the LRC too
+    assert "doom" not in ly.synced_raw            # misheard words replaced
+    assert "Like your daddy done" in ly.synced_raw
+    assert ly.source == "whisper_aligned"
+    assert [t for t, _ in ly.lines] == [1.0, 5.0]  # Whisper's rhythm kept
 
 
 def test_force_transcribe_without_lyrics_file_uses_whisper_text(tmp_path, monkeypatch):

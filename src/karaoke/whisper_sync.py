@@ -96,7 +96,7 @@ def lines_to_lrc(lines: list[tuple[float, str]]) -> str:
     return "\n".join(out)
 
 
-def transcribe_to_lrc(
+def transcribe_to_words(
     audio_path: str,
     *,
     text: Optional[str] = None,
@@ -104,14 +104,17 @@ def transcribe_to_lrc(
     language: Optional[str] = None,
     compute_type: str = "int8",
     vad_filter: bool = False,
-) -> str:
-    """Transcribe an audio file to LRC text using faster-whisper.
+) -> list[Word]:
+    """Transcribe an audio file to timestamped words using faster-whisper.
 
-    Defaults to the `small` model. `condition_on_previous_text=False` plus a
-    post-hoc dedup pass suppress the line-repetition the model produces on
-    musical audio. VAD is OFF by default: faster-whisper's Silero VAD
-    over-filters singing/quiet intros and can discard the entire track.
-    Returns an LRC string (may be empty if nothing was transcribed).
+    Defaults to the `small` model. `condition_on_previous_text=False`
+    suppresses the line-repetition the model produces on musical audio. VAD is
+    OFF by default: faster-whisper's Silero VAD over-filters singing/quiet
+    intros and can discard the entire track.
+
+    Word timings are the useful product — Whisper's *words* on music are
+    unreliable, but its *rhythm* is good. Callers that hold the real lyrics can
+    align them onto these timings; see :mod:`karaoke.lyric_align`.
     """
     from faster_whisper import WhisperModel
 
@@ -134,6 +137,28 @@ def transcribe_to_lrc(
         else:
             # no word timestamps -> fall back to one line per segment
             words.append(Word(start=seg.start, end=seg.end, text=seg.text))
+    return words
+
+
+def transcribe_to_lrc(
+    audio_path: str,
+    *,
+    text: Optional[str] = None,
+    model_size: str = "small",
+    language: Optional[str] = None,
+    compute_type: str = "int8",
+    vad_filter: bool = False,
+) -> str:
+    """Transcribe an audio file to LRC text using faster-whisper.
+
+    Groups :func:`transcribe_to_words` output into lines and renders LRC. A
+    post-hoc dedup pass drops adjacent repeats. Returns an LRC string (may be
+    empty if nothing was transcribed).
+    """
+    words = transcribe_to_words(
+        audio_path, text=text, model_size=model_size, language=language,
+        compute_type=compute_type, vad_filter=vad_filter,
+    )
     lines = _dedup_adjacent(group_words_to_lines(words))
     return lines_to_lrc(lines)
 

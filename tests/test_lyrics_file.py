@@ -4,9 +4,13 @@ from unittest.mock import patch, MagicMock
 from karaoke.cli import karaoke_main
 
 
+# play_offset_synced is stubbed as well as play: alignment now yields a real
+# timeline, so the CLI would otherwise render playback against a MagicMock ref.
+@patch("karaoke.player.play_offset_synced")
 @patch("karaoke.player.play")
 @patch("karaoke.cli.from_file")
-def test_lyrics_file_passed_to_transcriber(mock_from_file, mock_play, tmp_path):
+def test_lyrics_file_passed_to_transcriber(mock_from_file, mock_play,
+                                           mock_play_synced, tmp_path):
     lyrics_file = tmp_path / "lyrics.txt"
     lyrics_file.write_text("hello world")
 
@@ -22,7 +26,11 @@ def test_lyrics_file_passed_to_transcriber(mock_from_file, mock_play, tmp_path):
         source="file",
     )
 
-    with patch("karaoke.whisper_sync.transcribe_to_lrc") as mock_transcribe:
+    # With lyrics supplied, Whisper is asked for word TIMINGS rather than an
+    # LRC: the real words are laid onto its rhythm instead of being replaced by
+    # its transcription. The text is still passed as an initial_prompt bias.
+    with patch("karaoke.whisper_sync.transcribe_to_words") as mock_transcribe:
+        mock_transcribe.return_value = []
         karaoke_main([
             "--file", str(audio_file),
             "--force-transcribe",
