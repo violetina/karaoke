@@ -125,6 +125,10 @@ class Lyrics:
     synced_raw: str = ""          # original LRC text (cached verbatim)
     source: str = "none"          # lrclib | whisper | none
     lines: list[tuple[float, str]] = field(default_factory=list)  # (seconds, text)
+    # Track length in seconds as reported by the lyrics source. Lets a caller
+    # reject audio of obviously the wrong length (a full-album upload, a clip)
+    # before transcribing against it. None when the source doesn't report one.
+    duration: Optional[float] = None
 
     @property
     def has_synced(self) -> bool:
@@ -229,11 +233,16 @@ def _to_lyrics(payload: dict) -> Lyrics:
     synced = payload.get("syncedLyrics") or ""
     plain = payload.get("plainLyrics") or ""
     lines = parse_lrc(synced) if synced else []
+    try:
+        duration = float(payload["duration"]) if payload.get("duration") else None
+    except (TypeError, ValueError):
+        duration = None
     return Lyrics(
         plain=plain,
         synced_raw=synced,
         source="lrclib" if (synced or plain) else "none",
         lines=lines,
+        duration=duration,
     )
 
 

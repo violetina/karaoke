@@ -10,6 +10,12 @@ from . import web
 from .identify import SongRef
 from .lyrics import Lyrics, clean_title, fetch_lrclib
 from .player import get_synced
+from .source_select import select_best_source
+
+# How many YouTube results to weigh before picking. The right upload is often
+# not first — for "Kyuss - Apothecaries' Weight" the official "- Topic" audio
+# ranks above a guitar cover only once several results are compared.
+SEARCH_CANDIDATES = 5
 
 def run(
     *,
@@ -171,12 +177,27 @@ def _process_gap(gap_id: int, artist: str, title: str) -> None:
     lyrics_text = lyrics.plain
 
     # 3. Plain text only: find + download audio on YouTube to align against.
+    #    Several candidates, then pick deliberately: the top hit is regularly a
+    #    cover, a live cut or a whole-album rip, and Whisper cannot produce
+    #    usable timings from any of those.
     print(f"  Searching YouTube for '{artist} - {title}'...")
-    yt_results = youtube.search(f"{artist} - {title}", limit=1)
+    yt_results = youtube.search(f"{artist} - {title}", limit=SEARCH_CANDIDATES)
     if not yt_results:
         raise RuntimeError("No YouTube results found")
-    yt_url = yt_results[0]['url']
-    print(f"    Found: {yt_url}")
+
+    best = select_best_source(yt_results, artist, title, lyrics.duration)
+    if best is None:
+        raise RuntimeError(
+            f"No YouTube result matched (checked {len(yt_results)}; "
+            f"expected ~{lyrics.duration:.0f}s)" if lyrics.duration
+            else f"No usable YouTube result (checked {len(yt_results)})"
+        )
+    yt_url = best["url"]
+    dur = best.get("duration")
+    print(f"    Picked: {best.get('title', '')[:60]!r}"
+          f" [{best.get('uploader') or '?'}"
+          f"{f', {dur:.0f}s' if dur else ''}]")
+    print(f"    {yt_url}")
 
     print("  Downloading audio...")
     audio_path = youtube.download(yt_url)

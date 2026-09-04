@@ -312,7 +312,13 @@ def clear_youtube_cache(directory: Optional[Path] = None) -> YouTubeCacheSummary
 
 
 def search(query: str, limit: int = 1) -> list[dict]:
-    """Search YouTube and return lightweight result dicts for backfill."""
+    """Search YouTube and return lightweight result dicts for backfill.
+
+    Each result carries ``url``, ``title``, ``duration`` (seconds, or None) and
+    ``uploader``. Duration and uploader are what let a caller tell an official
+    upload from a cover, a live cut or a whole-album rip; flat extraction
+    already provides them, so they are kept rather than discarded.
+    """
     try:
         from yt_dlp import YoutubeDL  # type: ignore
     except ImportError as exc:  # pragma: no cover
@@ -328,7 +334,16 @@ def search(query: str, limit: int = 1) -> list[dict]:
         if not video_id:
             continue
         url = entry.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}"
-        results.append({"url": url, "title": entry.get("title") or ""})
+        try:
+            duration = float(entry["duration"]) if entry.get("duration") else None
+        except (TypeError, ValueError):
+            duration = None
+        results.append({
+            "url": url,
+            "title": entry.get("title") or "",
+            "duration": duration,
+            "uploader": entry.get("uploader") or entry.get("channel") or "",
+        })
     return results
 
 
