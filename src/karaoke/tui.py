@@ -42,8 +42,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
 
-from . import (detect, localcache, playerctl, sample_audio, staging,
-               track_analysis, visuals)
+from . import (detect, localcache, playerctl, recorder, sample_audio,
+               staging, track_analysis, visuals)
 from .browse import open_song_url
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
@@ -459,6 +459,7 @@ class KaraokeTui(App):
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
+        ("O", "toggle_record", "Record"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
         ("T", "stats", "Stats"),
@@ -506,6 +507,7 @@ class KaraokeTui(App):
         # single failure cannot become a lookup storm across a listening session.
         self._spotify_off = False
         self._sampling = False     # a capture is running (real time)
+        self._recording_id: int | None = None
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
@@ -528,6 +530,7 @@ class KaraokeTui(App):
                 with Horizontal(id="statusbar"):
                     yield Static("Mode: auto", id="mode-label")
                     yield Static("worker-load: —", id="worker-load")
+                yield Static("", id="record-status")
             with Vertical(id="visuals"):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("key: —\nbpm: —", id="keybpm")
@@ -554,6 +557,7 @@ class KaraokeTui(App):
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
+        self.set_interval(5.0, self._refresh_record_status)
         self.apply_size_classes(self.size.width, self.size.height)
         self._poll_detection()
         self._refresh_worker_load()
@@ -930,6 +934,50 @@ class KaraokeTui(App):
         self.call_from_thread(self.notify, f"{artist} - {title}: {key}, {bpm} BPM")
         # The analysis panel reads from the DB, so refresh it now the row exists.
         self.call_from_thread(self._refresh_track_info, None)
+
+    def action_toggle_record(self) -> None:
+        """`O`: record the output continuously, marking what plays on it.
+
+        Unlike `k`, which samples one track in real time, this runs unattended:
+        songrec is asked what is playing every so often and each answer is
+        stored as a marker, so the session can be cut back into tracks and
+        analysed afterwards.
+        """
+        if self._recording_id is not None:
+            recorded, total = recorder.mark_count(self._recording_id)
+            recorder.stop(self._recording_id)
+            self.notify(f"Recording {self._recording_id} stopped "
+                        f"({recorded}/{total} tracks identified)")
+            self._recording_id = None
+            self._refresh_record_status()
+            return
+        try:
+            session = recorder.start()
+        except recorder.RecorderError as exc:
+            self.notify(f"Cannot record: {exc}", severity="error")
+            return
+        except Exception as exc:
+            log.exception("failed to start recording")
+            self.notify(f"Record failed: {exc}", severity="error")
+            return
+        self._recording_id = session.recording_id
+        self.notify(f"Recording {session.recording_id} to {session.directory.name}")
+        self._refresh_record_status()
+
+    def _refresh_record_status(self) -> None:
+        """Keep the record read-out current; also catches a died recorder."""
+        panel = self.query_one("#record-status", Static)
+        if self._recording_id is None:
+            panel.update("")
+            return
+        if not recorder.is_running(self._recording_id):
+            # The capture died on its own (ffmpeg exited, or a cap was hit).
+            self.notify(f"Recording {self._recording_id} ended", severity="warning")
+            self._recording_id = None
+            panel.update("")
+            return
+        ok, total = recorder.mark_count(self._recording_id)
+        panel.update(f"REC {self._recording_id}  {ok}/{total} marks")
 
     def action_approve_postprocess(self) -> None:
         """`A`: post-process whatever is playing, on demand.
