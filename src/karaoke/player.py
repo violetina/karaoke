@@ -506,8 +506,26 @@ def _gap_marker(progress: float, width: int = 24) -> str:
     return "♪ " + "─" * filled + "•" + " " * (width - filled)
 
 
+def _append_big_line(body, blocks, *, word: int, mood: str) -> None:
+    """Append big-type rows, highlighting the column range of the active word.
+
+    Every glyph cell is a single-width character, so a span's column range is
+    also a slice of the row string.
+    """
+    bg = _MOOD_BG.get(mood, "on blue")
+    base = f"bold white {bg}"
+    for block in blocks:
+        for row in block.rows:
+            for span in block.spans:
+                style = "bold white on magenta" if span.word == word else base
+                body.append(row[span.start:span.end], style=style)
+            body.append("\n", style=base)
+
+
 def _render_body(body, tl: "LyricTimeline", elapsed: float,
-                 *, before: int = 3, after: int = 5, mood: str = "neutral") -> None:
+                 *, before: int = 3, after: int = 5, mood: str = "neutral",
+                 big_width: Optional[int] = None,
+                 big_height: Optional[int] = None) -> None:
     """Fill a Rich Text `body` with the window around the active line.
 
     `mood` tints the active line's background (from sentiment.mood_of on the
@@ -516,10 +534,26 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
     During an instrumental break the active line is dimmed and a rest marker
     is shown, rather than leaving a stale line highlighted as if it were still
     being sung.
+
+    `big_width`/`big_height` opt in to rendering the active line as large type
+    sized to the caller's panel. Omitted (the console players) the output is
+    byte-identical to before. Big type is only ever an addition: if the line
+    will not fit, or the panel is too small, this silently falls back to the
+    ordinary rendering rather than showing something sheared.
     """
     active = tl.active_index(elapsed)
     frac = tl.active_fraction(elapsed)
     in_gap = tl.in_gap(elapsed)
+
+    big = None
+    if big_width and not in_gap and 0 <= active < len(tl.lines):
+        from . import bigtext
+        big = bigtext.render(tl.lines[active][1], big_width)
+        if big is not None and big_height:
+            rows = sum(len(b.rows) for b in big)
+            before, after = bigtext.context_window(big_height, rows)
+            after += 1          # `after` is exclusive of the active line below
+
     lo = max(0, active - before)
     hi = min(len(tl.lines), active + after)
     for i in range(lo, hi):
@@ -531,6 +565,14 @@ def _render_body(body, tl: "LyricTimeline", elapsed: float,
                 _append_lyric_line(body, line, kind="past")
                 body.append(_gap_marker(tl.gap_progress(elapsed)) + "\n",
                             style="cyan")
+            elif big is not None:
+                word = tl.word_index(elapsed)
+                if word is None:
+                    word = active_word_index(line, frac)
+                _append_big_line(body, big, word=word, mood=mood)
+                # A plain copy underneath: the safety net when a line wraps or
+                # loses a character the font cannot draw.
+                body.append("  " + line + "\n", style="dim")
             else:
                 _append_lyric_line(body, line, kind="active", frac=frac,
                                    mood=mood, word=tl.word_index(elapsed))

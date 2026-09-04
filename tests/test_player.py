@@ -511,3 +511,73 @@ def test_postprocess_enqueue_failure_never_breaks_playback(tmp_path, monkeypatch
     ly = player.get_synced(SongRef(artist="A", title="B", source="radio"),
                            stats_mode="radio")
     assert ly.synced_raw == lrc      # playback unaffected
+
+
+# --- big-type active line --------------------------------------------------
+
+_BIG_LINES = [
+    (0.0, "Little fish in a great big sea"),
+    (10.0, "swimming past me in the dark"),
+    (20.0, "all the stars were out tonight"),
+]
+
+
+def _big_body(elapsed, **kw):
+    from rich.text import Text
+    from karaoke.player import LyricTimeline, _render_body
+
+    body = Text(no_wrap=True, overflow="crop")
+    _render_body(body, LyricTimeline(_BIG_LINES), elapsed, **kw)
+    return body
+
+
+def test_no_big_kwargs_leaves_output_unchanged():
+    """The console players pass no width and must render exactly as before."""
+    assert _big_body(3.0).plain == _big_body(3.0, big_width=None).plain
+
+
+def test_big_width_renders_block_glyphs():
+    plain = _big_body(3.0, big_width=200, big_height=16).plain
+    assert "_" in plain and "|" in plain
+    assert plain.count("\n") > len(_BIG_LINES)      # block rows added
+
+
+def test_big_line_keeps_a_plain_caption():
+    """The readable fallback under the block rows."""
+    assert "Little fish in a great big sea" in _big_body(
+        3.0, big_width=200, big_height=16).plain
+
+
+def test_context_lines_survive_around_the_big_line():
+    plain = _big_body(15.0, big_width=200, big_height=20).plain
+    assert "Little fish in a great big sea" in plain    # before
+    assert "all the stars were out tonight" in plain    # after
+
+
+def test_narrow_panel_falls_back_to_plain():
+    """Below MIN_WIDTH the plain renderer is used, not a sheared block."""
+    narrow = _big_body(3.0, big_width=30, big_height=16).plain
+    assert narrow == _big_body(3.0).plain
+
+
+def test_highlight_moves_through_the_big_line():
+    def first_highlight(t):
+        body = _big_body(t, big_width=200, big_height=16)
+        cols = [s.start for s in body.spans if "magenta" in str(s.style)]
+        return min(cols) if cols else None
+
+    early, late = first_highlight(0.5), first_highlight(9.0)
+    assert early is not None and late is not None
+    assert late > early
+
+
+def test_no_big_type_during_an_instrumental_gap():
+    """A rest marker, not block letters, while nothing is being sung."""
+    from karaoke.player import LyricTimeline, _render_body
+    from rich.text import Text
+
+    tl = LyricTimeline([(0.0, "sing this now"), (60.0, "and later this")])
+    body = Text(no_wrap=True, overflow="crop")
+    _render_body(body, tl, 30.0, big_width=200, big_height=16)
+    assert "♪" in body.plain
+    assert "|___" not in body.plain
