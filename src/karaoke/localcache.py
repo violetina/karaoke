@@ -10,6 +10,7 @@ available SQLite database (``~/.local/share/karaoke/karaoke.db`` by default) tha
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -17,7 +18,8 @@ from pathlib import Path
 from typing import Optional
 
 from .config import settings
-from .lyrics import Lyrics, parse_lrc
+from .logger import log
+from .lyrics import Lyrics, clean_artist, clean_page_title, parse_lrc
 
 _NEW_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
@@ -55,6 +57,8 @@ CREATE TABLE IF NOT EXISTS lyric_gaps (
     status          TEXT NOT NULL DEFAULT 'pending', -- pending | processed | failed
     created_at      REAL NOT NULL,
     processed_at    REAL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
     UNIQUE(artist, title)
 );
 
@@ -88,11 +92,60 @@ def _key(artist: str, title: str) -> str:
     return f"{artist.strip().casefold()}\0{title.strip().casefold()}"
 
 
+def ensure_gap_columns(conn: sqlite3.Connection) -> None:
+    """Add the gap diagnostics columns to an existing DB (idempotent).
+
+    ``attempts`` and ``last_error`` let the backfill runner distinguish a
+    transient throttle from a real miss, and make ``failed`` rows retryable
+    instead of terminal.
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(lyric_gaps)")}
+    if "attempts" not in have:
+        conn.execute("ALTER TABLE lyric_gaps ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    if "last_error" not in have:
+        conn.execute("ALTER TABLE lyric_gaps ADD COLUMN last_error TEXT")
+    conn.commit()
+
+
+def normalize_gap_metadata(artist: str, title: str) -> Optional[tuple[str, str]]:
+    """Normalize player metadata for the gap queue, or None if unusable.
+
+    Player/YouTube metadata arrives decorated ("Artist - Topic",
+    "Song | YouTube Music", "(Official Video)") or degenerate (empty artist,
+    a whole-album page title). Such rows can never resolve against LRCLIB, so
+    they are rejected here rather than queued and retried forever.
+    """
+    # Checked against the raw title: clean_page_title strips "(Full Album)" as a
+    # decoration, so the reject has to run before it.
+    if re.search(r"\b(full\s+album|full\s+set|album\s+completo|mixtape)\b",
+                 title or "", re.I):
+        return None
+    a = clean_artist(clean_page_title(artist or ""))
+    t = clean_page_title(title or "")
+    if not a or not t:
+        return None
+    # YouTube titles repeat the artist ("Red Hot Chili Peppers - Suck My Kiss"),
+    # which LRCLIB's exact endpoint cannot match. Drop the redundant prefix.
+    prefix = re.match(rf"^{re.escape(a)}\s*[-–—:]\s*(?P<rest>.+)$", t, re.I)
+    if prefix:
+        t = prefix.group("rest").strip()
+    if not t:
+        return None
+    return a, t
+
+
 def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
-    """Log a song that is missing lyrics."""
+    """Log a song that is missing lyrics.
+
+    Metadata is normalized first; unusable rows are dropped instead of queued.
+    """
+    cleaned = normalize_gap_metadata(artist, title)
+    if cleaned is None:
+        log.debug("lyric gap skipped (unusable metadata): %r - %r", artist, title)
+        return
     conn.execute(
         "INSERT OR IGNORE INTO lyric_gaps (artist, title, created_at) VALUES (?, ?, ?)",
-        (artist, title, time.time())
+        (*cleaned, time.time())
     )
     conn.commit()
 
@@ -131,6 +184,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
+    ensure_gap_columns(conn)
     return conn
 
 

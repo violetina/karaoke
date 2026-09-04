@@ -64,6 +64,55 @@ def clean_title(title: str) -> str:
     return out or title.strip()
 
 
+# Decorations that YouTube/player page titles carry but real track titles don't.
+# Unlike _TITLE_SUFFIX these can appear anywhere in the string, not just at the
+# end (e.g. "Song (Official Video) [HD]" or "Song | YouTube Music").
+_PAGE_DECORATION = re.compile(
+    r"""(?:
+        \s*[|]\s*(?:youtube(?:\s+music)?|topic)\s*(?=$|[|\-–—])
+        |\s*[-–—]\s*youtube(?:\s+music)?\s*$
+        |\s*[\(\[]\s*(?:official(?:\s+\w+)*|lyrics?(?:\s+video)?|
+                        (?:full\s+)?album|full\s+album|audio|hd|hq|4k|
+                        music\s+video|visualizer|lyric\s+video)\s*[\)\]]
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# YouTube's auto-generated artist channels are named "<Artist> - Topic".
+_ARTIST_TOPIC = re.compile(r"\s*[-–—]\s*topic\s*$", re.IGNORECASE)
+
+# The same channel suffix, but stranded at the START of the title because the
+# raw "<Artist> - Topic - <Song>" string was split on its first separator.
+_TITLE_TOPIC_PREFIX = re.compile(r"^\s*topic\s*[-–—]\s*", re.IGNORECASE)
+
+# A title that is nothing but a platform name carries no song at all.
+_TITLE_IS_PLATFORM = re.compile(
+    r"^\s*(?:youtube(?:\s+music)?|topic|spotify|soundcloud)\s*$", re.IGNORECASE
+)
+
+
+def clean_page_title(title: str) -> str:
+    """Strip YouTube/player page decorations from a title.
+
+    Removes "| YouTube Music", "(Official Video)", "[HD]", "(Full Album)" and
+    friends, then collapses leftover separators. Complements :func:`clean_title`,
+    which only handles trailing streaming-edition suffixes.
+    """
+    prev = None
+    out = title.strip()
+    while out and out != prev:
+        prev = out
+        out = _PAGE_DECORATION.sub(" ", out)
+        out = _TITLE_TOPIC_PREFIX.sub("", out)
+        out = re.sub(r"\s{2,}", " ", out).strip(" -–—|")
+    return "" if _TITLE_IS_PLATFORM.match(out) else out
+
+
+def clean_artist(artist: str) -> str:
+    """Strip YouTube auto-channel decoration from an artist name ("- Topic")."""
+    return _ARTIST_TOPIC.sub("", artist.strip()).strip()
+
+
 @dataclass
 class Lyrics:
     """Lyrics payload used by fetchers, cache lookups and players.

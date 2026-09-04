@@ -175,3 +175,66 @@ def test_add_track_with_url_updates_existing_track_no_duplicate(tmp_path):
     got = localcache.get_lyrics_by_track_id(canonical_id, c)
     assert got is not None and got.source == "whisper"
 
+
+
+def test_normalize_gap_metadata_strips_page_decorations():
+    n = localcache.normalize_gap_metadata
+    assert n("Motorpsycho - Topic", "Vortex Surfer") == ("Motorpsycho", "Vortex Surfer")
+    assert n("Luther Vandross", "Never Too Much (Official HD Video) | YouTube Music") == (
+        "Luther Vandross", "Never Too Much"
+    )
+
+
+def test_normalize_gap_metadata_rejects_unusable_rows():
+    n = localcache.normalize_gap_metadata
+    assert n("", "September | YouTube Music") is None          # no artist
+    assert n("Artist", "") is None                              # no title
+    assert n("RHINO", "Faith No More - Angel Dust (Full Album)") is None  # not a track
+
+
+def test_normalize_gap_metadata_keeps_real_titles_intact():
+    n = localcache.normalize_gap_metadata
+    assert n("Gotye", "Somebody That I Used to Know") == (
+        "Gotye", "Somebody That I Used to Know"
+    )
+    # Streaming-edition suffixes are clean_title's job, not the gap normalizer's.
+    assert n("Ween", "Voodoo Lady - 2024 Remastered") == (
+        "Ween", "Voodoo Lady - 2024 Remastered"
+    )
+
+
+def test_log_lyric_gap_skips_unusable_metadata(tmp_path):
+    c = _conn(tmp_path)
+    localcache.log_lyric_gap("", "September | YouTube Music", c)
+    localcache.log_lyric_gap("islandman - Topic", "Agit", c)
+    rows = c.execute("SELECT artist, title FROM lyric_gaps").fetchall()
+    assert [(r["artist"], r["title"]) for r in rows] == [("islandman", "Agit")]
+
+
+def test_normalize_gap_metadata_strips_stranded_topic_prefix():
+    """"Artist - Topic - Song" split on its first separator strands "Topic - "."""
+    n = localcache.normalize_gap_metadata
+    assert n("Mr. Bungle", "Topic - Violenza Domestica") == (
+        "Mr. Bungle", "Violenza Domestica"
+    )
+    assert n("Fugazi", "Topic - Waiting Room") == ("Fugazi", "Waiting Room")
+
+
+def test_normalize_gap_metadata_rejects_platform_only_title():
+    n = localcache.normalize_gap_metadata
+    assert n("Violenza Domestica", "YouTube") is None
+    assert n("Some Artist", "YouTube Music") is None
+
+
+def test_normalize_gap_metadata_drops_redundant_artist_prefix():
+    """YouTube titles repeat the artist; LRCLIB's exact endpoint can't match that."""
+    n = localcache.normalize_gap_metadata
+    assert n("Red Hot Chili Peppers", "Red Hot Chili Peppers - Suck My Kiss") == (
+        "Red Hot Chili Peppers", "Suck My Kiss"
+    )
+    # A song genuinely sharing the artist's name survives as itself.
+    assert n("Bad Company", "Bad Company - Bad Company") == (
+        "Bad Company", "Bad Company"
+    )
+    # A title that merely starts with a similar word is left alone.
+    assert n("Ween", "Weenie Roast") == ("Ween", "Weenie Roast")
