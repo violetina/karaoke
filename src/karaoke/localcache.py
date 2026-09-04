@@ -63,10 +63,25 @@ CREATE TABLE IF NOT EXISTS lyric_gaps (
     UNIQUE(artist, title)
 );
 
+CREATE TABLE IF NOT EXISTS spotify_lookups (
+    track_id   INTEGER PRIMARY KEY,
+    -- NULL means Spotify was asked and had no match. That is a real result and
+    -- must be remembered: without it, every track Spotify does not carry is
+    -- re-searched on every play, and search is the rate-limited endpoint.
+    uri        TEXT,
+    checked_at REAL NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
 CREATE TABLE IF NOT EXISTS track_sync_offsets (
     track_id    INTEGER PRIMARY KEY,
     offset_s    REAL NOT NULL,
     updated_at  REAL NOT NULL,
+    -- Which clock the offset was tuned against: 'radio' (dead-reckoned from
+    -- songrec, carries DEFAULT_LEAD_S) or 'player' (MPRIS position, no lead).
+    -- An offset is only valid for its own clock; see offset_mode().
+    mode        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 """
@@ -151,28 +166,127 @@ def log_lyric_gap(artist: str, title: str, conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def get_sync_offset(track_id: Optional[int], conn: sqlite3.Connection) -> Optional[float]:
-    """Return the saved lyric sync offset (seconds) for a track, or None."""
+# How many times a track may be looked up on Spotify before we stop asking. A
+# transient failure deserves one retry; more than that and we are just spending
+# quota on a song Spotify does not have.
+SPOTIFY_LOOKUP_ATTEMPTS = 2
+
+
+def ensure_spotify_lookup_table(conn: sqlite3.Connection) -> None:
+    """Create the Spotify lookup cache in databases predating it."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS spotify_lookups (
+            track_id   INTEGER PRIMARY KEY,
+            uri        TEXT,
+            checked_at REAL NOT NULL,
+            attempts   INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+
+def spotify_lookup_due(track_id: Optional[int], conn: sqlite3.Connection, *,
+                       max_attempts: int = SPOTIFY_LOOKUP_ATTEMPTS) -> bool:
+    """Whether this track may be looked up on Spotify.
+
+    False once a URI is known (the answer is cached), and false once the track
+    has been asked about ``max_attempts`` times without one — a miss is a
+    result, not an invitation to keep spending search quota.
+    """
+    if track_id is None:
+        return False
+    row = conn.execute(
+        "SELECT uri, attempts FROM spotify_lookups WHERE track_id = ?",
+        (track_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    if row["uri"]:
+        return False
+    return int(row["attempts"] or 0) < max_attempts
+
+
+def record_spotify_lookup(track_id: int, uri: Optional[str],
+                          conn: sqlite3.Connection) -> None:
+    """Record the outcome of a Spotify lookup, hit or miss.
+
+    Call this for a miss too. Never call it for a rate-limit error: a 429 says
+    nothing about whether Spotify has the song, and recording it would cache a
+    false negative that ``spotify_lookup_due`` would then honour forever.
+    """
+    conn.execute(
+        """
+        INSERT INTO spotify_lookups (track_id, uri, checked_at, attempts)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(track_id) DO UPDATE SET
+            uri = excluded.uri,
+            checked_at = excluded.checked_at,
+            attempts = spotify_lookups.attempts + 1
+        """,
+        (track_id, uri or None, time.time()),
+    )
+    conn.commit()
+
+
+def offset_mode(mode: str) -> str:
+    """Collapse a detection mode to the clock its sync offset belongs to.
+
+    Radio dead-reckons the playhead from songrec and adds ``DEFAULT_LEAD_S`` to
+    cover the listening latency; every other mode reads an MPRIS position with
+    no such lead. An offset tuned against one clock is wrong by roughly that
+    lead on the other, so the two are stored and matched separately. Modes that
+    share the MPRIS position (scan, spotify, listen) share an offset.
+    """
+    return "radio" if mode == "radio" else "player"
+
+
+def ensure_sync_offset_columns(conn: sqlite3.Connection) -> None:
+    """Add the ``mode`` column to databases created before it existed."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(track_sync_offsets)")}
+    if "mode" not in cols:
+        conn.execute("ALTER TABLE track_sync_offsets ADD COLUMN "
+                     "mode TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
+def get_sync_offset(track_id: Optional[int], conn: sqlite3.Connection,
+                    mode: Optional[str] = None) -> Optional[float]:
+    """Return the saved lyric sync offset (seconds) for a track, or None.
+
+    When ``mode`` is given, an offset saved against a different clock is
+    ignored rather than misapplied — the caller then falls back to its default.
+    Rows predating the ``mode`` column store ``''`` and are honoured for any
+    mode: they cannot be attributed, and the alternative is silently discarding
+    tuning the user did by hand.
+    """
     if track_id is None:
         return None
     row = conn.execute(
-        "SELECT offset_s FROM track_sync_offsets WHERE track_id = ?",
+        "SELECT offset_s, mode FROM track_sync_offsets WHERE track_id = ?",
         (track_id,),
     ).fetchone()
-    return float(row["offset_s"]) if row is not None else None
+    if row is None:
+        return None
+    saved = row["mode"] or ""
+    if mode is not None and saved and saved != offset_mode(mode):
+        return None
+    return float(row["offset_s"])
 
 
-def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection) -> None:
+def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection,
+                    mode: str = "") -> None:
     """Persist (upsert) the per-track lyric sync offset in seconds."""
     conn.execute(
         """
-        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at, mode)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(track_id) DO UPDATE SET
             offset_s = excluded.offset_s,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            mode = excluded.mode
         """,
-        (track_id, float(offset_s), time.time()),
+        (track_id, float(offset_s), time.time(),
+         offset_mode(mode) if mode else ""),
     )
     conn.commit()
 
@@ -186,6 +300,8 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)
+    ensure_sync_offset_columns(conn)
+    ensure_spotify_lookup_table(conn)
     return conn
 
 

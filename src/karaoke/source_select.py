@@ -30,6 +30,24 @@ DURATION_TOLERANCE_S = 15.0
 
 _TOPIC_UPLOADER = re.compile(r"\s-\s*topic\s*$", re.IGNORECASE)
 
+# Official music videos. Not a *wrong* recording the way a cover or a live cut
+# is — it is usually the same master — but YouTube Music plays a video id in
+# video mode, and the video edit routinely carries a cold open, a spoken intro
+# or a tacked-on outro that the audio release does not. Every timestamp after
+# that shifts, and the shift differs between the video and audio versions of the
+# same song, so a sync offset tuned against one is wrong against the other.
+#
+# Down-ranked rather than rejected: for plenty of songs the video is the only
+# upload there is, and a shifted-but-real source beats no source. The penalty is
+# smaller than the artist-channel bonus on purpose, so an official video still
+# beats an anonymous re-upload of the audio — those are frequently the wrong
+# master, and a wrong master cannot be corrected by an offset at all.
+_MUSIC_VIDEO = re.compile(
+    r"\b(?:official\s+(?:music\s+)?video|music\s+video|official\s+clip|"
+    r"videoclip|video\s+oficial)\b",
+    re.IGNORECASE,
+)
+
 # Markers of a recording that is not the studio original. Lyrics still exist for
 # these, but the timings will not line up with the released version.
 _NON_STUDIO = re.compile(
@@ -84,6 +102,11 @@ def score_candidate(candidate: dict, artist: str, title: str) -> float:
     # Not the studio original: lyrics may match, timings will not.
     if _NON_STUDIO.search(cand_title):
         score -= 8.0
+
+    # Prefer the audio release over the music video: same song, but the video
+    # edit's intro shifts every lyric timestamp. See _MUSIC_VIDEO.
+    if _MUSIC_VIDEO.search(cand_title):
+        score -= 3.0
 
     return score
 

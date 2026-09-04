@@ -115,3 +115,44 @@ def test_skips_candidates_without_url():
 
 def test_empty_candidate_list():
     assert ss.select_best_source([], "A", "B", None) is None
+
+
+# --- audio release preferred over the music video ---------------------------
+
+def _vid(title, uploader="", duration=200.0):
+    return {"title": title, "uploader": uploader, "duration": duration,
+            "url": "https://youtu.be/" + title[:6].replace(" ", "")}
+
+
+def test_topic_audio_beats_the_official_video():
+    """The common case: both exist, the audio master should win."""
+    best = ss.select_best_source(
+        [_vid("Glory Box (Official Video)", "Portishead"),
+         _vid("Glory Box", "Portishead - Topic")],
+        "Portishead", "Glory Box", 200.0)
+    assert best["uploader"] == "Portishead - Topic"
+
+
+def test_official_video_still_wins_over_an_anonymous_reupload():
+    """A shifted real master beats a random re-upload of unknown provenance."""
+    best = ss.select_best_source(
+        [_vid("Glory Box (Official Video)", "Portishead"),
+         _vid("Glory Box", "somerandomuploader99")],
+        "Portishead", "Glory Box", 200.0)
+    assert best["uploader"] == "Portishead"
+
+
+def test_music_video_is_downranked_not_rejected():
+    """The only upload being a video must still yield a source."""
+    best = ss.select_best_source(
+        [_vid("Glory Box (Official Music Video)", "Portishead")],
+        "Portishead", "Glory Box", 200.0)
+    assert best is not None
+
+
+def test_plain_audio_upload_beats_a_video_from_the_same_channel():
+    best = ss.select_best_source(
+        [_vid("Glory Box (Official Video)", "Portishead"),
+         _vid("Glory Box", "Portishead")],
+        "Portishead", "Glory Box", 200.0)
+    assert "Video" not in best["title"]

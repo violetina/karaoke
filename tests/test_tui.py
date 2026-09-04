@@ -436,12 +436,16 @@ def test_background_fetch_ignores_a_blank_track(monkeypatch, tmp_path):
 
 # --- mic / radio mode ------------------------------------------------------
 
-def _mic_app(ref=None, stopped=True):
+def _mic_app(ref=None, stopped=True, duration=None):
     from karaoke.tui import KaraokeTui
     app = KaraokeTui.__new__(KaraokeTui)
     app._mic_ref = ref
     app._mic_stop = None if stopped else __import__("threading").Event()
     app._mode_override = None
+    # Bounds the dead-reckoned playhead so a repeating track cannot run past
+    # its own end; None leaves the reckoning unbounded. See
+    # tests/test_sync_offset_modes.py for the wrap behaviour itself.
+    app._track_duration = duration
     return app
 
 
@@ -489,8 +493,8 @@ def test_mic_identification_wins_over_mpris(monkeypatch):
 
     app = _mic_app(_ref("Otis Redding", "Dock of the Bay"))
     monkeypatch.setattr(detect, "detect_active",
-                        lambda: detect.Detection(mode="scan", artist="Other",
-                                                 title="Wrong Song"))
+                        lambda *a: detect.Detection(mode="scan", artist="Other",
+                                                    title="Wrong Song"))
     det = app._effective_detection()
     assert det.mode == "radio"
     assert (det.artist, det.title) == ("Otis Redding", "Dock of the Bay")
@@ -501,7 +505,7 @@ def test_mpris_is_used_when_the_mic_is_off(monkeypatch):
 
     app = _mic_app(None)
     monkeypatch.setattr(detect, "detect_active",
-                        lambda: detect.Detection(mode="scan", artist="X", title="Y"))
+                        lambda *a: detect.Detection(mode="scan", artist="X", title="Y"))
     assert app._effective_detection().mode == "scan"
 
 
@@ -769,3 +773,43 @@ def test_stats_panels_work_without_a_broker():
     panels = dict(stats_panels(_stub_stats(), summary, None))
     assert "workers" not in dict(panels["pipeline"])
     assert panels["library"]
+
+
+# --- Spotify filter --------------------------------------------------------
+
+def test_spotify_is_a_filter_option():
+    from karaoke.tui import FILTER_OPTIONS
+    assert ("Spotify tracks", "spotify") in FILTER_OPTIONS
+
+
+def test_load_spotify_returns_only_spotify_sourced_rows(tmp_path):
+    """The rows must carry the *Spotify* url/kind, so Enter opens the web player.
+
+    _load_tracks ranks spotify below every browser-openable kind, which is why
+    these tracks are otherwise unreachable from the library.
+    """
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.executescript(
+            """
+            INSERT INTO tracks (track_id, artist, title) VALUES
+                (1, 'A', 'Has Both'), (2, 'B', 'YouTube Only');
+            INSERT INTO sources (track_id, kind, url) VALUES
+                (1, 'youtube', 'https://youtu.be/xyz'),
+                (1, 'spotify', 'spotify:track:abc'),
+                (2, 'youtube', 'https://youtu.be/def');
+            """
+        )
+        conn.commit()
+        app = KaraokeTui.__new__(KaraokeTui)
+        app._song_data = []
+        app._load_spotify(conn)
+    finally:
+        conn.close()
+
+    assert [r["title"] for r in app._song_data] == ["Has Both"]
+    assert app._song_data[0]["kind"] == "spotify"
+    assert app._song_data[0]["url"] == "spotify:track:abc"

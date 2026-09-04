@@ -6,6 +6,12 @@ MKDOCS := $(VENV)/bin/mkdocs
 AUDIO_VENV ?= .venv-audio
 AUDIO_PY := $(AUDIO_VENV)/bin/python
 
+# Dedicated Chrome profile for the playback window. Kept separate from the
+# everyday browser so its logins (Spotify, YouTube Premium) persist unattended,
+# and shared by `tui` and the `auth-*` targets so signing in once is enough.
+KIOSK_PROFILE ?= $(HOME)/.config/google-chrome-kiosk
+CHROME ?= google-chrome
+
 TOOLS_DIR := .tools/bin
 CACHE_DIR := .cache
 MAKE2GRAPH_DIR := $(CACHE_DIR)/makefile2graph
@@ -29,7 +35,8 @@ K8S_NAMESPACE ?= karaoke
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
         mq-port-forward postprocess-worker postprocess-enqueue-all \
-        systemd-install systemd-uninstall systemd-up systemd-down systemd-status health
+        systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
+        auth-spotify auth-youtube auth-status sample
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -128,13 +135,40 @@ browse: ## Launch the interactive song browser TUI
 tui: ## Launch the clean karaoke control-surface TUI prototype
 	@if ! ss -lnt | grep -q :9222; then \
 		echo "Launching Google Chrome in kiosk debugging mode..."; \
-		google-chrome --app="https://music.youtube.com" --remote-debugging-port=9222 --user-data-dir=/home/tina/.config/google-chrome-kiosk >/dev/null 2>&1 & \
+		$(CHROME) --app="https://music.youtube.com" --remote-debugging-port=9222 --user-data-dir=$(KIOSK_PROFILE) >/dev/null 2>&1 & \
 		sleep 1.5; \
 	fi
 	$(PYTHON) -m karaoke.tui
 
+sample: ## Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
+	$(PYTHON) -m karaoke.sample_audio --seconds $${SECS:-45} \
+		$${ARTIST:+--artist "$(ARTIST)"} $${TITLE:+--title "$(TITLE)"}
+
 analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 	$(PYTHON) -c "import sys; from karaoke.cli import analyze_main; sys.exit(analyze_main(['--file','$(FILE)','--artist','$(ARTIST)','--title','$(TITLE)']))"
+
+auth-spotify: ## Sign in to Spotify in the playback Chrome profile (persists for the kiosk window)
+	@$(MAKE) --no-print-directory _auth-window URL="https://accounts.spotify.com/login" WHAT=Spotify
+
+auth-youtube: ## Sign in to YouTube / YT Music (Premium) in the playback Chrome profile
+	@$(MAKE) --no-print-directory _auth-window URL="https://accounts.google.com/ServiceLogin?service=youtube" WHAT="YouTube (Premium)"
+
+# Shared body. Chrome refuses to attach a second process to a profile already in
+# use, so a running kiosk window has to be closed first -- say so plainly rather
+# than killing it, which would drop whatever is playing.
+_auth-window:
+	@if ss -lnt | grep -q :9222; then \
+		echo "The playback window is running (CDP :9222)."; \
+		echo "Close it first, then re-run this target -- Chrome cannot open"; \
+		echo "a second window against the same profile."; \
+		exit 1; \
+	fi
+	@echo "Opening $(WHAT) sign-in in $(KIOSK_PROFILE)."
+	@echo "Sign in by hand, then close the window; the session persists for 'make tui'."
+	@$(CHROME) --user-data-dir=$(KIOSK_PROFILE) "$(URL)" >/dev/null 2>&1 &
+
+auth-status: ## Report Spotify token validity and playback-window state
+	$(PYTHON) scripts/auth_status.py
 
 browse-log: ## Follow TUI/open debug logs
 	tail -f "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/karaoke.log" "$${XDG_DATA_HOME:-$$HOME/.local/share}/karaoke/logs/xdg-open.stderr.log"
