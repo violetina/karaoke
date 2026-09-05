@@ -399,6 +399,34 @@ class StatsScreen(ModalScreen[None]):
             yield Static(grid)
 
 
+def _playback_endpoint_problem(url: str, *, timeout: float = 3.0):
+    """Why a recorded track cannot be served, in words, or None if it can.
+
+    The control API is a long-lived process, so it serves whatever code it was
+    started with. When it predates a route it answers 404 and the browser shows
+    "Not Found" -- indistinguishable, from the outside, from the recording
+    itself being missing. Naming the difference is the whole point of this.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if response.status == 200:
+                return None
+            return f"Playback endpoint answered {response.status}"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return ("Control API does not know this route — it is probably "
+                    "running older code. Restart: python -m karaoke.ctrl_api")
+        return f"Playback endpoint answered {exc.code}"
+    except urllib.error.URLError as exc:
+        return (f"Control API is not reachable ({exc.reason}). "
+                "Start it: python -m karaoke.ctrl_api")
+    except Exception as exc:                    # pragma: no cover - defensive
+        return f"Could not reach the control API: {exc}"
+
+
 class RecordingBrowseScreen(ModalScreen[None]):
     """Browse what a recording captured, and play a track back from it.
 
@@ -529,6 +557,17 @@ class RecordingBrowseScreen(ModalScreen[None]):
             return
 
         url = recording_audio.track_url(self._recording_id, index)
+
+        # Checked before navigating. Sending the browser to a URL that answers
+        # 404 replaces what is playing with an error page, and the message it
+        # shows ("Not Found") says nothing about the cause -- which the first
+        # time was a control API still running the code it was started with,
+        # two days before these routes existed.
+        problem = _playback_endpoint_problem(url)
+        if problem:
+            self.app.notify(problem, severity="error", timeout=10)
+            return
+
         try:
             open_song_url(url, "recording")
         except Exception:
@@ -2256,23 +2295,17 @@ class KaraokeTui(App):
         except Exception:
             log.debug("cover art dispatch failed", exc_info=True)
 
-    def _current_track_id(self) -> Optional[int]:
-        """Library id of what is playing, or None."""
-        det = getattr(self, "_det", None)
-        if det is None or not getattr(det, "artist", "") :
-            return None
-        try:
-            with localcache.connect() as conn:
-                return localcache.find_track_id(det.artist, det.title, conn)
-        except Exception:
-            log.debug("could not resolve the playing track", exc_info=True)
-            return None
-
     def _remember_cover(self, source, url: str) -> None:
-        """Keep the art that just rendered, so it outlives its URL."""
+        """Keep the art that just rendered, so it outlives its URL.
+
+        Uses the track id the poll loop already resolved. An earlier version
+        resolved it again in a helper named ``_current_track_id`` -- which is
+        the name of the attribute holding it, so the attribute shadowed the
+        method and calling it raised ``'NoneType' object is not callable``.
+        """
         from . import cover_store
 
-        track_id = self._current_track_id()
+        track_id = self._current_track_id
         if track_id is None or source is None:
             return
         try:
@@ -2288,7 +2321,7 @@ class KaraokeTui(App):
         """Art from the database, for when the source no longer resolves."""
         from . import cover_store, coverart
 
-        track_id = self._current_track_id()
+        track_id = self._current_track_id
         if track_id is None:
             return None
         try:

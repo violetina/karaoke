@@ -181,3 +181,54 @@ def test_rendering_returns_something_drawable(conn):
 
 def test_rendering_an_unknown_track_is_none_not_an_error(conn):
     assert cover_store.render_for_track(3, 16, 8, conn) is None
+
+
+# --- the TUI wiring --------------------------------------------------------
+
+def test_the_track_id_is_an_attribute_not_a_method():
+    """Regression: a helper named _current_track_id shadowed this attribute.
+
+    KaraokeTui sets `self._current_track_id` in __init__ and updates it each
+    time the playing track changes. Defining a method of the same name meant
+    the attribute won, and calling it raised
+    "'NoneType' object is not callable" the first time cover art rendered.
+    Unit tests over cover_store could not see it: the collision only exists on
+    the real class.
+    """
+    from karaoke.tui import KaraokeTui
+
+    assert not callable(getattr(KaraokeTui, "_current_track_id", None))
+
+
+def test_remembering_a_cover_uses_the_resolved_track_id(monkeypatch, tmp_path):
+    """It reads the id the poll loop already resolved, and stores against it."""
+    from karaoke import cover_store as cs
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "wire.db")
+    conn.execute("INSERT INTO tracks (artist, title) VALUES ('A', 'B')")
+    conn.commit()
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: conn)
+    captured = []
+    monkeypatch.setattr(cs, "capture",
+                        lambda tid, src, c, source_url="": captured.append(tid))
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._current_track_id = 1
+    app._remember_cover(tmp_path / "art.jpg", "https://a.example/x")
+    assert captured == [1]
+    conn.close()
+
+
+def test_remembering_a_cover_does_nothing_without_a_track(monkeypatch, tmp_path):
+    from karaoke import cover_store as cs
+    from karaoke.tui import KaraokeTui
+
+    captured = []
+    monkeypatch.setattr(cs, "capture",
+                        lambda tid, src, c, source_url="": captured.append(tid))
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._current_track_id = None
+    app._remember_cover(tmp_path / "art.jpg", "u")
+    assert captured == []
