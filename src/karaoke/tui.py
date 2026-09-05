@@ -711,7 +711,12 @@ class KaraokeTui(App):
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
     /* Tall enough for the figlet title banner (5 rows + artist + status). */
-    #now-playing { height: 11; border: round green; padding: 0 1; margin-bottom: 1; }
+    /* 9 rather than 11. The banner is a 4-row title over a 2-row artist over
+       the status line -- 7 -- and the two spare rows read as the panel being
+       loose rather than as breathing room. title_banner drops the artist to
+       plain text when a descender pushes either font a row taller, which
+       costs one line instead of the whole block. */
+    #now-playing { height: 9; border: round green; padding: 0 1; margin-bottom: 1; }
     /* overflow-y is hidden, not auto: a scrollbar appearing mid-song steals a
        column and shears the block glyphs, and #lyrics is a non-focusable
        Static so the scrollbar is unreachable by keyboard anyway. */
@@ -727,21 +732,46 @@ class KaraokeTui(App):
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
-    #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
+    /* In the left column now, with the other per-track facts. Auto height
+       because it holds two or three lines depending on what is known, and a
+       fixed 6 left a gap under the short case. */
+    #keybpm { height: auto; border: round green; padding: 0 1; margin-top: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
     /* Recording indicator. Hidden entirely when idle rather than shown empty,
        so the sidebar layout is unchanged until it matters. */
     #record-panel { display: none; height: auto; border: round red;
                     padding: 0 1; margin-top: 1; color: $error; }
     #record-panel.-on { display: block; }
-    #worker-panel { height: auto; border: round cyan; padding: 0 1;
+    /* Docked, because nothing stretches any more: the art box and the
+       facts under it both follow their content, so without this the
+       worker read-out floats halfway up the column. */
+    #worker-panel { dock: bottom; height: auto; border: round cyan; padding: 0 1;
                     margin-top: 1; }
     /* Takes the rest of the column so the reserved space is visibly held. */
     /* 1fr: soaks up the slack, so the panels under it sit at the bottom. */
-    #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1; }
-    /* auto height, so the art above takes whatever is left */
-    #track-info { height: auto; padding: 0 1; margin-top: 1;
-                  color: $text-muted; }
+    /* Hugs the art rather than filling the column. Since covers are stored and
+       drawn at their own aspect, the image is 6 rows for a 16:9 thumbnail and
+       11 for a square sleeve -- so a fixed height leaves a gap under one and
+       crops the other, and `1fr` left a gap under both.
+
+       padding is 1 row / 2 columns because a terminal cell is about 2.5x
+       taller than wide (coverart.CELL_ASPECT): equal numbers would look
+       lopsided, and this is what reads as an even margin.
+
+       min-height keeps the box from collapsing before the first render, which
+       would make the whole sidebar jump on every track change. */
+    /* The frame belongs to the pair, not to the picture: the art and the
+       facts under it describe one track. padding is 1 row / 2 columns because
+       a terminal cell is about 2.5x taller than wide (coverart.CELL_ASPECT),
+       so equal numbers look lopsided and this reads as an even margin.
+       min-height stops the box collapsing before the first render, which
+       would make the sidebar jump on every track change. */
+    #cover-box { height: auto; min-height: 12; padding: 1 2;
+                 border: round $surface-lighten-2; }
+    /* A floor so the frame has a shape before the first render; the art
+       itself decides the height once it arrives. */
+    #beat-art { height: auto; min-height: 8; }
+    #track-info { height: auto; margin-top: 1; color: $text-muted; }
 
     /* Browse overlay. On its own layer so showing it never resizes #workspace.
        The offset centres it by arithmetic (Screen is layout: vertical, so
@@ -778,6 +808,11 @@ class KaraokeTui(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        # ctrl+c stops a running sample rather than quitting, so the reflex
+        # that interrupts a long-running thing does what it looks like it
+        # does. With nothing sampling it quits, as it always did.
+        Binding("ctrl+c", "cancel_sample", "Stop sampling", show=False,
+                priority=True),
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
@@ -839,6 +874,9 @@ class KaraokeTui(App):
         # single failure cannot become a lookup storm across a listening session.
         self._spotify_off = False
         self._sampling = False     # a capture is running (real time)
+        # Set to stop that capture early: ctrl+c, or the app exiting. The
+        # worker polls it, terminates ffmpeg and deletes the partial file.
+        self._cancel_sample = False
         self._recording_id: int | None = None
         self._record_tick = 0
         self._record_marks: tuple[int, int] | None = None
@@ -863,15 +901,23 @@ class KaraokeTui(App):
             with Vertical(id="sidebar"):
                 # Art first (it takes the slack), then per-track facts, then
                 # the global worker read-out pinned at the bottom.
-                yield Static("", id="beat-art")
-                # Search sits under the art, where the eye already is when
+                # Art and the facts about the same track share one frame.
+                # They describe one thing, and three separate boxes down a
+                # narrow column read as three subjects rather than one.
+                with Vertical(id="cover-box"):
+                    yield Static("", id="beat-art")
+                    yield Static("", id="track-info")
+                # Search sits under that, where the eye already is when
                 # looking for "what else is like this".
                 # The placeholder carries the way out. There is nothing else
                 # focusable on this screen, so a reader who does not know
                 # about escape has no affordance to discover.
                 yield Input(placeholder="search  (/ · esc to leave)",
                             id="search-input")
-                yield Static("", id="track-info")
+                # Key and tempo sit with the rest of the facts about this
+                # track rather than in the visuals column, which is for the
+                # things that move.
+                yield Static("key: —\nbpm: —", id="keybpm")
                 yield Static("workers  —", id="worker-panel")
                 # Empty and hidden until recording, so it costs no space.
                 yield Static("", id="record-panel")
@@ -887,7 +933,6 @@ class KaraokeTui(App):
                     yield Static("worker-load: —", id="worker-load")
             with Vertical(id="visuals"):
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
-                yield Static("key: —\nbpm: —", id="keybpm")
                 yield Static("sentiment / rhythm", id="ascii-visual")
         # Floats on its own layer above #workspace, so revealing it costs the
         # lyrics no space and does not reflow them.
@@ -1133,9 +1178,22 @@ class KaraokeTui(App):
         if width < bigtext.MIN_WIDTH or height < 6:
             return plain
         rendered = bigtext.render(title, width, max_rows=1)
-        if rendered is None or len(rendered[0].rows) + 1 > height:
+        if rendered is None:
             return plain
-        return "\n".join((*rendered[0].rows, f"  {artist}"))
+        title_rows = list(rendered[0].rows)
+        if len(title_rows) + 1 > height:
+            return plain
+
+        # Ladder rather than all-or-nothing. Both fonts grow a row for
+        # descenders, so a fixed header cannot always hold title-plus-artist in
+        # block type -- and dropping the whole banner to plain text over one
+        # row of overflow loses far more than dropping the artist to plain does.
+        byline = bigtext.render_line(artist, bigtext.SMALL_FONT)
+        if byline is not None and len(title_rows) + len(byline.rows) <= height:
+            fits_width = all(len(r) <= width for r in byline.rows)
+            if fits_width:
+                return "\n".join((*title_rows, *byline.rows))
+        return "\n".join((*title_rows, f"  {artist}"))
 
     # -- responsive chrome ------------------------------------------------
     def apply_size_classes(self, width: int, height: int) -> None:
@@ -1461,6 +1519,7 @@ class KaraokeTui(App):
             self.notify("Already sampling", severity="warning")
             return
         self._sampling = True
+        self._cancel_sample = False
         seconds = sample_audio.DEFAULT_SECONDS
         self.notify(f"Sampling {seconds:.0f}s of {det.title}…")
         self.run_worker(
@@ -1468,10 +1527,42 @@ class KaraokeTui(App):
             exclusive=False, thread=True,
         )
 
+    def action_cancel_sample(self) -> None:
+        """ctrl+c: stop a capture and throw it away; otherwise quit.
+
+        A 45-second capture is the one thing here long enough that a user
+        reaches for ctrl+c, and before this it did nothing to it -- the app
+        quit while ffmpeg carried on writing to a file nobody would read.
+        """
+        # A second press quits regardless. This binding is priority, so if
+        # _sampling ever stuck true a single-purpose handler would leave no way
+        # out of the app at all -- and an unquittable TUI is a worse bug than
+        # the one being fixed.
+        if not self._sampling or self._cancel_sample:
+            self.exit()
+            return
+        self._cancel_sample = True
+        self.notify("Stopping the sample — ctrl+c again to quit")
+
     def _background_sample(self, artist: str, title: str) -> None:
         """Record and analyse the playing audio, in a worker thread."""
+        def _keep_going() -> bool:
+            if self._cancel_sample:
+                return False
+            det = self._det
+            return bool(det.artist == artist and det.title == title)
+
         try:
-            result = sample_audio.sample_and_analyse(artist, title)
+            result = sample_audio.sample_and_analyse(
+                artist, title, should_continue=_keep_going)
+        except sample_audio.CaptureAborted:
+            # Not a failure: the track changed under it. Sampling on would have
+            # stored this song's key, tempo and genre against the previous one.
+            log.info("sample abandoned: %s - %s stopped playing", artist, title)
+            self.call_from_thread(
+                self.notify, f"Stopped sampling — {title} ended",
+                severity="warning")
+            return
         except sample_audio.CaptureError as exc:
             log.warning("sample failed: %s", exc)
             self.call_from_thread(self.notify, f"Sample failed: {exc}",
@@ -1523,6 +1614,10 @@ class KaraokeTui(App):
         second recorder on the same source. Observed in the wild: a capture
         orphaned for 1h51m alongside a live one.
         """
+        # A sample is the other capture that can outlive the app. It holds an
+        # ffmpeg on the monitor sink for the better part of a minute, so
+        # leaving it running on exit repeats the orphan above in miniature.
+        self._cancel_sample = True
         try:
             recorder.stop_all()
         except Exception:
@@ -2122,11 +2217,16 @@ class KaraokeTui(App):
             except Exception:
                 log.debug("postprocess enqueue dispatch failed", exc_info=True)
         state = lyric_display_state(lyrics)
+        # The banner is what is playing, so it is drawn whatever the lyrics
+        # turn out to be. It used to appear only on the synced branch, which
+        # meant the title silently dropped to a one-line "artist - title" for
+        # every track without timings -- the state a track is in before any
+        # work has been done on it, and the one you look at most.
+        size = now.content_size
+        banner = self.title_banner(display_artist, display_title,
+                                   size.width or 0, (size.height or 0) - 1)
         if state == "synced":
             self._timeline = timeline_from_lyrics(lyrics)
-            size = now.content_size
-            banner = self.title_banner(display_artist, display_title,
-                                       size.width or 0, (size.height or 0) - 1)
             now.update(
                 f"{banner}\n"
                 f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
@@ -2143,9 +2243,8 @@ class KaraokeTui(App):
             lyrics_widget.border_subtitle = f"unsynced · {lyrics.source}"
             lyrics_widget.update(lyrics.plain.strip())
             now.update(
-                f"♪ {display_artist} - {display_title}\n"
-                f"mode: {det.mode}  player: {det.player or '—'}\n"
-                f"{keybpm_line}\n"
+                f"{banner}\n"
+                f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
                 f"{lyrics.source} · words only, no timings"
             )
         else:
@@ -2158,9 +2257,8 @@ class KaraokeTui(App):
                 "karaoke-backfill, then whitelist it in the Staging view."
             )
             now.update(
-                f"♪ {display_artist} - {display_title}\n"
-                f"mode: {det.mode}  player: {det.player or '—'}\n"
-                f"{keybpm_line}\n"
+                f"{banner}\n"
+                f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
                 "no lyrics — queued for staging"
             )
 
@@ -2234,8 +2332,10 @@ class KaraokeTui(App):
                 f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
             )
             return
-        label = Text(f"{mood.upper()}  ", style="bold")
-        label.append(self._mood_source, style="dim")
+        # The mood is the label; where the picture came from is not something
+        # to read on every track, and "cover" sat next to the art competing
+        # with it for attention. Kept in _mood_source for the log.
+        label = Text(mood.upper(), style="bold")
         panel.update(Text("\n").join([label, self._mood_art]))
 
     def _refresh_mood_art(self, mood: str) -> None:
@@ -2421,16 +2521,24 @@ class KaraokeTui(App):
                 rows = max(0, panel.content_size.height)
                 source = self.cover_source(url)
                 art = None
-                if source is not None and cols > 3 and rows > 1:
-                    art = coverart.render(source, cols,
-                                          min(rows, cols // coverart.CELL_ASPECT))
+                # Width alone gates this. Requiring rows > 1 was circular
+                # once the box began following its content: an empty Static is
+                # one row tall, so the art would never draw and the box would
+                # never grow.
+                if source is not None and cols > 3:
+                    # Sized from the width alone. The panel is auto-height now,
+                    # so taking its height as a limit would be circular -- a
+                    # small box would draw small art, which would keep the box
+                    # small. coverart.render derives the rows from the width
+                    # and the cell aspect.
+                    art = coverart.render(source, cols)
                 if art is not None:
                     # Keep it while the source still resolves. Spotify's image
                     # URLs expire and YouTube thumbnails change with
                     # re-uploads, so this is the only moment the art is
                     # reliably obtainable.
                     self._remember_cover(source, url)
-                elif cols > 3 and rows > 1:
+                elif cols > 3:
                     # The source is gone or unreadable; a kept copy is what
                     # makes that recoverable rather than simply blank.
                     art = self._stored_cover(cols, rows)
@@ -2475,8 +2583,10 @@ class KaraokeTui(App):
             return None
         try:
             with localcache.connect() as conn:
+                # Same reasoning as the live path: width drives the size,
+                # not the panel height, which now follows the content.
                 return cover_store.render_for_track(
-                    track_id, cols, min(rows, max(1, cols // coverart.CELL_ASPECT)),
+                    track_id, cols, max(1, int(cols / coverart.CELL_ASPECT)),
                     conn)
         except Exception:
             log.debug("could not read stored cover art", exc_info=True)

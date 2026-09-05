@@ -576,10 +576,15 @@ def _banner(title, width, height=99, artist="Gotye"):
 
 def test_title_renders_as_block_type_when_it_fits():
     """A header is one short string with space around it — block type suits it."""
+    from karaoke import bigtext
+
     out = _banner("Golden Brown", 150)
     assert "♪" not in out
     assert out.count("\n") >= 3          # several block rows
-    assert out.strip().endswith("Gotye")  # artist under the title
+    # The artist sits under the title in a smaller face, so the tail of the
+    # banner is its block rows rather than the literal name.
+    byline = bigtext.render_line("Gotye", bigtext.SMALL_FONT).rows
+    assert out.splitlines()[-len(byline):] == list(byline)
 
 
 def test_title_falls_back_to_plain_when_too_narrow():
@@ -598,10 +603,18 @@ def test_title_falls_back_for_a_title_too_long_to_fit_one_line():
 
 
 def test_title_banner_never_wraps_to_a_second_block():
-    """max_rows=1: a header that wrapped would push the status line out."""
+    """max_rows=1: a header that wrapped would push the status line out.
+
+    The banner is now two blocks -- the title, then the artist in a smaller
+    face -- so the title's own rows are checked rather than every row but the
+    last.
+    """
+    from karaoke import bigtext
+
     out = _banner("Disappearer", 150)
-    rows = out.splitlines()
-    assert len({len(r) for r in rows[:-1]}) == 1     # block rows equal width
+    title_rows = len(bigtext.render_line("Disappearer").rows)
+    rows = out.splitlines()[:title_rows]
+    assert len({len(r) for r in rows}) == 1          # block rows equal width
 
 
 # --- cover art source ------------------------------------------------------
@@ -934,7 +947,10 @@ def test_the_mood_word_survives_alongside_the_picture(monkeypatch):
     app._update_mood("tender")
     rendered = str(updates[-1])
     assert "TENDER" in rendered
-    assert "generated" in rendered      # provenance is stated, not implied
+    # Where the picture came from is not shown any more: it sat beside the art
+    # competing with it, and is not something to read on every track. Still
+    # kept in _mood_source for the log.
+    assert "generated" not in rendered
 
 
 # --- the classification read-out under the cover art ----------------------
@@ -1040,3 +1056,78 @@ def test_a_track_with_only_a_tone_shows_that():
     from karaoke.tui import classification_line
 
     assert classification_line(None, _tone_row()) == "cynical"
+
+
+def test_the_title_banner_is_not_only_for_synced_tracks():
+    """It is what is playing, so it should not depend on the lyrics.
+
+    Drawing it only on the synced branch meant the title silently dropped to a
+    one-line "artist - title" for every track without timings -- the state a
+    track is in before any work has been done on it.
+    """
+    import inspect
+
+    from karaoke.tui import KaraokeTui
+
+    src = inspect.getsource(KaraokeTui._poll_detection)
+    body = src.split("state = lyric_display_state(lyrics)", 1)[1]
+    # One banner, computed before the branches, used by all of them.
+    assert body.count("self.title_banner(") == 1
+    assert body.count('f"{banner}\\n') == 3
+
+
+# --- the header banner ----------------------------------------------------
+
+def test_the_artist_is_set_smaller_than_the_title():
+    """At the same size they compete; the point is a heading and its byline."""
+    from karaoke import bigtext
+
+    assert bigtext.SMALL_FONT != bigtext.FONT
+    title = bigtext.render_line("Swans")
+    byline = bigtext.render_line("Swans", bigtext.SMALL_FONT)
+    assert len(byline.rows) < len(title.rows)
+
+
+def test_the_banner_drops_the_artist_rather_than_the_whole_block():
+    """Both fonts grow a row for descenders, so a fixed header cannot always
+    hold both in block type. Losing one line beats losing the banner."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    # 6 rows: enough for the 5-row title plus a plain artist line, but not for
+    # the title plus a 2-row byline.
+    tight = app.title_banner("Portishead", "Glory Box", 90, 6)
+    # Title still in block type, artist demoted to a plain line.
+    assert len(tight.splitlines()) <= 6
+    assert tight.splitlines()[-1].strip() == "Portishead"
+    assert "Portishead" in tight
+    assert not tight.startswith("♪")
+
+
+def test_the_banner_fits_the_header_it_is_drawn_in():
+    """Box height 9 leaves 7 content rows, one of which is the status line."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    for artist, title in (("Swans", "Screen Shot"), ("Portishead", "Glory Box"),
+                          ("Ween", "Bananas and Blow")):
+        rows = len(app.title_banner(artist, title, 90, 6).splitlines())
+        assert rows <= 6, f"{artist} - {title} took {rows} rows"
+
+
+def test_a_narrow_panel_still_falls_back_to_plain_text():
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    assert app.title_banner("A", "B", 20, 6).startswith("♪")
+
+
+def test_the_mood_panel_does_not_label_where_the_art_came_from():
+    """"cover" sat next to the picture competing with it for attention, and is
+    not something to read on every track."""
+    import inspect
+
+    from karaoke.tui import KaraokeTui
+
+    src = inspect.getsource(KaraokeTui._update_mood)
+    assert "_mood_source" not in src.split("label = Text(")[1]

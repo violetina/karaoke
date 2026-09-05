@@ -377,3 +377,94 @@ def test_the_way_out_is_written_on_the_box(app):
             placeholder = app.query_one("#search-input").placeholder
             assert "esc" in placeholder.lower()
     _run(go())
+
+
+def test_the_art_box_does_not_fill_the_column(app):
+    """It hugs the art instead.
+
+    Covers are drawn at their own aspect -- 6 rows for a 16:9 thumbnail, 11 for
+    a square sleeve -- so `1fr` left a gap under every one of them. A wide
+    terminal is needed or the sidebar is hidden entirely.
+    """
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            art = app.query_one("#beat-art").region
+            sidebar = app.query_one("#sidebar").region
+            assert sidebar.height > 0, "sidebar hidden; terminal too narrow"
+            assert art.height < sidebar.height
+    _run(go())
+
+
+def test_the_art_box_does_not_collapse_before_anything_is_drawn(app):
+    """A zero-height box would make the sidebar jump on every track change."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#beat-art").region.height >= 8
+    _run(go())
+
+
+def test_the_art_and_its_facts_share_one_frame(app):
+    """They describe one track. Three boxes down a narrow column read as three
+    subjects rather than one."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            box = app.query_one("#cover-box").region
+            art = app.query_one("#beat-art").region
+            info = app.query_one("#track-info").region
+            # Both inside the frame, art above the facts.
+            assert box.y <= art.y < info.y
+            assert info.bottom <= box.bottom
+    _run(go())
+
+
+def test_the_frame_hugs_its_contents(app):
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            box = app.query_one("#cover-box").region
+            sidebar = app.query_one("#sidebar").region
+            assert box.height < sidebar.height
+    _run(go())
+
+
+def test_ctrl_c_stops_a_running_sample_instead_of_quitting(app):
+    """A 45-second capture is the one thing here long enough to reach for
+    ctrl+c, and before this it did nothing to it."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = True
+            app._cancel_sample = False
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._cancel_sample is True
+            assert app.is_running, "the app must not quit mid-sample"
+    _run(go())
+
+
+def test_a_second_ctrl_c_quits_even_while_sampling(app):
+    """The binding is priority, so a single-purpose handler would leave no way
+    out at all if the flag ever stuck. An unquittable TUI is the worse bug."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = True
+            app._cancel_sample = True          # already cancelling
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+    _run(go())
+
+
+def test_ctrl_c_quits_when_nothing_is_sampling(app):
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = False
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+    _run(go())
