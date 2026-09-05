@@ -87,15 +87,22 @@ def test_an_unknown_provider_still_yields_a_source():
 
 # -- it must be the track we think it is --------------------------------
 
+def _browser_playing(monkeypatch, artist="Dinosaur Jr.", title="Put It Down",
+                     players=("chromium.instance402904",)):
+    """The browser is the thing making sound, which is when the panel counts."""
+    from karaoke import playerctl
+
+    monkeypatch.setattr(playerctl, "playing_players", lambda: list(players))
+    monkeypatch.setattr(playerctl, "current_metadata",
+                        lambda *a, **k: playerctl.PlayerMetadata(
+                            artist=artist, title=title))
+
+
 def test_the_panel_must_match_the_playing_track(monkeypatch):
     """The panel lags a track change; attributing one song's words to another
     is invisible once stored."""
-    from karaoke import playerctl
-
     monkeypatch.setattr(yl, "read_panel", lambda: _panel(LYRICS))
-    monkeypatch.setattr(playerctl, "current_metadata",
-                        lambda *a, **k: playerctl.PlayerMetadata(
-                            artist="Dinosaur Jr.", title="Put It Down"))
+    _browser_playing(monkeypatch)
     assert yl.for_playing("Dinosaur Jr.", "Put It Down") is not None
     assert yl.for_playing("Someone Else", "Wrong Song") is None
 
@@ -104,8 +111,68 @@ def test_no_player_means_no_attribution(monkeypatch):
     from karaoke import playerctl
 
     monkeypatch.setattr(yl, "read_panel", lambda: _panel(LYRICS))
+    monkeypatch.setattr(playerctl, "playing_players",
+                        lambda: ["chromium.instance402904"])
     monkeypatch.setattr(playerctl, "current_metadata", lambda *a, **k: None)
     assert yl.for_playing("Dinosaur Jr.", "Put It Down") is None
+
+
+# -- the panel belongs to the browser, not to whatever is playing ----------
+
+def test_spotify_playing_means_the_panel_is_not_read(monkeypatch):
+    """The bug this guards: Spotify played "Mount Hush - All I See" while the
+    YouTube Music window still showed Sonic Youth's "Mary-Christ", and 1070
+    characters of the wrong song were stored against the Spotify track.
+
+    The older check could not catch it -- it compared the player's track with
+    the requested track, and both were the Spotify one. What went unverified
+    was that the panel had anything to do with either.
+    """
+    from karaoke import playerctl
+
+    read = []
+    monkeypatch.setattr(yl, "read_panel",
+                        lambda: read.append(1) or _panel(LYRICS))
+    monkeypatch.setattr(playerctl, "playing_players", lambda: ["spotify"])
+    monkeypatch.setattr(playerctl, "current_metadata",
+                        lambda *a, **k: playerctl.PlayerMetadata(
+                            artist="Mount Hush", title="All I See"))
+
+    assert yl.for_playing("Mount Hush", "All I See") is None
+    assert read == []            # not even read: the window is not the source
+
+
+def test_nothing_playing_means_the_panel_is_not_read(monkeypatch):
+    from karaoke import playerctl
+
+    monkeypatch.setattr(yl, "read_panel", lambda: _panel(LYRICS))
+    monkeypatch.setattr(playerctl, "playing_players", lambda: [])
+    assert yl.for_playing("A", "B") is None
+
+
+def test_the_browser_is_recognised_across_instances():
+    """MPRIS names it per instance, so only a prefix survives a restart."""
+    assert yl._is_browser("chromium.instance2630031")
+    assert yl._is_browser("chrome.instance1")
+    assert not yl._is_browser("spotify")
+    assert not yl._is_browser("")
+
+
+def test_with_both_playing_the_browser_is_the_one_that_counts(monkeypatch):
+    """Two streams at once: the panel is only about the browser's track."""
+    from karaoke import playerctl
+
+    monkeypatch.setattr(yl, "read_panel", lambda: _panel(LYRICS))
+    monkeypatch.setattr(playerctl, "playing_players",
+                        lambda: ["spotify", "chromium.instance1"])
+    monkeypatch.setattr(playerctl, "current_metadata",
+                        lambda player="", **k: playerctl.PlayerMetadata(
+                            artist="Dinosaur Jr.", title="Put It Down"))
+
+    # Asking about the browser's track works...
+    assert yl.for_playing("Dinosaur Jr.", "Put It Down") is not None
+    # ...and asking about Spotify's does not, because they disagree.
+    assert yl.for_playing("Mount Hush", "All I See") is None
 
 
 def test_an_unusable_panel_is_never_attributed(monkeypatch):
