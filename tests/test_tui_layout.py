@@ -317,3 +317,63 @@ def test_the_mood_panel_survives_a_render(app):
             app._update_mood("happy")
             await pilot.pause()
     _run(go())
+
+
+def test_escape_leaves_the_search_box(app):
+    """The trap: nothing else on this screen is focusable.
+
+    With focus in the search Input there was no Tab target and no binding that
+    released it, so every key -- including the ones bound to actions -- went
+    into the box and the only way out was killing the app.
+    """
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.search_has_focus(), "'/' should focus the search box"
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.search_has_focus()
+            assert app.focused is None
+    _run(go())
+
+
+def test_bindings_work_again_after_leaving_search(app):
+    """Escaping is only useful if the keyboard comes back with it."""
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("H")
+            await pilot.pause()
+            assert app.query_one("#browse-overlay").has_class("-visible")
+    _run(go())
+
+
+def test_an_empty_search_still_releases_focus(app):
+    """The second way to stay stuck: submitting nothing returned early,
+    before the line that gives focus back."""
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not app.search_has_focus()
+    _run(go())
+
+
+def test_the_way_out_is_written_on_the_box(app):
+    """There is no other affordance: nothing to Tab to, nothing visible."""
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            placeholder = app.query_one("#search-input").placeholder
+            assert "esc" in placeholder.lower()
+    _run(go())

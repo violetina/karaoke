@@ -733,7 +733,13 @@ class KaraokeTui(App):
         ("B", "browse_recordings", "Recordings"),
         ("T", "stats", "Stats"),
         ("question_mark", "help", "Keys"),
-        Binding("escape", "hide_browse", "Close browse", show=False),
+        # NOT priority: a priority app binding shadows every modal's own
+        # escape, which stopped Stats and Help from closing. The
+        # ordinary binding already fires from inside the search Input --
+        # Input does not bind escape -- so the action, not the binding,
+        # was what needed fixing.
+        Binding("escape", "hide_browse", "Leave search / close browse",
+                show=False),
         ("r", "refresh", "Refresh"),
         ("s", "resync", "Resync"),
         ("comma", "sync_earlier", "Lyrics -0.1s"),
@@ -803,7 +809,11 @@ class KaraokeTui(App):
                 yield Static("", id="beat-art")
                 # Search sits under the art, where the eye already is when
                 # looking for "what else is like this".
-                yield Input(placeholder="search  (/)", id="search-input")
+                # The placeholder carries the way out. There is nothing else
+                # focusable on this screen, so a reader who does not know
+                # about escape has no affordance to discover.
+                yield Input(placeholder="search  (/ · esc to leave)",
+                            id="search-input")
                 yield Static("", id="track-info")
                 yield Static("workers  —", id="worker-panel")
                 # Empty and hidden until recording, so it costs no space.
@@ -1021,8 +1031,31 @@ class KaraokeTui(App):
     def action_toggle_browse(self) -> None:
         self._hide_browse() if self._browse_open() else self._show_browse()
 
+    def search_has_focus(self) -> bool:
+        """Whether typing currently goes into the search box.
+
+        ``self.focused`` needs a mounted screen stack, which an app object
+        constructed for a unit test does not have. Answering False there is
+        right as well as convenient: nothing is focused when nothing is
+        running.
+        """
+        try:
+            focused = self.focused
+        except Exception:
+            return False
+        return focused is not None and getattr(focused, "id", "") == "search-input"
+
     def action_hide_browse(self) -> None:
-        """escape: close the overlay if open, otherwise do nothing."""
+        """escape: leave whatever has taken over the keyboard.
+
+        The search box first. Nothing else on this screen is focusable, so a
+        box with focus had no Tab target and no way out -- every key went into
+        it, including the ones bound to actions. Escape is the way out of a
+        text field everywhere else, so it is the way out here.
+        """
+        if self.search_has_focus():
+            self.set_focus(None)
+            return
         if self._browse_open():
             self._hide_browse()
 
@@ -1199,13 +1232,16 @@ class KaraokeTui(App):
         """Enter in the search box: build a list and start playing it."""
         if event.input.id != "search-input":
             return
+        # Focus has to leave the box, or every subsequent keypress is typed
+        # into it instead of reaching the bindings -- and it has to leave on
+        # the empty query too. Returning early there was a way to stay stuck:
+        # nothing else is focusable, so Tab had nowhere to go and Enter on an
+        # empty box did not release either.
+        self.set_focus(None)
         query = (event.value or "").strip()
         if not query:
             self._set_queue([])
             return
-        # Focus has to leave the box, or every subsequent keypress is typed
-        # into it instead of reaching the bindings.
-        self.set_focus(None)
         self.run_worker(lambda q=query: self._background_search(q),
                         exclusive=False, thread=True)
 
