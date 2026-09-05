@@ -46,7 +46,8 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
 from .browse import open_song_url
-from .player_open import browser_playback, track_finished, track_idle
+from .player_open import (browser_playback, close_cdp, track_finished,
+                          track_idle)
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
 from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
@@ -1682,6 +1683,22 @@ class KaraokeTui(App):
             recorder.stop_all()
         except Exception:
             log.debug("stopping recordings on exit failed", exc_info=True)
+
+        # The mic worker is a thread, and a thread worker cannot be cancelled
+        # from outside -- Textual can only ask. `_mic_loop` watches this event
+        # and nothing else, so without setting it the loop runs forever and
+        # quitting hangs on the executor join that never completes (issue #39).
+        mic_stop = getattr(self, "_mic_stop", None)
+        if mic_stop is not None:
+            mic_stop.set()
+
+        # Same shape, one layer down: the shared CDP connection owns a thread
+        # with a live event loop, and a loop nobody stops is a loop that gets
+        # joined at exit.
+        try:
+            close_cdp()
+        except Exception:
+            log.debug("closing the CDP channel on exit failed", exc_info=True)
 
     def action_toggle_record(self) -> None:
         """`O`: record the output continuously, marking what plays on it.

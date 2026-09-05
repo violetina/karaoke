@@ -64,7 +64,7 @@ flowchart TD
     D -- no --> Y[return None]
     D -- yes --> E[find_track_id exact]
     E -- hit --> Z
-    E -- miss --> F[retry with clean_title\ndrop '(Remastered)' etc.]
+    E -- miss --> F["retry with clean_title\ndrop '(Remastered)' etc."]
     F -- hit --> Z
     F -- miss --> G[find_track_id_relaxed\nfull credit / decorated title]
     G -- hit --> Z
