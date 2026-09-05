@@ -470,6 +470,95 @@ def alignments_for_review(conn: sqlite3.Connection,
         (threshold,)).fetchall()
 
 
+def ensure_genre_table(conn: sqlite3.Connection) -> None:
+    """Create the genre table in databases predating it."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS track_genre (
+            track_id        INTEGER PRIMARY KEY,
+            genre           TEXT NOT NULL,
+            score           REAL,
+            -- Kept because it is often the more informative half: "heavy metal
+            -- 0.708, punk rock 0.689" describes sludge better than either
+            -- label alone, and a narrow margin is exactly when a reader should
+            -- see both.
+            runner_up       TEXT NOT NULL DEFAULT '',
+            runner_up_score REAL,
+            method          TEXT NOT NULL DEFAULT '',
+            labelled_at     REAL NOT NULL,
+            FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_track_genre_genre ON track_genre (genre);
+    """)
+    conn.commit()
+
+
+def record_genre(track_id: int, verdict: Any, conn: sqlite3.Connection, *,
+                 method: str = "clap-zero-shot") -> bool:
+    """Store a track's genre label. Returns whether anything was written.
+
+    A None verdict writes nothing rather than storing an "unknown" row: the
+    absence of a label and a label saying "unknown" read the same to a query
+    but mean different things to a re-run, which should retry the first and
+    leave the second alone.
+    """
+    if verdict is None or not getattr(verdict, "genre", ""):
+        return False
+    conn.execute(
+        """
+        INSERT INTO track_genre (track_id, genre, score, runner_up,
+                                 runner_up_score, method, labelled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            genre           = excluded.genre,
+            score           = excluded.score,
+            runner_up       = excluded.runner_up,
+            runner_up_score = excluded.runner_up_score,
+            method          = excluded.method,
+            labelled_at     = excluded.labelled_at
+        """,
+        (track_id, verdict.genre, verdict.score, verdict.runner_up,
+         verdict.runner_up_score, method, time.time()),
+    )
+    conn.commit()
+    return True
+
+
+def clear_genre(track_id: int, conn: sqlite3.Connection) -> bool:
+    """Remove a track's genre label.
+
+    Needed when a re-label decides the track matches nothing after all: leaving
+    the old row would keep a stale answer that the current rules would refuse
+    to make, which is worse than having none.
+    """
+    removed = conn.execute("DELETE FROM track_genre WHERE track_id = ?",
+                           (track_id,)).rowcount
+    conn.commit()
+    return bool(removed)
+
+
+def genre_for(track_id: int, conn: sqlite3.Connection) -> Any:
+    """One track's stored genre row, or None."""
+    return conn.execute(
+        "SELECT * FROM track_genre WHERE track_id = ?", (track_id,)).fetchone()
+
+
+def genre_counts(conn: sqlite3.Connection) -> list:
+    """How many tracks carry each label, commonest first."""
+    return conn.execute(
+        "SELECT genre, count(*) AS n, avg(score) AS mean_score"
+        "  FROM track_genre GROUP BY genre ORDER BY n DESC").fetchall()
+
+
+def tracks_in_genre(genre: str, conn: sqlite3.Connection,
+                    limit: int = 50) -> list:
+    """Tracks carrying a label, most confident first."""
+    return conn.execute(
+        "SELECT g.track_id, t.artist, t.title, g.score, g.runner_up"
+        "  FROM track_genre g JOIN tracks t ON t.track_id = g.track_id"
+        " WHERE g.genre = ? ORDER BY g.score DESC LIMIT ?",
+        (genre, limit)).fetchall()
+
+
 def ensure_silence_table(conn: sqlite3.Connection) -> None:
     """Create the recording silence map in databases predating it."""
     conn.executescript("""
@@ -764,6 +853,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_recording_tables(conn)
     ensure_notes_table(conn)
     ensure_silence_table(conn)
+    ensure_genre_table(conn)
     ensure_alignment_support_table(conn)
     from .cover_store import ensure_table as _ensure_cover_art
     _ensure_cover_art(conn)

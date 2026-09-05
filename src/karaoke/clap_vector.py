@@ -177,6 +177,15 @@ def ensure_index(os_client: Any, index_name: str = CLAP_INDEX) -> bool:
                 "detected_key": {"type": "keyword"},
                 "bpm": {"type": "float"},
                 "embedded_at": {"type": "date"},
+                # Declared rather than left to dynamic mapping, which types a
+                # string as `text` with a `.keyword` subfield -- so an
+                # aggregation on `genre` fails while one on `genre.keyword`
+                # works, and which of those a caller must use depends on
+                # whether the index was created before or after the field
+                # existed. Declaring it removes that difference.
+                "genre": {"type": "keyword"},
+                "genre_score": {"type": "float"},
+                "genre_runner_up": {"type": "keyword"},
                 "clap_vector": {
                     "type": "knn_vector",
                     "dimension": CLAP_DIM,
