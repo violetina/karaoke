@@ -160,6 +160,38 @@ class SpotifyClient:
             raise SpotifyAuthError(f"me failed: {r.status_code} {r.text[:200]}")
         return r.json().get("id", "")
 
+    def tracks_by_id(self, track_ids: list[str], *,
+                     pause: float = 0.1) -> dict[str, dict[str, Any]]:
+        """Look up tracks by Spotify id, keyed by id.
+
+        One request per track. The batch endpoint (``/v1/tracks?ids=``) takes
+        fifty at a time and would be the obvious choice, but it answers 403
+        Forbidden for this app while ``/v1/tracks/{id}`` answers 200 — an app
+        restriction, not a token problem, since /me succeeds on the same
+        credentials.
+
+        This is a *lookup*, not a search: it does not touch the rate-limited
+        search endpoint that this project has exhausted before, and its results
+        need no verification because the id already names the track.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for index, track_id in enumerate(t for t in track_ids if t):
+            r = requests.get(f"{_API}/tracks/{track_id}", headers=self._headers(),
+                             timeout=20)
+            if r.status_code == 429:
+                raise SpotifyRateLimited(int(r.headers.get("Retry-After", 0) or 0))
+            if r.status_code == 404:
+                continue          # dead or region-locked id
+            if r.status_code != 200:
+                raise SpotifyAuthError(
+                    f"track {track_id} failed: {r.status_code} {r.text[:120]}")
+            item = r.json()
+            if item.get("id"):
+                out[item["id"]] = item
+            if pause and index % 10 == 9:
+                time.sleep(pause)
+        return out
+
     def _search_items(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Run one Spotify track search and return the raw items.
 
