@@ -135,6 +135,23 @@ def _radio_cli_running() -> bool:
                for line in out.splitlines())
 
 
+def lyric_display_state(lyrics) -> str:
+    """What can be shown for a track: "synced", "unsynced" or "none".
+
+    Three states, not two. Treating it as "synced or nothing" is what made the
+    TUI announce "No synced lyrics — added to the backfill queue" for a track
+    whose words were sitting in the database unsynced, and whose words the
+    player was showing on screen at the same moment.
+    """
+    if lyrics is None:
+        return "none"
+    if lyrics.has_synced:
+        return "synced"
+    if (lyrics.plain or "").strip():
+        return "unsynced"
+    return "none"
+
+
 def track_info(*, source: str = "", duration: float | None = None,
                offset: float = 0.0, pending: "list[str] | None" = None,
                lyric_lines: int = 0, error: str = "") -> str:
@@ -1994,7 +2011,8 @@ class KaraokeTui(App):
                 )
             except Exception:
                 log.debug("postprocess enqueue dispatch failed", exc_info=True)
-        if lyrics is not None and lyrics.has_synced:
+        state = lyric_display_state(lyrics)
+        if state == "synced":
             self._timeline = timeline_from_lyrics(lyrics)
             size = now.content_size
             banner = self.title_banner(display_artist, display_title,
@@ -2004,12 +2022,28 @@ class KaraokeTui(App):
                 f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
                 f"{lyrics.source} · offset {self._sync_offset:+.1f}s (, / .)"
             )
+        elif state == "unsynced":
+            # Words without timings. Previously this fell through to "no
+            # lyrics", which was wrong in a way that hid real text: the player
+            # showed the song's words while the TUI claimed to have none and
+            # queued it for backfill it did not need. There is nothing to
+            # highlight, so they are shown plainly and labelled as unsynced.
+            self._timeline = LyricTimeline([])
+            lyrics_widget = self.query_one("#lyrics", Static)
+            lyrics_widget.border_subtitle = f"unsynced · {lyrics.source}"
+            lyrics_widget.update(lyrics.plain.strip())
+            now.update(
+                f"♪ {display_artist} - {display_title}\n"
+                f"mode: {det.mode}  player: {det.player or '—'}\n"
+                f"{keybpm_line}\n"
+                f"{lyrics.source} · words only, no timings"
+            )
         else:
             self._timeline = LyricTimeline([])
             lyrics_widget = self.query_one("#lyrics", Static)
             lyrics_widget.border_subtitle = None
             lyrics_widget.update(
-                f"No synced lyrics for {display_artist} - {display_title}.\n"
+                f"No lyrics for {display_artist} - {display_title}.\n"
                 "Added to the staging/backfill queue — run karaoke-stage or "
                 "karaoke-backfill, then whitelist it in the Staging view."
             )
