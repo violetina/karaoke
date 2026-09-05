@@ -155,27 +155,28 @@ def lyric_display_state(lyrics) -> str:
 def genre_line(row) -> str:
     """The stored genre, with the honesty the label needs.
 
-    A bare label overstates it. "pop" won 39 of 120 tracks and "punk rock" 29,
-    far beyond what the library holds, because both sit close to a great deal
-    of music -- so a thin win on one of those is not the same claim as a clear
-    win on something specific. The runner-up is shown when the margin is
-    narrow, because it is often the better answer: "heavy metal, ~punk rock"
-    describes sludge better than either alone.
+    The margin decides, and only the margin. Marking every broad label as
+    doubtful was tried and was wrong: the four clearest decisions in the
+    library are "pop" for Lily Allen, Tove Lo, UPSAHL and Lola Young, which are
+    pop songs, and stamping a question mark on them put doubt exactly where the
+    classifier was most right. "pop" wins both clearly on real pop and thinly
+    on rock it cannot place; only the second is uncertain, and a thin margin is
+    already what says so.
+
+    So a narrow win shows its runner-up -- "heavy metal ~punk rock" -- which is
+    not a hedge: for sludge that pair describes the track better than either
+    label alone, and it is what the classifier actually found.
     """
     if row is None:
         return ""
-    from .genre import BROAD_LABELS, MIN_MARGIN
+    from .genre import MIN_MARGIN
 
     label = row["genre"]
     score = row["score"] or 0.0
     runner = row["runner_up"] or ""
     runner_score = row["runner_up_score"] or 0.0
-    close = runner and (score - runner_score) < MIN_MARGIN
-    if close:
+    if runner and (score - runner_score) < MIN_MARGIN:
         return f"{label} ~{runner}"
-    if label in BROAD_LABELS:
-        # Marked rather than hidden: it is a real answer, just a weak one.
-        return f"{label}?"
     return label
 
 
