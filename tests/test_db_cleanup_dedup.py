@@ -91,3 +91,70 @@ def test_incompatible_artist_never_duplicate():
     a = _row(1, "Radiohead", "Karma Police", 250.0)
     b = _row(2, "The Balkanexe Crew", "Karma Police", 251.0)
     assert not db_cleanup.is_duplicate(a, b)
+
+
+# --- version markers mean different recordings -----------------------------
+#
+# The duration guard is supposed to keep a demo or a live take from being
+# merged into the studio cut. It cannot: only 179 of 676 tracks carry a
+# duration, so it reads "unknown" and abstains, leaving a near-exact title as
+# the only test -- which "Take The Box" and "Take The Box (Demo)" both pass.
+
+
+def _ver(artist, title, duration=None):
+    """A row for the version tests; the module-level _row takes an id too."""
+    return {"artist": artist, "title": title, "duration": duration}
+
+
+def test_a_demo_is_not_the_album_version():
+    assert not db_cleanup.same_version("Take The Box", "Take The Box (Demo)")
+
+
+def test_a_remaster_is_not_the_original():
+    assert not db_cleanup.same_version("Bouree", "Bouree (2001 Remastered Version)")
+
+
+def test_a_rough_mix_is_not_a_demo():
+    assert not db_cleanup.same_version('Instant Hit - "Rough Mix', "Instant Hit - 8 Track Demo")
+
+
+def test_a_live_take_is_not_the_studio_cut():
+    assert not db_cleanup.same_version("Aqualung", "Aqualung (Live)")
+
+
+def test_two_identically_marked_takes_are_the_same_recording():
+    """Markers are compared as sets: it is a *difference* that blocks a merge,
+    not the mere presence of a marker."""
+    assert db_cleanup.same_version("Aqualung (Live)", "Aqualung - Live")
+
+
+def test_plain_titles_are_the_same_version():
+    assert db_cleanup.same_version("Lights", "Lights")
+    assert db_cleanup.same_version("Henry Lee", "Henry Lee")
+
+
+def test_a_word_containing_a_marker_is_not_a_marker():
+    """"Alive" must not read as "live"."""
+    assert db_cleanup.version_markers("Stayin' Alive") == frozenset()
+    assert db_cleanup.same_version("Stayin' Alive", "Stayin Alive")
+
+
+def test_a_different_version_is_never_merged_even_at_the_same_length():
+    """A live take can run the same length as the studio cut, so equal
+    durations are not evidence that two rows are the same recording."""
+    studio = _ver("Jethro Tull", "Aqualung", 400.0)
+    live = _ver("Jethro Tull", "Aqualung (Live)", 400.0)
+    assert not db_cleanup.is_duplicate(studio, live)
+
+
+def test_a_spelling_variant_is_still_merged():
+    """The guard must not block the duplicates it was never about."""
+    a = _ver("Omar Rodriguez-Lopez", "Lights")
+    b = _ver("Omar Rodríguez-López", "Lights")
+    assert db_cleanup.is_duplicate(a, b)
+
+
+def test_a_credited_artist_variant_is_still_merged():
+    a = _ver("Dave Grohl", "Mantra")
+    b = _ver("Dave Grohl, Joshua Homme & Trent Reznor", "Mantra")
+    assert db_cleanup.is_duplicate(a, b)

@@ -45,6 +45,35 @@ def are_titles_similar(t1: str, t2: str, threshold: float = TITLE_SIMILARITY) ->
     return SequenceMatcher(None, n1, n2).ratio() >= threshold
 
 
+# Words that mark a *different recording* rather than a different spelling.
+# A demo, a live take and a remaster are separate performances: they have their
+# own lengths, their own timings, and often their own words. Merging them
+# attaches one version's synced lyrics to another.
+_VERSION_MARKER = re.compile(
+    r"\b(demos?|live|unplugged|acoustic|instrumental|a\s?cappella|"
+    r"remaster(?:ed)?|remix(?:es)?|rough\s*mix|alternate|alternative\s+take|"
+    r"rehearsal|session|radio\s*edit|single\s+version|reprise|"
+    r"mono|karaoke|cover|edit)\b",
+    re.IGNORECASE,
+)
+
+
+def version_markers(title: str) -> frozenset:
+    """Version words present in a title, lowercased.
+
+    Compared as sets rather than tested for presence: two tracks both marked
+    "(Live)" are the same live recording under different spellings and should
+    still merge. It is a *difference* in markers that means different takes.
+    """
+    return frozenset(m.group(0).lower().replace(" ", "")
+                     for m in _VERSION_MARKER.finditer(title or ""))
+
+
+def same_version(t1: str, t2: str) -> bool:
+    """Whether two titles describe the same recording."""
+    return version_markers(t1) == version_markers(t2)
+
+
 def duration_relation(d1: Optional[float], d2: Optional[float]) -> str:
     """Classify two durations: 'same', 'different', or 'unknown'.
 
@@ -66,6 +95,11 @@ def is_duplicate(t1: sqlite3.Row, t2: sqlite3.Row) -> bool:
     are unknown we require a near-identical title before merging.
     """
     if not are_artists_compatible(t1["artist"], t2["artist"]):
+        return False
+    # Checked before the duration relation, and independently of it: a live
+    # take can happen to run the same length as the studio cut, so "same
+    # length" is not evidence that they are the same recording.
+    if not same_version(t1["title"], t2["title"]):
         return False
     rel = duration_relation(t1["duration"], t2["duration"])
     if rel == "same":
