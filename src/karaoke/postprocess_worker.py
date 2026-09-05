@@ -127,9 +127,9 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
     player's own lyrics panel useful: it has the words and no timings, and
     Whisper has the reverse.
     """
-    from .lyric_align import align_lyrics_to_lrc
+    from .lyric_align import align_lines
     from .lyrics import parse_lrc
-    from .whisper_sync import transcribe_to_words
+    from .whisper_sync import lines_to_lrc, transcribe_to_words
 
     row = conn.execute(
         "SELECT plain_lyrics FROM lyrics WHERE track_id = ? AND kind = 'approved'",
@@ -150,10 +150,19 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
         # The tempo is what turns a plausible-looking timestamp into a
         # musically placed one: it sets the beat grid the lines snap to and the
         # bar window that identifies an instrumental break.
-        lrc = align_lyrics_to_lrc(
-            plain, words,
+        # align_lines rather than align_lyrics_to_lrc so the support report
+        # comes back with the timings: how many lines were anchored on a heard
+        # word and how much of the track had no anchor at all. Once written to
+        # an LRC the two are indistinguishable, and reconstructing them later
+        # would mean transcribing again -- which Whisper does not do
+        # reproducibly, so it would not describe the row that was stored.
+        report: dict = {}
+        lyric_lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+        lrc = lines_to_lrc(align_lines(
+            lyric_lines, words,
             total_duration=(meta["duration"] if meta else None),
-            bpm=(meta["bpm"] if meta else None))
+            bpm=(meta["bpm"] if meta else None),
+            report=report))
     except Exception:
         log.exception("postprocess: sync failed for track %s", track_id)
         return False
@@ -163,13 +172,40 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
                     track_id)
         return False
 
+    # Zero anchors is refused, and this is not the coverage gate the
+    # measurement argued against. That argument was about *sparse* anchoring:
+    # 45% anchored scored 0.77s while 54% scored 2.63s, so a low count predicts
+    # uncertainty rather than error, and the timings are worth keeping and
+    # flagging. With no anchors at all there is nothing to be uncertain about --
+    # the lines are spaced evenly across the duration because nothing was heard,
+    # and storing that marks the track synced and stops anything trying again.
+    if report.get("lines") and not report.get("anchored"):
+        log.warning("postprocess: no anchored line for track %s; "
+                    "timings would be evenly spaced guesses, not stored",
+                    track_id)
+        return False
+
     conn.execute(
         "UPDATE lyrics SET synced_lyrics = ?, source = ?"
         " WHERE track_id = ? AND kind = 'approved'",
         (lrc, "whisper_aligned", track_id))
     conn.commit()
-    log.info("postprocess: synced %d line(s) for track %s",
-             len(parse_lrc(lrc)), track_id)
+
+    # Stored whether the alignment looks well supported or not. This is a flag,
+    # never a gate: the timings are kept either way, because the measurement
+    # only justifies certifying a well-anchored alignment, not rejecting a
+    # sparse one -- a 45%-anchored track scored 0.77s while a 54%-anchored one
+    # scored 2.63s, so poor coverage predicts uncertainty, not error.
+    localcache.ensure_alignment_support_table(conn)
+    localcache.record_alignment_support(track_id, report, conn,
+                                        source="whisper_aligned")
+    trustworthy = localcache.alignment_is_trustworthy(
+        localcache.alignment_support(track_id, conn))
+    log.info("postprocess: synced %d line(s) for track %s "
+             "(%s/%s lines anchored%s)",
+             len(parse_lrc(lrc)), track_id,
+             report.get("anchored", "?"), report.get("lines", "?"),
+             "" if trustworthy else " — worth a listen")
     return True
 
 

@@ -84,13 +84,68 @@ def test_an_alignment_that_produces_nothing_is_not_stored(conn, monkeypatch,
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
                         lambda path, text=None: [])
-    monkeypatch.setattr("karaoke.lyric_align.align_lyrics_to_lrc",
-                        lambda plain, words, total_duration=None, bpm=None: "")
+    monkeypatch.setattr("karaoke.lyric_align.align_lines",
+                        lambda lines, words, total_duration=None, bpm=None,
+                        report=None: [])
 
     assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
     row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
                        ).fetchone()
     assert not row["synced_lyrics"]
+
+
+def test_an_alignment_with_no_anchors_at_all_is_not_stored(conn, monkeypatch,
+                                                           tmp_path):
+    """Heard nothing, so the lines would be evenly spaced guesses.
+
+    Distinct from the sparse-anchor case, which *is* stored and flagged: a low
+    anchor count predicts uncertainty (45% anchored measured 0.77s of error
+    against 54% anchored measuring 2.63s), while no anchors at all means the
+    timings carry no measurement to be uncertain about.
+    """
+    from karaoke import postprocess_worker as pw
+
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
+                        lambda path, text=None: [])
+
+    def _unanchored(lines, words, total_duration=None, bpm=None, report=None):
+        if report is not None:
+            report.update(lines=len(lines), anchored=0, longest_gap_s=200.0,
+                          unanchored_fraction=1.0)
+        return [(i * 10.0, ln) for i, ln in enumerate(lines)]
+
+    monkeypatch.setattr("karaoke.lyric_align.align_lines", _unanchored)
+
+    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
+    row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
+                       ).fetchone()
+    assert not row["synced_lyrics"]
+
+
+def test_a_sparsely_anchored_alignment_is_stored_and_flagged(conn, monkeypatch,
+                                                             tmp_path):
+    """The other side of the rule: keep the timings, mark them for a listen."""
+    from karaoke import localcache
+    from karaoke import postprocess_worker as pw
+
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
+                        lambda path, text=None: [])
+
+    def _sparse(lines, words, total_duration=None, bpm=None, report=None):
+        if report is not None:
+            report.update(lines=len(lines), anchored=1, longest_gap_s=90.0,
+                          unanchored_fraction=0.6)
+        return [(i * 10.0, ln) for i, ln in enumerate(lines)]
+
+    monkeypatch.setattr("karaoke.lyric_align.align_lines", _sparse)
+
+    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is True
+    row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
+                       ).fetchone()
+    assert row["synced_lyrics"]                      # kept, not discarded
+    support = localcache.alignment_support(1, conn)
+    assert support["anchored"] == 1
+    assert localcache.alignment_is_trustworthy(support) is False
 
 
 def test_a_transcription_failure_is_not_fatal(conn, monkeypatch, tmp_path):
