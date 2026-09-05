@@ -961,12 +961,25 @@ def test_a_narrow_margin_shows_the_runner_up():
     assert line == "heavy metal ~punk rock"
 
 
-def test_a_broad_label_is_marked_as_weak():
-    """"pop" won 39 of 120 tracks; showing it bare would overstate it."""
+def test_a_clear_win_on_a_broad_label_is_not_marked_doubtful():
+    """Marking every broad label was tried and was wrong.
+
+    The four clearest decisions in the library are "pop" for Lily Allen, Tove
+    Lo, UPSAHL and Lola Young -- pop songs -- so a question mark put doubt
+    exactly where the classifier was most right. A thin margin already says
+    "uncertain"; the label itself does not.
+    """
     from karaoke.tui import genre_line
 
-    assert genre_line(_genre_row(genre="pop", runner_up="folk",
-                                 runner_up_score=0.40)) == "pop?"
+    assert genre_line(_genre_row(genre="pop", score=0.65, runner_up="folk",
+                                 runner_up_score=0.40)) == "pop"
+
+
+def test_a_thin_win_on_a_broad_label_shows_its_runner_up():
+    from karaoke.tui import genre_line
+
+    assert genre_line(_genre_row(genre="pop", score=0.60, runner_up="punk rock",
+                                 runner_up_score=0.595)) == "pop ~punk rock"
 
 
 def test_no_genre_shows_nothing():
