@@ -450,6 +450,59 @@ def _drop_impossible_anchors(per_line: list[Optional[float]],
     return kept
 
 
+def review_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
+    """List stored alignments whose timings are mostly interpolated.
+
+    A worklist, not a delete list. The words are unaffected either way; what is
+    in question is only whether the *timings* were taken from heard words or
+    guessed between distant anchors, and the latter is worth a listen.
+    """
+    import argparse
+
+    from . import localcache
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-align-review",
+        description="Alignments whose timings rest on few anchors")
+    ap.add_argument("--threshold", type=float,
+                    default=localcache.GOOD_ANCHOR_FRACTION,
+                    help="anchored fraction below which to list (default "
+                         f"{localcache.GOOD_ANCHOR_FRACTION})")
+    args = ap.parse_args(argv)
+
+    conn = localcache.connect()
+    try:
+        rows = localcache.alignments_for_review(conn, args.threshold)
+        total = conn.execute(
+            "SELECT count(*) n FROM alignment_support").fetchone()["n"]
+    finally:
+        conn.close()
+
+    if not total:
+        print("No alignment support recorded yet. It is written when a track "
+              "is synced,\nso this fills in as tracks are processed rather "
+              "than being backfillable:\nthe anchors are gone once the "
+              "timings are written, and Whisper does not\nreproduce them.")
+        return 0
+    if not rows:
+        print(f"{total} alignment(s) recorded, none below "
+              f"{args.threshold:.0%} anchored.")
+        return 0
+
+    print(f"{len(rows)} of {total} alignment(s) rest on few anchors "
+          f"(under {args.threshold:.0%}):\n")
+    for row in rows:
+        gap = row["longest_gap_s"]
+        print(f"  {row['fraction']:5.0%} anchored  "
+              f"{row['anchored']:3}/{row['lines']:<3} lines  "
+              f"{'' if gap is None else f'worst gap {gap:4.0f}s  '}"
+              f"{row['artist']} - {row['title']}")
+    print("\nTimings only. The lyrics themselves are unaffected, and a low "
+          "score means\nuncertain rather than wrong: a 45%-anchored track "
+          "measured 0.77s of error\nwhile a 54%-anchored one measured 2.63s.")
+    return 0
+
+
 def anchor_coverage(per_line: list[Optional[float]],
                     horizon: Optional[float]) -> tuple[float, float]:
     """How much of a track the anchors actually cover.

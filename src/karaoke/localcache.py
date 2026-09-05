@@ -16,7 +16,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from .config import settings
 from .logger import log
@@ -356,6 +356,120 @@ def iter_note_rows(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     yield from cur.fetchall()
 
 
+# Anchored fraction at or above which an alignment's timings are trustworthy.
+# Measured on 13 recorded tracks against their known LRC timings: every one of
+# the nine at or above this scored 0.24-0.89s of jitter, without exception.
+#
+# Below it the outcome is *unpredictable*, not bad -- King Buffalo - Locusts
+# managed 0.77s on 45% anchored, indistinguishable on every available metric
+# from Ministry - Filth Pig at 2.63s. That asymmetry is why this marks rows for
+# review and never rejects them: the evidence supports certifying a good
+# alignment, not condemning a poor-looking one.
+GOOD_ANCHOR_FRACTION = 0.83
+
+
+def ensure_alignment_support_table(conn: sqlite3.Connection) -> None:
+    """Create the alignment support table in databases predating it."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS alignment_support (
+            track_id     INTEGER PRIMARY KEY,
+            lines        INTEGER NOT NULL,
+            anchored     INTEGER NOT NULL,
+            longest_gap_s REAL,
+            unanchored_fraction REAL,
+            source       TEXT NOT NULL DEFAULT '',
+            noted_at     REAL NOT NULL
+        );
+    """)
+    conn.commit()
+
+
+def record_alignment_support(track_id: int, report: dict,
+                             conn: sqlite3.Connection, *,
+                             source: str = "") -> None:
+    """Note how well a stored alignment's timings are actually supported.
+
+    Timings that were interpolated between distant anchors are indistinguishable
+    from timings taken from heard words once written to an LRC -- GAUPA -
+    Febersvan stored lines up to 183 seconds out and looked no different from a
+    good result. This keeps the difference.
+
+    Written alongside the alignment rather than derived later, because the
+    anchors are gone by then: reproducing them means transcribing the audio
+    again, and Whisper is not deterministic, so a later reconstruction would
+    not describe the row that is actually stored.
+    """
+    if not report:
+        return
+    conn.execute(
+        """
+        INSERT INTO alignment_support
+            (track_id, lines, anchored, longest_gap_s, unanchored_fraction,
+             source, noted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            lines               = excluded.lines,
+            anchored            = excluded.anchored,
+            longest_gap_s       = excluded.longest_gap_s,
+            unanchored_fraction = excluded.unanchored_fraction,
+            source              = excluded.source,
+            noted_at            = excluded.noted_at
+        """,
+        (track_id, report.get("lines", 0), report.get("anchored", 0),
+         report.get("longest_gap_s"), report.get("unanchored_fraction"),
+         source, time.time()),
+    )
+    conn.commit()
+
+
+def anchored_fraction(row: Any) -> Optional[float]:
+    """Share of a row's lines that were anchored, or None if unknowable."""
+    if row is None:
+        return None
+    lines = row["lines"] or 0
+    if lines <= 0:
+        return None
+    return (row["anchored"] or 0) / lines
+
+
+def alignment_is_trustworthy(row: Any) -> Optional[bool]:
+    """Whether an alignment's timings met the measured bar.
+
+    None when there is nothing recorded — which is not the same as False, and
+    covers every alignment stored before this was measured.
+    """
+    fraction = anchored_fraction(row)
+    if fraction is None:
+        return None
+    return fraction >= GOOD_ANCHOR_FRACTION
+
+
+def alignment_support(track_id: int, conn: sqlite3.Connection) -> Any:
+    """The recorded support for one track's alignment, or None."""
+    return conn.execute(
+        "SELECT * FROM alignment_support WHERE track_id = ?",
+        (track_id,)).fetchone()
+
+
+def alignments_for_review(conn: sqlite3.Connection,
+                          threshold: float = GOOD_ANCHOR_FRACTION) -> list:
+    """Stored alignments whose timings are mostly interpolated, worst first.
+
+    A worklist, not a delete list. These are the rows whose timings deserve a
+    listen; the words themselves are unaffected either way.
+    """
+    return conn.execute(
+        """
+        SELECT s.*, t.artist, t.title,
+               CAST(s.anchored AS REAL) / s.lines AS fraction
+        FROM alignment_support s
+        JOIN tracks t ON t.track_id = s.track_id
+        WHERE s.lines > 0 AND CAST(s.anchored AS REAL) / s.lines < ?
+        ORDER BY fraction
+        """,
+        (threshold,)).fetchall()
+
+
 def ensure_silence_table(conn: sqlite3.Connection) -> None:
     """Create the recording silence map in databases predating it."""
     conn.executescript("""
@@ -650,6 +764,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_recording_tables(conn)
     ensure_notes_table(conn)
     ensure_silence_table(conn)
+    ensure_alignment_support_table(conn)
     return conn
 
 
