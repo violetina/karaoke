@@ -120,7 +120,8 @@ def test_the_tui_stores_panel_lyrics_as_plain(monkeypatch):
     candidate for alignment rather than a finished result."""
     from karaoke.tui import KaraokeTui
 
-    monkeypatch.setattr(yl, "for_playing", lambda a, t: _panel(LYRICS))
+    monkeypatch.setattr(yl, "capture_for_playing",
+                        lambda a, t: ("lyrics", _panel(LYRICS)))
     app = KaraokeTui.__new__(KaraokeTui)
     lyrics = app._panel_lyrics("Dinosaur Jr.", "Put It Down")
     assert lyrics is not None
@@ -132,7 +133,7 @@ def test_the_tui_stores_panel_lyrics_as_plain(monkeypatch):
 def test_the_tui_survives_a_missing_panel(monkeypatch):
     from karaoke.tui import KaraokeTui
 
-    monkeypatch.setattr(yl, "for_playing", lambda a, t: None)
+    monkeypatch.setattr(yl, "capture_for_playing", lambda a, t: (None, None))
     app = KaraokeTui.__new__(KaraokeTui)
     assert app._panel_lyrics("A", "B") is None
 

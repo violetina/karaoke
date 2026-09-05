@@ -16,7 +16,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .config import settings
 from .logger import log
@@ -124,6 +124,32 @@ CREATE TABLE IF NOT EXISTS track_sync_offsets (
     mode        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
+
+-- Text about a track that is not its lyrics. The lyrics panel renders the
+-- artist biography in the same element as the words, so a reader that only
+-- decides "lyrics / not lyrics" throws away a band history it already fetched
+-- -- which is what happened to four Wizards of Ooze tracks. Classifying is
+-- cheap; the classification is what belongs in a column.
+CREATE TABLE IF NOT EXISTS track_notes (
+    note_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id   INTEGER NOT NULL,
+    kind       TEXT NOT NULL,   -- biography | transcription | commentary | credits
+    text       TEXT NOT NULL,
+    source     TEXT NOT NULL,   -- ytmusic_panel | whisper | lrclib | ...
+    -- Mean word probability for a transcription; NULL when it does not apply.
+    -- A Whisper guess and a LyricFind biography are not equally trustworthy and
+    -- a search result should be able to say which it is looking at.
+    confidence REAL,
+    noted_at   REAL NOT NULL,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_notes_track ON track_notes (track_id);
+
+-- One note per (track, kind, source): the panel is re-read on every play, and
+-- without this a much-played track collects the same biography fifty times.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_track_notes_dedup
+    ON track_notes (track_id, kind, source);
 """
 
 _SCHEMA = """
@@ -239,6 +265,95 @@ def ensure_recording_tables(conn: sqlite3.Connection) -> None:
             ON recording_marks (recording_id, at_wall);
     """)
     conn.commit()
+
+
+# The kinds of note that may be stored. Deliberately closed: a notes table with
+# an open kind becomes a dumping ground, and text that does not classify is
+# still better refused than filed as "other" and never read again.
+NOTE_KINDS = ("biography", "transcription", "commentary", "credits")
+
+
+def ensure_notes_table(conn: sqlite3.Connection) -> None:
+    """Create the notes table in databases predating it."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS track_notes (
+            note_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id   INTEGER NOT NULL,
+            kind       TEXT NOT NULL,
+            text       TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            confidence REAL,
+            noted_at   REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_track_notes_track
+            ON track_notes (track_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_track_notes_dedup
+            ON track_notes (track_id, kind, source);
+    """)
+    conn.commit()
+
+
+def record_note(track_id: int, kind: str, text: str, source: str,
+                conn: sqlite3.Connection, *,
+                confidence: Optional[float] = None) -> bool:
+    """Store text about a track that is not its lyrics.
+
+    Returns whether anything was stored. An unknown ``kind`` is refused rather
+    than coerced, so a caller that has not decided what it is holding cannot
+    quietly file it as prose.
+
+    Re-reading the same source updates in place: the panel is read on every
+    play and the biography does not change between them, but it can be read
+    truncated while the tab is still rendering, so a longer later read wins.
+    """
+    if kind not in NOTE_KINDS:
+        log.debug("refusing note of unknown kind %r for track %s", kind, track_id)
+        return False
+    body = (text or "").strip()
+    if not body:
+        return False
+    conn.execute(
+        """
+        INSERT INTO track_notes (track_id, kind, text, source, confidence, noted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(track_id, kind, source) DO UPDATE SET
+            text       = excluded.text,
+            confidence = excluded.confidence,
+            noted_at   = excluded.noted_at
+        WHERE length(excluded.text) >= length(track_notes.text)
+        """,
+        (track_id, kind, body, source, confidence, time.time()),
+    )
+    conn.commit()
+    return True
+
+
+def notes_for_track(track_id: int, conn: sqlite3.Connection) -> list:
+    """Every note held about one track, newest first."""
+    return conn.execute(
+        """
+        SELECT note_id, track_id, kind, text, source, confidence, noted_at
+        FROM track_notes WHERE track_id = ?
+        ORDER BY noted_at DESC, note_id DESC
+        """,
+        (track_id,),
+    ).fetchall()
+
+
+def iter_note_rows(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
+    """Yield every note with its track's names, for indexing."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT n.note_id, n.track_id, n.kind, n.text, n.source,
+               n.confidence, n.noted_at,
+               t.artist, t.title, t.album
+        FROM track_notes n
+        JOIN tracks t ON t.track_id = n.track_id
+        ORDER BY n.note_id
+        """
+    )
+    yield from cur.fetchall()
 
 
 def ensure_restricted_table(conn: sqlite3.Connection) -> None:
@@ -443,6 +558,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_spotify_lookup_table(conn)
     ensure_restricted_table(conn)
     ensure_recording_tables(conn)
+    ensure_notes_table(conn)
     return conn
 
 

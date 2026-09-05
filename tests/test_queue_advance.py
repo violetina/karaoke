@@ -46,6 +46,42 @@ def test_no_video_and_no_state_are_safe():
     assert not player_open.track_finished(None)
 
 
+# -- knowing the player holds nothing -----------------------------------
+
+def test_an_empty_element_is_idle():
+    """Navigating off the watch URL leaves a <video> with no source. It never
+    ends, so the queue must recognise it some other way."""
+    assert player_open.track_idle(
+        {"present": True, "ended": False, "paused": True,
+         "position": 0, "duration": 0, "readyState": 0})
+
+
+def test_a_playing_track_is_not_idle():
+    assert not player_open.track_idle(
+        {"present": True, "ended": False, "position": 100.0,
+         "duration": 200.0, "readyState": 4})
+
+
+def test_a_live_stream_is_not_idle():
+    """It reports no duration either, but it has data -- readyState tells
+    it apart from an empty element."""
+    assert not player_open.track_idle(
+        {"present": True, "ended": False, "position": 900.0,
+         "duration": 0, "readyState": 4})
+
+
+def test_a_finished_track_is_not_idle():
+    """The end of a track is the queue's business, not the stall path's."""
+    assert not player_open.track_idle(
+        {"present": True, "ended": True, "position": 200.0,
+         "duration": 200.0, "readyState": 0})
+
+
+def test_no_video_and_no_state_are_not_idle():
+    assert not player_open.track_idle({"present": False})
+    assert not player_open.track_idle(None)
+
+
 # -- the queue ----------------------------------------------------------
 
 def _app(queue, at=0, play_once=True):
@@ -56,6 +92,7 @@ def _app(queue, at=0, play_once=True):
     app._queue_at = at
     app._play_once = play_once
     app._last_finished_url = ""
+    app._idle_since = 0.0
     app.notify = lambda *a, **k: None
     app._render_queue = lambda: None
     return app
@@ -140,6 +177,89 @@ def test_the_end_of_the_queue_stops(monkeypatch):
                         lambda i: pytest.fail("nothing left"), raising=False)
     app.action_queue_next()
     assert "End of queue" in notes[0]
+
+
+# -- a player that came to rest holding nothing -------------------------
+
+def _idle_app(monkeypatch, clock):
+    """A queue watched against a player showing an empty <video>."""
+    app = _app(_rows("https://youtu.be/1", "https://youtu.be/2"))
+    played = []
+    monkeypatch.setattr(app, "play_queue_index",
+                        lambda i: played.append(i) or True, raising=False)
+    monkeypatch.setattr("karaoke.tui.browser_playback",
+                        lambda: {"present": True, "ended": False, "paused": True,
+                                 "position": 0, "duration": 0, "readyState": 0,
+                                 "url": "https://music.youtube.com/@someone"})
+    monkeypatch.setattr("karaoke.tui.time.monotonic", lambda: clock[0])
+    return app, played
+
+
+def test_an_idle_player_does_not_advance_immediately(monkeypatch):
+    """A watch URL reads as idle while it loads; skipping then would race
+    every track in the queue."""
+    from karaoke import tui
+
+    clock = [1000.0]
+    app, played = _idle_app(monkeypatch, clock)
+    app._watch_queue()
+    clock[0] += tui.IDLE_STALL_S - 1
+    app._watch_queue()
+    assert played == []
+
+
+def test_a_player_idle_for_long_enough_advances(monkeypatch):
+    """Otherwise the queue waits for an end that cannot arrive: an empty
+    element has no duration and never sets `ended`."""
+    from karaoke import tui
+
+    clock = [1000.0]
+    app, played = _idle_app(monkeypatch, clock)
+    app._watch_queue()
+    clock[0] += tui.IDLE_STALL_S + 1
+    app._watch_queue()
+    assert played == [1]
+
+
+def test_playback_resuming_clears_the_stall(monkeypatch):
+    """The load simply took a while -- that is not a stall."""
+    from karaoke import tui
+
+    clock = [1000.0]
+    app, played = _idle_app(monkeypatch, clock)
+    app._watch_queue()
+    monkeypatch.setattr("karaoke.tui.browser_playback",
+                        lambda: {"present": True, "ended": False, "position": 3.0,
+                                 "duration": 200.0, "readyState": 4, "url": "u"})
+    clock[0] += tui.IDLE_STALL_S + 1
+    app._watch_queue()
+    assert played == []
+    assert app._idle_since == 0.0
+
+
+# -- pausing other players, but not our own window ----------------------
+
+def test_the_kiosk_window_is_not_paused(monkeypatch):
+    """It is the only MPRIS player on a dedicated box, and pausing the very
+    browser we are about to navigate parks it at 0:00."""
+    cmdlines = {
+        "/proc/4242/cmdline":
+            f"chrome\0--kiosk\0--remote-debugging-port={player_open.CDP_PORT}\0",
+        "/proc/77/cmdline": "vlc\0",
+    }
+    monkeypatch.setattr(player_open.Path, "read_bytes",
+                        lambda self: cmdlines[str(self)].encode())
+    assert player_open._kiosk_mpris_names(
+        ["chromium.instance4242", "vlc.instance77"]) == {"chromium.instance4242"}
+
+
+def test_players_with_no_readable_process_are_left_alone(monkeypatch):
+    """An unparseable or vanished player is not ours, so it stays pausable."""
+    def boom(self):
+        raise OSError("gone")
+
+    monkeypatch.setattr(player_open.Path, "read_bytes", boom)
+    assert player_open._kiosk_mpris_names(["chromium.instance1", "spotify"]) == set()
 
 
 def test_play_once_is_on_by_default():

@@ -46,7 +46,7 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
 from .browse import open_song_url
-from .player_open import browser_playback, track_finished
+from .player_open import browser_playback, track_finished, track_idle
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
 from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
@@ -55,6 +55,11 @@ from .sentiment import mood_of
 
 SongRow = dict[str, object]
 SongMapping = Mapping[str, object]
+
+# How long the player may hold nothing before the queue gives up on it and
+# moves on. Long enough that a slow watch-URL load is never mistaken for a
+# stall — the watcher itself only ticks every 2s.
+IDLE_STALL_S = 10.0
 
 # Mood squares. The art rows are 2 cells wide, but the weather glyphs are not
 # all the same width: "☔" and "🔥" are genuinely 2 cells while "☀ ♡ ◇" are 1, so
@@ -577,6 +582,7 @@ class KaraokeTui(App):
         self._queue_at = -1        # index currently playing
         self._play_once = True     # queue decides the next track
         self._last_finished_url = ""
+        self._idle_since = 0.0     # when the player last held nothing
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1078,7 +1084,23 @@ class KaraokeTui(App):
             return
         state = browser_playback()
         if not track_finished(state):
-            return
+            # The window can also come to rest holding nothing at all: the
+            # site navigated off the watch URL, or the load never took. That
+            # never reads as finished -- no duration, and `ended` will never
+            # be set -- so without this the queue waits for an end that cannot
+            # arrive. A fresh watch URL looks the same for a moment, so let it
+            # hold before treating it as the end of the track.
+            if not track_idle(state):
+                self._idle_since = 0.0
+                return
+            now = time.monotonic()
+            if not self._idle_since:
+                self._idle_since = now
+                return
+            if now - self._idle_since < IDLE_STALL_S:
+                return
+            log.info("player idle for %.0fs; advancing the queue", IDLE_STALL_S)
+        self._idle_since = 0.0
         # Only act once per track: after advancing, the new track is short of
         # its end again, but a stalled read could otherwise fire repeatedly.
         url = (state or {}).get("url", "")
@@ -2166,16 +2188,43 @@ class KaraokeTui(App):
         from .lyrics import Lyrics
 
         try:
-            panel = ytmusic_lyrics.for_playing(artist, title)
+            kind, panel = ytmusic_lyrics.capture_for_playing(artist, title)
         except Exception:
             log.debug("lyrics panel read failed", exc_info=True)
             return None
         if panel is None:
             return None
+        if kind == "biography":
+            self._store_panel_note(artist, title, panel)
+            return None
         log.info("lyrics panel supplied %d lines for %s - %s (%s)",
                  len(panel.lines), artist, title, panel.attribution)
         return Lyrics(plain="\n".join(panel.lines),
                       source=ytmusic_lyrics.lyrics_source(panel))
+
+    def _store_panel_note(self, artist: str, title: str, panel) -> None:
+        """Keep the artist biography the panel showed instead of lyrics.
+
+        This text used to be discarded once it had been recognised as not being
+        lyrics, which cost a band history for every track that had one. It is
+        not singable, so it never touches the lyrics table -- but it is exactly
+        what a semantic search for a half-remembered band should find.
+        """
+        from . import localcache
+
+        try:
+            conn = localcache.connect()
+            track_id = localcache.find_track_id(artist, title, conn)
+            if track_id is None:
+                log.debug("no track row for %r - %r; biography not stored",
+                          artist, title)
+                return
+            if localcache.record_note(track_id, "biography", panel.text,
+                                      "ytmusic_panel", conn):
+                log.info("stored biography note (%d chars) for %s - %s",
+                         len(panel.text), artist, title)
+        except Exception:
+            log.debug("could not store panel note", exc_info=True)
 
     def _background_autoload_captions(self, url: str, vid: str) -> None:
         """Fetch, stage, and auto-approve YouTube captions in a worker thread.

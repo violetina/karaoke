@@ -7,11 +7,13 @@ whole TUI stack just to spawn ``xdg-open``.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from .logger import OPEN_STDERR_LOG, OPEN_STDOUT_LOG, log
 
 
-CDP_URL = "http://localhost:9222/json"
+CDP_PORT = 9222
+CDP_URL = f"http://localhost:{CDP_PORT}/json"
 
 
 def _cdp_page_socket(timeout: float = 1.0) -> "str | None":
@@ -89,6 +91,7 @@ _PLAYBACK_JS = """(() => {
     paused: !!v.paused,
     position: v.currentTime || 0,
     duration: (isFinite(v.duration) ? v.duration : 0) || 0,
+    readyState: v.readyState || 0,
     url: location.href
   });
 })()"""
@@ -97,8 +100,8 @@ _PLAYBACK_JS = """(() => {
 def browser_playback() -> "dict | None":
     """What the kiosk browser's video element is doing, or None.
 
-    Returns ``present``, ``ended``, ``paused``, ``position``, ``duration``
-    and ``url``.
+    Returns ``present``, ``ended``, ``paused``, ``position``, ``duration``,
+    ``readyState`` and ``url``.
     """
     import json
 
@@ -130,6 +133,51 @@ def track_finished(state: "dict | None", *, tail: float = 1.5) -> bool:
     return duration > 0 and position >= (duration - tail)
 
 
+def track_idle(state: "dict | None") -> bool:
+    """Whether the element holds nothing that could ever play.
+
+    YouTube Music keeps a ``<video>`` on every page, including artist and
+    search pages, so navigating off a watch URL leaves an element that is
+    present but empty. That state never satisfies :func:`track_finished` --
+    it has no duration and will never set ``ended`` -- so a queue waiting for
+    the track to end waits forever. ``readyState`` is what separates the two:
+    a live stream also reports no duration, but it has data.
+
+    Idle is not the same as finished: a watch URL reads as idle for a moment
+    while it loads. Callers must see it hold before acting on it.
+    """
+    if not state or not state.get("present"):
+        return False
+    if state.get("ended"):
+        return False
+    try:
+        ready = int(state.get("readyState") or 0)
+    except (TypeError, ValueError):
+        return False
+    return ready == 0  # HAVE_NOTHING: no source loaded at all
+
+
+def _kiosk_mpris_names(names: "list[str]") -> "set[str]":
+    """Which of ``names`` are the browser we drive over CDP.
+
+    playerctl names Chrome's bus ``chromium.instanceNNN`` after the browser
+    process id, so reading that process's cmdline tells us whether it is the
+    window we are about to navigate.
+    """
+    kiosk = set()
+    for name in names:
+        _, sep, pid = name.partition(".instance")
+        if not sep or not pid.isdigit():
+            continue
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+        except OSError:
+            continue
+        if f"--remote-debugging-port={CDP_PORT}" in cmdline:
+            kiosk.add(name)
+    return kiosk
+
+
 def open_song_url(url: str, kind: str | None) -> int | None:
     """Open a song URL and return the spawned process id when applicable.
 
@@ -145,15 +193,21 @@ def open_song_url(url: str, kind: str | None) -> int | None:
             timeout=2,
         )
         if proc.returncode == 0:
-            for p in proc.stdout.strip().splitlines():
-                p = p.strip()
-                if p:
-                    subprocess.run(
-                        ["playerctl", "--player", p, "pause"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=1,
-                    )
+            names = [p.strip() for p in proc.stdout.strip().splitlines() if p.strip()]
+            # ...but never the kiosk window itself. On a dedicated box it is
+            # the only MPRIS player there is, and pausing the very browser we
+            # are about to navigate leaves it parked at 0:00 whenever the site
+            # does not autoplay the new URL.
+            kiosk = _kiosk_mpris_names(names)
+            for p in names:
+                if p in kiosk:
+                    continue
+                subprocess.run(
+                    ["playerctl", "--player", p, "pause"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                )
     except Exception:
         pass
 

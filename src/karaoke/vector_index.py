@@ -26,6 +26,7 @@ class VectorIndexStats:
     skipped: int = 0
     errors: int = 0
     line_docs: int = 0
+    note_docs: int = 0
 
 
 def track_doc_id(track_id: int) -> str:
@@ -188,12 +189,87 @@ def ensure_line_index(os_client: Any, index_name: str) -> bool:
     return True
 
 
+def note_doc_id(note_id: int) -> str:
+    """Stable OpenSearch id for a SQLite-backed note document."""
+    return f"sqlite-note:{note_id}"
+
+
+def build_note_doc(row: Any, *, embed: bool = True) -> dict[str, Any]:
+    """Build one document for text about a track that is not its lyrics.
+
+    Notes are their own documents rather than another vector on the track doc,
+    for two reasons. A track can hold both a biography and a transcription and
+    they should be findable separately, each saying which it is. And a
+    1400-character band history folded into a track's lyric embedding would
+    drag that track toward every prose query in the index, degrading the search
+    that matters most.
+    """
+    doc: dict[str, Any] = {
+        "note_id": row["note_id"],
+        "track_id": row["track_id"],
+        "kind": row["kind"],
+        "artist": row["artist"] or "",
+        "title": row["title"] or "",
+        "album": row["album"] or "",
+        "text": row["text"] or "",
+        "note_source": row["source"] or "",
+        "confidence": row["confidence"],
+        "source": "sqlite-note",
+        "indexed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if embed:
+        from .embed import embed_text
+
+        # The artist and title are prepended because a biography rarely repeats
+        # the band's own name in a searchable way, and a query is far more often
+        # "that Belgian nineties band" than a phrase from the text itself.
+        context = f"{doc['artist']} {doc['title']}\n{doc['text']}".strip()
+        doc["note_vector"] = embed_text(context)
+    return doc
+
+
+def ensure_note_index(os_client: Any, index_name: str) -> bool:
+    """Create the note-level vector index if absent."""
+    if os_client.indices.exists(index=index_name):
+        return False
+    body = {
+        "settings": {"index": {"knn": True, "number_of_replicas": 0}},
+        "mappings": {
+            "properties": {
+                "note_id": {"type": "integer"},
+                "track_id": {"type": "integer"},
+                "kind": {"type": "keyword"},
+                "artist": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
+                "title": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
+                "album": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
+                "text": {"type": "text"},
+                "note_source": {"type": "keyword"},
+                "confidence": {"type": "float"},
+                "source": {"type": "keyword"},
+                "indexed_at": {"type": "date"},
+                "note_vector": {
+                    "type": "knn_vector",
+                    "dimension": settings.embed_dim,
+                    "method": {
+                        "name": "hnsw",
+                        "space_type": "cosinesimil",
+                        "engine": "lucene",
+                    },
+                },
+            }
+        },
+    }
+    os_client.indices.create(index=index_name, body=body)
+    return True
+
+
 def rebuild_from_sqlite(
     *,
     db_path: Optional[str] = None,
     limit: Optional[int] = None,
     embed: bool = True,
     include_lines: bool = False,
+    include_notes: bool = False,
     dry_run: bool = False,
     os_client: Any = None,
 ) -> VectorIndexStats:
@@ -204,6 +280,7 @@ def rebuild_from_sqlite(
     stats = VectorIndexStats()
     try:
         rows = list(iter_track_rows(conn))
+        note_rows = list(localcache.iter_note_rows(conn)) if include_notes else []
     finally:
         conn.close()
 
@@ -215,6 +292,8 @@ def rebuild_from_sqlite(
         ensure_index(c)
         if include_lines:
             ensure_line_index(c, f"{settings.index_name}-lines")
+        if include_notes:
+            ensure_note_index(c, f"{settings.index_name}-notes")
 
     for row in rows:
         stats.seen += 1
@@ -234,10 +313,24 @@ def rebuild_from_sqlite(
                         c.index(index=f"{settings.index_name}-lines", id=_doc_id, body=line_doc)
         except Exception:
             stats.errors += 1
+
+    for note_row in note_rows:
+        try:
+            note_doc = build_note_doc(note_row, embed=embed)
+            stats.note_docs += 1
+            if not dry_run:
+                assert c is not None
+                c.index(index=f"{settings.index_name}-notes",
+                        id=note_doc_id(note_row["note_id"]), body=note_doc)
+        except Exception:
+            stats.errors += 1
+
     if c is not None and not dry_run:
         c.indices.refresh(index=settings.index_name)
         if include_lines:
             c.indices.refresh(index=f"{settings.index_name}-lines")
+        if include_notes:
+            c.indices.refresh(index=f"{settings.index_name}-notes")
     return stats
 
 
@@ -249,6 +342,8 @@ def vector_index_main(argv: Optional[list[str]] = None) -> int:
     )
     ap.add_argument("--rebuild", action="store_true", help="index SQLite tracks into OpenSearch")
     ap.add_argument("--lines", action="store_true", help="also build a line-level index")
+    ap.add_argument("--notes", action="store_true",
+                    help="also index track notes (biographies, transcriptions)")
     ap.add_argument("--no-embed", action="store_true", help="skip embedding generation")
     ap.add_argument("--dry-run", action="store_true", help="read/build docs without writing OpenSearch")
     ap.add_argument("--limit", type=int, default=None, help="maximum tracks to process")
@@ -263,12 +358,14 @@ def vector_index_main(argv: Optional[list[str]] = None) -> int:
         limit=args.limit,
         embed=not args.no_embed,
         include_lines=args.lines,
+        include_notes=args.notes,
         dry_run=args.dry_run,
     )
     action = "dry-run" if args.dry_run else "indexed"
     print(
         f"{action}: seen={stats.seen} indexed={stats.indexed} "
-        f"skipped={stats.skipped} line_docs={stats.line_docs} errors={stats.errors}"
+        f"skipped={stats.skipped} line_docs={stats.line_docs} "
+        f"note_docs={stats.note_docs} errors={stats.errors}"
     )
     return 1 if stats.errors else 0
 
