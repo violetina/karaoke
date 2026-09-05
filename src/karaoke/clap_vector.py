@@ -69,11 +69,35 @@ def available() -> bool:
     return True
 
 
+def _silence_progress_bars() -> None:
+    """Stop transformers drawing a tqdm bar while loading weights.
+
+    Not cosmetic. tqdm builds a `multiprocessing.RLock` for its write lock,
+    and inside a Textual worker thread that reaches the multiprocessing
+    resource tracker and fails -- so the progress bar took the model load down
+    with it, and every `k` sample logged "CLAP audio embedding failed" while
+    the same call worked perfectly from a shell.
+
+    A TUI has nowhere to draw a progress bar anyway.
+    """
+    import os
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    try:
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.disable_progress_bar()
+    except Exception:
+        log.debug("could not disable transformers progress bars", exc_info=True)
+
+
 def _load():
     """Load and cache the model. Slow once, then instant."""
     global _model, _processor
     if _model is not None:
         return _model, _processor
+    _silence_progress_bars()
     from transformers import ClapModel, ClapProcessor
 
     _processor = ClapProcessor.from_pretrained(MODEL_NAME)

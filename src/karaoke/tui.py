@@ -1493,7 +1493,24 @@ class KaraokeTui(App):
 
         key = result.key.name if result.key else "unknown"
         bpm = f"{result.bpm:.0f}" if result.bpm else "?"
-        self.call_from_thread(self.notify, f"{artist} - {title}: {key}, {bpm} BPM")
+        # The genre is read back rather than returned, because labelling is
+        # best-effort inside analyse_sample and a failure there must not fail
+        # the sample. Saying so here is how a silent failure becomes visible:
+        # every `k` was failing to label for an evening and the only sign was
+        # a DEBUG line.
+        label = ""
+        try:
+            with localcache.connect() as conn:
+                track_id = localcache.find_track_id(artist, title, conn)
+                if track_id is not None:
+                    label = classification_line(
+                        localcache.genre_for(track_id, conn),
+                        localcache.tone_for(track_id, conn))
+        except Exception:
+            log.debug("could not read back the sampled label", exc_info=True)
+        summary = f"{artist} - {title}: {key}, {bpm} BPM"
+        self.call_from_thread(self.notify,
+                              f"{summary} · {label}" if label else summary)
         # The analysis panel reads from the DB, so refresh it now the row exists.
         self.call_from_thread(self._refresh_track_info, None)
 
