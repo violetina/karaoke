@@ -3,6 +3,9 @@ SHELL := /bin/bash
 VENV ?= .venv
 PYTHON := PYTHONPATH=src $(VENV)/bin/python
 MKDOCS := $(VENV)/bin/mkdocs
+# mkdocs defaults to :8000, which karaoke-api already listens on (systemd --user),
+# so serving the docs there fails to bind. Override with DOCS_ADDR if 8001 clashes too.
+DOCS_ADDR ?= 127.0.0.1:8001
 AUDIO_VENV ?= .venv-audio
 AUDIO_PY := $(AUDIO_VENV)/bin/python
 
@@ -75,8 +78,8 @@ deps-make2graph: ## Fetch and build makefile2graph locally
 docs: ## Build MkDocs site
 	$(MKDOCS) build
 
-docs-live: ## Serve MkDocs locally
-	$(MKDOCS) serve
+docs-live: ## Serve MkDocs locally on http://$(DOCS_ADDR)
+	$(MKDOCS) serve --dev-addr $(DOCS_ADDR)
 
 docs-write: deps-make2graph ## Regenerate generated docs
 	@mkdir -p docs/generated docs/assets || true

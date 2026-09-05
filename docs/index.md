@@ -17,6 +17,10 @@ It combines local music metadata, LRCLIB synced lyrics, optional Whisper transcr
 ## Documentation map
 
 - [Architecture](architecture.md): components, runtime modes and data flows.
+- [Flows](flows.md): schemas for the detection, sample and record/decompile flows.
+- [The TUI](tui.md): the player-aware Textual shell.
+- [TUI visuals](tui-visuals.md): mood imagery, sentiment arc, rhythm bar and cartwheel.
+- [Modes](modes/index.md): a page per mode — scan, spotify, browse, radio, record, sample.
 - [Cache schema](cache-schema.md): the optional OpenSearch vector index and cache/id conventions.
 - [Local cache and stats](local-cache-and-stats.md): SQLite source-of-truth schema, offline lyrics cache and `karaoke-stats`.
 - [Vector search and training plan](vector-search-plan.md): rebuild OpenSearch from SQLite for semantic search, sentiment and timing experiments.
