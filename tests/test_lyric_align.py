@@ -344,3 +344,54 @@ def test_the_opening_anchor_is_never_moved_later():
     lines = ["dont fake me"]
     out = la._correct_opening_anchor([5.0], lines, ["dont"], [30.0], 120.0)
     assert out[0] == pytest.approx(5.0)
+
+
+# --- confidence, corroborated by the real lyrics ---------------------------
+#
+# faster-whisper reports a probability per word and this wrapper discarded it.
+# But a plain floor is actively harmful: measured on a track whose vocal onset
+# is known, the hallucination "neighal" scored 0.001 while "no,", "don't" and
+# "ya" -- all genuinely sung -- scored 0.000, 0.229 and 0.048. Sung words are
+# indistinct. What separates them is whether the lyrics contain the word.
+
+_LYRIC_TOKENS = {"no", "dont", "fake", "me", "ya", "know"}
+
+
+def test_a_confident_word_is_always_trusted():
+    assert la.trust_word("anything", 0.9, _LYRIC_TOKENS)
+    assert la.trust_word("anything", 0.9, None)
+
+
+def test_a_hallucination_is_rejected_when_the_lyrics_disagree():
+    """"neighal" at p=0.001 appears nowhere in the song."""
+    assert not la.trust_word("neighal", 0.001, _LYRIC_TOKENS)
+
+
+def test_an_indistinct_real_word_is_kept():
+    """"no" scored 0.000 and is the first word of the song. A floor alone
+    would have cost the whole opening line."""
+    assert la.trust_word("no", 0.000, _LYRIC_TOKENS)
+    assert la.trust_word("ya", 0.048, _LYRIC_TOKENS)
+
+
+def test_without_lyrics_only_near_zero_is_rejected():
+    """A track no source has words for: the transcription is the only text
+    there is, so it is not second-guessed."""
+    assert la.trust_word("but", 0.013, None)
+    assert not la.trust_word("neighal", 0.001, None)
+
+
+def test_a_word_with_no_probability_is_trusted():
+    """An older backend, or a whole-segment fallback, reports none."""
+    assert la.trust_word("whatever", None, _LYRIC_TOKENS)
+
+
+def test_untrusted_words_are_dropped_from_the_stream():
+    class W:
+        def __init__(self, text, start, end, p):
+            self.text, self.start, self.end, self.probability = text, start, end, p
+
+    words = [W("neighal", 4.0, 4.4, 0.001), W("no", 13.0, 13.3, 0.000)]
+    toks, starts, _ = la._whisper_tokens(words, lyric_tokens=_LYRIC_TOKENS)
+    assert toks == ["no"]
+    assert starts == [13.0]

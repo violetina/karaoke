@@ -159,3 +159,114 @@ def test_cut_of_zero_length_fails(tmp_path):
 def test_recording_analyses_are_marked_as_such():
     """A recording-derived key must never read as one from a real master."""
     assert rw.METHOD_SUFFIX == "+recording"
+
+
+# --- retention -------------------------------------------------------------
+#
+# Audio used to be deleted the moment analysis finished, which made analysis
+# and lyric alignment mutually exclusive: alignment runs later, when a track
+# has words but no timings, and for a Spotify-only track the recording is the
+# only audio there is. It is kept now, so something has to bound it.
+
+import time as _time
+
+from karaoke import localcache
+
+
+def _recording(conn, rid, *, age_days=0.0, keep=0, size=0, tmp_path=None):
+    directory = tmp_path / f"rec{rid}"
+    directory.mkdir(parents=True, exist_ok=True)
+    if size:
+        (directory / "seg-20260905-120000.flac").write_bytes(b"x" * size)
+    conn.execute(
+        "INSERT INTO recordings (recording_id, started_at, ended_at, source,"
+        " dir, status, keep_audio) VALUES (?, ?, ?, 'x', ?, 'analysed', ?)",
+        (rid, _time.time() - age_days * 86400.0, _time.time(),
+         str(directory), keep))
+    conn.commit()
+    return directory
+
+
+@pytest.fixture()
+def store(tmp_path, monkeypatch):
+    path = tmp_path / "t.db"
+    real = localcache.connect
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: real(path))
+    return real(path)
+
+
+def test_audio_older_than_the_window_is_pruned(store, tmp_path):
+    from karaoke import recording_worker as rw
+
+    old = _recording(store, 1, age_days=30.0, size=2048, tmp_path=tmp_path)
+    notes = rw.prune_recordings(conn=store)
+    assert notes and "older than" in notes[0]
+    assert not list(old.glob("seg-*.flac"))
+
+
+def test_recent_audio_is_kept(store, tmp_path):
+    from karaoke import recording_worker as rw
+
+    fresh = _recording(store, 1, age_days=1.0, size=2048, tmp_path=tmp_path)
+    assert rw.prune_recordings(conn=store) == []
+    assert list(fresh.glob("seg-*.flac"))
+
+
+def test_markers_survive_pruning(store, tmp_path):
+    """They are what the track list is derived from, and they are tiny."""
+    from karaoke import recording_worker as rw
+
+    _recording(store, 1, age_days=30.0, size=2048, tmp_path=tmp_path)
+    store.execute("INSERT INTO recording_marks (recording_id, at_wall, artist,"
+                  " title, ok) VALUES (1, 100.0, 'A', 'B', 1)")
+    store.commit()
+    rw.prune_recordings(conn=store)
+    left = store.execute("SELECT count(*) FROM recording_marks").fetchone()[0]
+    assert left == 1
+
+
+def test_the_size_cap_drops_the_oldest_first(store, tmp_path):
+    """The newest session is the one most likely still wanted for the lyrics
+    of something just heard."""
+    from karaoke import recording_worker as rw
+
+    oldest = _recording(store, 1, age_days=2.0, size=4096, tmp_path=tmp_path)
+    newest = _recording(store, 2, age_days=1.0, size=4096, tmp_path=tmp_path)
+    rw.prune_recordings(max_bytes=5000, conn=store)
+    assert not list(oldest.glob("seg-*.flac"))
+    assert list(newest.glob("seg-*.flac"))
+
+
+def test_keep_audio_pins_against_age(store, tmp_path):
+    from karaoke import recording_worker as rw
+
+    pinned = _recording(store, 1, age_days=30.0, keep=1, size=2048,
+                        tmp_path=tmp_path)
+    rw.prune_recordings(conn=store)
+    assert list(pinned.glob("seg-*.flac"))
+
+
+def test_keep_audio_does_not_pin_against_the_size_cap(store, tmp_path):
+    """A pinned session cannot be allowed to fill the disk."""
+    from karaoke import recording_worker as rw
+
+    pinned = _recording(store, 1, age_days=1.0, keep=1, size=8192,
+                        tmp_path=tmp_path)
+    rw.prune_recordings(max_bytes=1000, conn=store)
+    assert not list(pinned.glob("seg-*.flac"))
+
+
+def test_a_running_recording_is_never_pruned(store, tmp_path):
+    from karaoke import recording_worker as rw
+
+    directory = _recording(store, 1, age_days=30.0, size=2048, tmp_path=tmp_path)
+    store.execute("UPDATE recordings SET status='recording' WHERE recording_id=1")
+    store.commit()
+    assert rw.prune_recordings(conn=store) == []
+    assert list(directory.glob("seg-*.flac"))
+
+
+def test_pruning_an_empty_store_is_quiet(store):
+    from karaoke import recording_worker as rw
+
+    assert rw.prune_recordings(conn=store) == []

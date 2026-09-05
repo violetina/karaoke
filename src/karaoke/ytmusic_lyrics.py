@@ -54,6 +54,24 @@ _LYRICS_JS = r"""(() => {
 # message, or the tab still loading.
 MIN_LINES = 4
 
+# The same description shelf renders the *artist biography* when a track has no
+# lyrics, and it was being stored as one: a Wikipedia paragraph about the band,
+# complete with a view count, saved against four tracks. Prose is easy to tell
+# from lyrics by line length -- a sung line is short, a paragraph is not.
+MAX_MEAN_LINE_CHARS = 90
+
+# Prose shorter than this is a caption or an error message, not a biography.
+# One sentence about a band is not worth an index entry; a paragraph is.
+MIN_NOTE_CHARS = 120
+
+# Real lyrics carry a provider ("Bron: LyricFind"). The biography carries none,
+# which is the cheapest and most reliable signal that this is not a lyric tab.
+# Prose gives itself away too.
+_PROSE_MARKER = re.compile(
+    r"weergaven|\bviews\b|van wikipedia|from wikipedia|creative commons|"
+    r"https?://|\bCC-BY\b",
+    re.IGNORECASE)
+
 # The attribution sits inside the same element as the words, so it arrives as a
 # final "line" and would otherwise be sung, timed and stored as lyrics.
 _ATTRIBUTION_LINE = re.compile(r"^\s*(?:bron|source|quelle|fuente)\s*[:\-]",
@@ -129,9 +147,62 @@ def read_panel() -> Optional[PanelLyrics]:
                        url=data.get("url", ""))
 
 
+def looks_like_prose(lines: list[str]) -> bool:
+    """Whether these lines are a paragraph rather than a lyric.
+
+    The artist biography renders in the same shelf as the lyrics, so "the tab
+    exists and has text" is not enough. Sung lines are short; a Wikipedia
+    paragraph averages hundreds of characters and mentions its own source.
+    """
+    if not lines:
+        return False
+    mean = sum(len(ln) for ln in lines) / len(lines)
+    if mean > MAX_MEAN_LINE_CHARS:
+        return True
+    return any(_PROSE_MARKER.search(ln) for ln in lines)
+
+
+def classify(panel: Optional[PanelLyrics]) -> Optional[str]:
+    """What the description shelf is actually showing: lyrics, or a biography.
+
+    The shelf is one element used for two purposes, so a reader that answers
+    only "lyrics / not lyrics" discards a band history it has already fetched.
+    For Wizards of Ooze — a Belgian group obscure enough that this library may
+    hold the only copy — that history was thrown away four times before the
+    question was asked this way round.
+
+    Returns ``"lyrics"``, ``"biography"``, or None when it is neither: a
+    placeholder, an error, or the tab still rendering.
+    """
+    if not panel:
+        return None
+    prose = looks_like_prose(panel.lines)
+    if panel.source_name and not prose:
+        return "lyrics" if len(panel.lines) >= MIN_LINES else None
+    # No provider and reads as prose: the biography. Both signals are required.
+    # Prose alone could be a spoken-word track with a real attribution, and a
+    # missing attribution alone is more likely a panel read too early than a
+    # biography -- so anything that satisfies only one is left unclassified.
+    if prose and not panel.source_name:
+        # Counted in characters, not lines: MIN_LINES is a lyric test, and a
+        # two-paragraph band history fails it while being exactly the text
+        # worth keeping. The observed biography was 1406 characters over six
+        # lines, so a paragraph is the right unit here.
+        body = "\n".join(panel.lines)
+        return "biography" if len(body) >= MIN_NOTE_CHARS else None
+    log.debug("lyrics panel is neither lyrics nor biography "
+              "(provider=%r prose=%s)", panel.source_name, prose)
+    return None
+
+
 def usable(panel: Optional[PanelLyrics]) -> bool:
-    """Whether a panel holds enough to be worth storing."""
-    return bool(panel and len(panel.lines) >= MIN_LINES)
+    """Whether a panel holds lyrics worth storing as lyrics.
+
+    An attribution is required. Real lyrics always name their provider, and
+    its absence is what distinguished the biography that was stored against
+    four tracks from the lyrics that were not there.
+    """
+    return classify(panel) == "lyrics"
 
 
 def lyrics_source(panel: PanelLyrics) -> str:
@@ -145,25 +216,34 @@ def lyrics_source(panel: PanelLyrics) -> str:
     return f"ytmusic_panel_{provider}"
 
 
-def for_playing(artist: str, title: str) -> Optional[PanelLyrics]:
-    """Panel lyrics, but only if the player really is on this track.
+def capture_for_playing(
+        artist: str, title: str) -> tuple[Optional[str], Optional[PanelLyrics]]:
+    """What the panel is showing for this track, and which kind it is.
 
     The panel lags a track change by a moment. Attributing one song's words to
     another is invisible once stored, so the player is asked what it is playing
-    and the two must agree.
+    and the two must agree — and that check applies to a biography just as much
+    as to lyrics, since filing one band's history under another is no better.
     """
     from . import detect, playerctl
 
     panel = read_panel()
-    if not usable(panel):
-        return None
+    kind = classify(panel)
+    if kind is None:
+        return None, None
     meta = playerctl.current_metadata()
     if meta is None:
-        return None
+        return None, None
     ref = playerctl.normalize_player_track(meta.artist, meta.title,
                                            meta.album, meta.url)
     if not detect.same_track(ref.artist, ref.title, artist, title):
         log.debug("lyrics panel shows %r - %r, not %r - %r",
                   ref.artist, ref.title, artist, title)
-        return None
-    return panel
+        return None, None
+    return kind, panel
+
+
+def for_playing(artist: str, title: str) -> Optional[PanelLyrics]:
+    """Panel lyrics for this track, or None if the panel holds something else."""
+    kind, panel = capture_for_playing(artist, title)
+    return panel if kind == "lyrics" else None
