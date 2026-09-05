@@ -40,11 +40,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
+from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
+                             Select, Static)
 
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
 from .browse import open_song_url
+from .player_open import browser_playback, track_finished
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
 from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
@@ -453,6 +455,10 @@ class KaraokeTui(App):
         height: 8; content-align: center middle; text-style: bold;
         border: heavy white; margin-bottom: 1;
     }
+    #search-input { height: 3; margin-bottom: 1; border: round $accent; }
+    /* Hidden until there is a list, so the lyrics keep the full pane. */
+    #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
+    #queue.-on { display: block; }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
     /* Recording indicator. Hidden entirely when idle rather than shown empty,
@@ -507,6 +513,9 @@ class KaraokeTui(App):
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
+        ("slash", "focus_search", "Search"),
+        ("greater_than_sign", "queue_next", "Queue next"),
+        ("o", "toggle_play_once", "Play-once"),
         ("O", "toggle_record", "Record"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
@@ -564,6 +573,10 @@ class KaraokeTui(App):
         self._mood_art = None      # rendered picture for the current mood
         self._mood_source = ""     # 'cover' or 'generated'
         self._mood_shown = ""      # mood the picture was rendered for
+        self._queue: list = []     # search results, in play order
+        self._queue_at = -1        # index currently playing
+        self._play_once = True     # queue decides the next track
+        self._last_finished_url = ""
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -575,6 +588,9 @@ class KaraokeTui(App):
                 # Art first (it takes the slack), then per-track facts, then
                 # the global worker read-out pinned at the bottom.
                 yield Static("", id="beat-art")
+                # Search sits under the art, where the eye already is when
+                # looking for "what else is like this".
+                yield Input(placeholder="search  (/)", id="search-input")
                 yield Static("", id="track-info")
                 yield Static("workers  —", id="worker-panel")
                 # Empty and hidden until recording, so it costs no space.
@@ -582,6 +598,10 @@ class KaraokeTui(App):
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
+                # The result list lives under the lyrics rather than in the
+                # overlay: it is what plays next, so it belongs where the
+                # playing track is, not behind a panel you have to open.
+                yield DataTable(id="queue", cursor_type="row")
                 with Horizontal(id="statusbar"):
                     yield Static("Mode: auto", id="mode-label")
                     yield Static("worker-load: —", id="worker-load")
@@ -612,6 +632,9 @@ class KaraokeTui(App):
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
         self.set_interval(1.0, self._refresh_record_status)
+        # 2s: fast enough to catch the end before the site starts
+        # its own next track, slow enough not to spam CDP.
+        self.set_interval(2.0, self._watch_queue)
         self.apply_size_classes(self.size.width, self.size.height)
         # A row still marked 'recording' with nothing running is a crash, not a
         # live capture. Close it out so the listing does not lie and its audio
@@ -947,6 +970,151 @@ class KaraokeTui(App):
         if not publish_postprocess_task(artist, title, url):
             return False, "Broker unreachable — nothing queued"
         return True, f"Queued {title}: {', '.join(pending)}"
+
+    # -- search and the play queue ----------------------------------------
+
+    def action_focus_search(self) -> None:
+        """`/`: jump to the search box."""
+        self.query_one("#search-input", Input).focus()
+
+    def on_input_submitted(self, event) -> None:
+        """Enter in the search box: build a list and start playing it."""
+        if event.input.id != "search-input":
+            return
+        query = (event.value or "").strip()
+        if not query:
+            self._set_queue([])
+            return
+        # Focus has to leave the box, or every subsequent keypress is typed
+        # into it instead of reaching the bindings.
+        self.set_focus(None)
+        self.run_worker(lambda q=query: self._background_search(q),
+                        exclusive=False, thread=True)
+
+    def _background_search(self, query: str) -> None:
+        """Search off the UI thread; scoring reads every track's lyrics."""
+        from . import librarysearch
+
+        try:
+            with localcache.connect() as conn:
+                hits = librarysearch.search(query, conn)
+                rows = [{"track_id": h.track_id, "artist": h.artist,
+                         "title": h.title, "score": h.score,
+                         "fields": h.fields,
+                         "url": librarysearch.playable_url(h.track_id, conn) or ""}
+                        for h in hits]
+        except Exception as exc:
+            log.debug("search failed", exc_info=True)
+            self.call_from_thread(self.notify, f"Search failed: {exc}",
+                                  severity="error")
+            return
+        self.call_from_thread(self._set_queue, rows, query)
+
+    def _set_queue(self, rows: list, query: str = "") -> None:
+        """Show the result list and start it playing."""
+        self._queue = rows
+        self._queue_at = -1
+        table = self.query_one("#queue", DataTable)
+        if not rows:
+            table.set_class(False, "-on")
+            table.clear()
+            if query:
+                self.notify(f"No matches for {query!r}", severity="warning")
+            return
+        table.set_class(True, "-on")
+        self._render_queue()
+        self.notify(f"{len(rows)} match(es) for {query!r}" if query
+                    else f"{len(rows)} queued")
+        self.play_queue_index(0)
+
+    def _render_queue(self) -> None:
+        """Draw the list, marking what is playing."""
+        table = self.query_one("#queue", DataTable)
+        table.clear()
+        if not table.columns:
+            table.add_columns(" ", "Artist", "Title", "")
+        for i, row in enumerate(self._queue):
+            playing = i == self._queue_at
+            # A row with no source cannot be played; say so rather than
+            # skipping silently when it is reached.
+            note = "" if row.get("url") else "no source"
+            table.add_row(">" if playing else str(i + 1),
+                          row["artist"][:18], row["title"][:28], note)
+        table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
+                              f"{'  (play-once)' if self._play_once else ''}")
+
+    def on_data_table_row_selected(self, event) -> None:
+        """Click or Enter on a queue row plays it."""
+        if event.data_table.id != "queue":
+            return
+        self.play_queue_index(event.cursor_row)
+
+    def action_toggle_play_once(self) -> None:
+        """`o`: play the queue through once, or let the player carry on.
+
+        With it on, the TUI takes playback back at the end of every track and
+        moves to the next entry. That is what stops YouTube Music's own radio
+        from taking over -- opening a watch URL makes it attach an RD… station,
+        so the "next" song is its suggestion rather than the list you built.
+        """
+        self._play_once = not self._play_once
+        self._render_queue()
+        self.notify("Play-once: queue decides what plays next" if self._play_once
+                    else "Play-once off: the player picks its own next track")
+
+    def _watch_queue(self) -> None:
+        """Advance the queue when the browser finishes a track.
+
+        MPRIS cannot answer this: when the site moves to its own suggestion the
+        metadata simply changes, which looks the same as the user picking
+        something. The page's video element reports that it ended.
+        """
+        if not (self._play_once and self._queue and self._queue_at >= 0):
+            return
+        state = browser_playback()
+        if not track_finished(state):
+            return
+        # Only act once per track: after advancing, the new track is short of
+        # its end again, but a stalled read could otherwise fire repeatedly.
+        url = (state or {}).get("url", "")
+        if url and url == self._last_finished_url:
+            return
+        self._last_finished_url = url
+        self.action_queue_next()
+
+    def play_queue_index(self, index: int) -> bool:
+        """Open the queue entry at ``index``. Returns whether it played."""
+        if not (0 <= index < len(self._queue)):
+            return False
+        row = self._queue[index]
+        url = row.get("url") or ""
+        if not url:
+            self.notify(f"No source for {row['artist']} - {row['title']}",
+                        severity="warning")
+            self._queue_at = index
+            self._render_queue()
+            return False
+        try:
+            open_song_url(url, "youtube" if "youtu" in url else "")
+        except Exception as exc:
+            log.exception("queue play failed")
+            self.notify(f"Play failed: {exc}", severity="error")
+            return False
+        self._queue_at = index
+        self._render_queue()
+        self.notify(f"Playing {row['artist']} - {row['title']}")
+        return True
+
+    def action_queue_next(self) -> None:
+        """Advance to the next playable entry in the queue."""
+        if not self._queue:
+            return
+        index = self._queue_at + 1
+        while index < len(self._queue):
+            if self.play_queue_index(index):
+                return
+            index += 1
+        self.notify("End of queue")
 
     def action_sample_key(self) -> None:
         """`k`: detect key/BPM by recording what is playing.

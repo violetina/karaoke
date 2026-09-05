@@ -2,6 +2,8 @@
 import subprocess
 from unittest.mock import MagicMock
 
+import pytest
+
 from karaoke import playerctl
 
 
@@ -31,7 +33,7 @@ def test_current_songref_resolves_metadata(monkeypatch):
     assert ref.title == "A Forest"
     assert ref.album == "Seventeen Seconds"
     mock_run.assert_called_once_with(
-        ["playerctl", "metadata", "--format", "{{artist}}\x1f{{title}}\x1f{{album}}\x1f{{xesam:url}}\x1f{{playerName}}"],
+        ["playerctl", "metadata", "--format", playerctl._metadata_format()],
         capture_output=True, text=True, timeout=5, check=True,
     )
 
@@ -118,3 +120,53 @@ def test_missing_playerctl_is_not_an_error(monkeypatch):
     monkeypatch.setattr(playerctl, "_run", lambda cmd, **kw: None)
     assert playerctl.list_players() == []
     assert playerctl.playing_player() == ""
+
+
+# --- mpris:length -----------------------------------------------------------
+#
+# Duration was never requested from MPRIS at all, so the deduplicator's
+# duration guard -- the thing meant to keep a demo out of the studio cut -- had
+# nothing to work with and abstained on every pair.
+
+def test_length_is_converted_from_microseconds():
+    """The MPRIS spec reports it in microseconds."""
+    assert playerctl._length_seconds("205533333") == pytest.approx(205.533333)
+
+
+def test_a_missing_length_is_unknown():
+    assert playerctl._length_seconds("") is None
+    assert playerctl._length_seconds("n/a") is None
+
+
+def test_a_zero_length_is_unknown_not_zero():
+    """Zero means the player does not know; treating it as a real duration
+    would make every such track look absurdly short."""
+    assert playerctl._length_seconds("0") is None
+
+
+def test_metadata_requests_the_length():
+    assert "mpris:length" in playerctl._metadata_format()
+
+
+def test_metadata_parses_the_length(monkeypatch):
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.stdout = ("The Cure\x1fA Forest\x1fSeventeen Seconds\x1f\x1fvlc"
+                     "\x1f205533333\n")
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=result))
+    meta = playerctl.current_metadata()
+    assert meta is not None
+    assert meta.duration == pytest.approx(205.533333)
+    assert meta.album == "Seventeen Seconds"
+
+
+def test_metadata_survives_a_player_that_omits_the_length(monkeypatch):
+    """Older players send fewer fields; the parse must not fall over."""
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.stdout = "The Cure\x1fA Forest\x1fSeventeen Seconds\x1f\x1fvlc\n"
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=result))
+    meta = playerctl.current_metadata()
+    assert meta is not None and meta.duration is None
