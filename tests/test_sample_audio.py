@@ -367,3 +367,28 @@ def test_ffmpeg_is_never_left_running(monkeypatch, tmp_path):
     with pytest.raises(sample_audio.CaptureError, match="timed out"):
         sample_audio.capture(30.0, dest=tmp_path / "s.wav")
     assert proc["p"].killed
+
+
+def test_a_cancelled_capture_leaves_no_file(monkeypatch, tmp_path):
+    """ctrl+c should discard, not keep a truncated recording that nothing will
+    read but retention will still count."""
+    monkeypatch.setattr(sample_audio.shutil, "which", lambda n: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(sample_audio, "monitor_source", lambda sink="": "x.monitor")
+    monkeypatch.setattr(sample_audio, "POLL_SECONDS", 0.0)
+    dest = tmp_path / "s.wav"
+    monkeypatch.setattr(sample_audio.subprocess, "Popen",
+                        lambda cmd, **kw: _FakePopen(
+                            cmd, alive_polls=99,
+                            on_start=lambda: dest.write_bytes(b"RIFFpartial")))
+
+    cancelled = {"yes": False}
+
+    def _keep_going():
+        cancelled["yes"] = True          # first poll cancels, as ctrl+c would
+        return False
+
+    with pytest.raises(sample_audio.CaptureAborted):
+        sample_audio.capture(45.0, dest=dest, should_continue=_keep_going)
+
+    assert cancelled["yes"]
+    assert not dest.exists(), "the partial capture must be discarded"

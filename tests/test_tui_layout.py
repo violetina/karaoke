@@ -428,3 +428,43 @@ def test_the_frame_hugs_its_contents(app):
             sidebar = app.query_one("#sidebar").region
             assert box.height < sidebar.height
     _run(go())
+
+
+def test_ctrl_c_stops_a_running_sample_instead_of_quitting(app):
+    """A 45-second capture is the one thing here long enough to reach for
+    ctrl+c, and before this it did nothing to it."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = True
+            app._cancel_sample = False
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._cancel_sample is True
+            assert app.is_running, "the app must not quit mid-sample"
+    _run(go())
+
+
+def test_a_second_ctrl_c_quits_even_while_sampling(app):
+    """The binding is priority, so a single-purpose handler would leave no way
+    out at all if the flag ever stuck. An unquittable TUI is the worse bug."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = True
+            app._cancel_sample = True          # already cancelling
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+    _run(go())
+
+
+def test_ctrl_c_quits_when_nothing_is_sampling(app):
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            app._sampling = False
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not app.is_running
+    _run(go())

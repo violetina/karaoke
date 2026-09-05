@@ -803,6 +803,11 @@ class KaraokeTui(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        # ctrl+c stops a running sample rather than quitting, so the reflex
+        # that interrupts a long-running thing does what it looks like it
+        # does. With nothing sampling it quits, as it always did.
+        Binding("ctrl+c", "cancel_sample", "Stop sampling", show=False,
+                priority=True),
         ("H", "toggle_browse", "Browse"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
@@ -864,6 +869,9 @@ class KaraokeTui(App):
         # single failure cannot become a lookup storm across a listening session.
         self._spotify_off = False
         self._sampling = False     # a capture is running (real time)
+        # Set to stop that capture early: ctrl+c, or the app exiting. The
+        # worker polls it, terminates ffmpeg and deletes the partial file.
+        self._cancel_sample = False
         self._recording_id: int | None = None
         self._record_tick = 0
         self._record_marks: tuple[int, int] | None = None
@@ -1493,6 +1501,7 @@ class KaraokeTui(App):
             self.notify("Already sampling", severity="warning")
             return
         self._sampling = True
+        self._cancel_sample = False
         seconds = sample_audio.DEFAULT_SECONDS
         self.notify(f"Sampling {seconds:.0f}s of {det.title}…")
         self.run_worker(
@@ -1500,15 +1509,34 @@ class KaraokeTui(App):
             exclusive=False, thread=True,
         )
 
+    def action_cancel_sample(self) -> None:
+        """ctrl+c: stop a capture and throw it away; otherwise quit.
+
+        A 45-second capture is the one thing here long enough that a user
+        reaches for ctrl+c, and before this it did nothing to it -- the app
+        quit while ffmpeg carried on writing to a file nobody would read.
+        """
+        # A second press quits regardless. This binding is priority, so if
+        # _sampling ever stuck true a single-purpose handler would leave no way
+        # out of the app at all -- and an unquittable TUI is a worse bug than
+        # the one being fixed.
+        if not self._sampling or self._cancel_sample:
+            self.exit()
+            return
+        self._cancel_sample = True
+        self.notify("Stopping the sample — ctrl+c again to quit")
+
     def _background_sample(self, artist: str, title: str) -> None:
         """Record and analyse the playing audio, in a worker thread."""
-        def _same_track() -> bool:
+        def _keep_going() -> bool:
+            if self._cancel_sample:
+                return False
             det = self._det
             return bool(det.artist == artist and det.title == title)
 
         try:
             result = sample_audio.sample_and_analyse(
-                artist, title, should_continue=_same_track)
+                artist, title, should_continue=_keep_going)
         except sample_audio.CaptureAborted:
             # Not a failure: the track changed under it. Sampling on would have
             # stored this song's key, tempo and genre against the previous one.
@@ -1568,6 +1596,10 @@ class KaraokeTui(App):
         second recorder on the same source. Observed in the wild: a capture
         orphaned for 1h51m alongside a live one.
         """
+        # A sample is the other capture that can outlive the app. It holds an
+        # ffmpeg on the monitor sink for the better part of a minute, so
+        # leaving it running on exit repeats the orphan above in miniature.
+        self._cancel_sample = True
         try:
             recorder.stop_all()
         except Exception:
