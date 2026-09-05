@@ -146,5 +146,74 @@ class _FakeApp:
     def __init__(self) -> None:
         self.notices: list[tuple[str, str]] = []
 
-    def notify(self, message, severity="information") -> None:
+    def notify(self, message, severity="information", **kwargs) -> None:
+        # **kwargs so a real Textual notify signature (timeout=, title=)
+        # does not make the double diverge from the thing it stands in for.
         self.notices.append((message, severity))
+
+
+# --- refusing to navigate to an error page --------------------------------
+
+def test_a_missing_route_is_named_as_stale_code(monkeypatch):
+    """The failure that actually happened: ctrl_api predating the route.
+
+    It answered 404, the browser showed "Not Found", and that is
+    indistinguishable from the recording being gone.
+    """
+    import urllib.error
+
+    from karaoke import tui
+
+    def _404(url, timeout=0):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _404)
+    problem = tui._playback_endpoint_problem("http://localhost:8765/x")
+    assert problem and "older code" in problem
+    assert "ctrl_api" in problem
+
+
+def test_an_unreachable_api_says_so(monkeypatch):
+    import urllib.error
+
+    from karaoke import tui
+
+    def _down(url, timeout=0):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", _down)
+    problem = tui._playback_endpoint_problem("http://localhost:8765/x")
+    assert problem and "not reachable" in problem
+
+
+def test_a_working_endpoint_reports_no_problem(monkeypatch):
+    from karaoke import tui
+
+    class _OK:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _OK())
+    assert tui._playback_endpoint_problem("http://localhost:8765/x") is None
+
+
+def test_nothing_is_opened_when_the_endpoint_is_broken(monkeypatch):
+    """A blank error page replaces what is playing; refuse instead."""
+    import urllib.error
+
+    from karaoke import tui
+
+    opened = []
+    monkeypatch.setattr("karaoke.player_open.open_song_url",
+                        lambda url, kind: opened.append(url))
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda url, timeout=0: (_ for _ in ()).throw(
+                            urllib.error.HTTPError(url, 404, "nf", {}, None)))
+    app = _FakeApp()
+    screen = _screen(rows=[_row(index=0)])
+    monkeypatch.setattr(type(screen), "app", property(lambda self: app))
+
+    screen._play(0)
+    assert opened == []
+    assert app.notices and app.notices[0][1] == "error"
