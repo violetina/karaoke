@@ -154,3 +154,47 @@ def test_a_lyric_mentioning_a_source_survives():
     """Only a leading "Bron:"/"Source:" is an attribution."""
     panel = _panel("the source of all my trouble\nb\nc\nd")
     assert panel.lines[0] == "the source of all my trouble"
+
+
+# --- a doubled read --------------------------------------------------------
+#
+# The panel can be read mid-render and return the lyrics twice. The text looks
+# complete and the doubling is invisible in it, but only the first copy is ever
+# sung -- so the second is left unanchored and crammed into the closing
+# seconds. A 21-line song was stored as 42, with lines 21-41 inside one second.
+
+def test_a_doubled_panel_is_collapsed():
+    verse = ["one", "two", "three", "four"]
+    assert yl._undouble(verse * 2) == verse
+
+
+def test_a_tripled_panel_is_collapsed():
+    verse = ["one", "two", "three"]
+    assert yl._undouble(verse * 3) == verse
+
+
+def test_a_normal_lyric_is_untouched():
+    verse = ["one", "two", "three", "four"]
+    assert yl._undouble(verse) == verse
+
+
+def test_a_repeated_chorus_is_not_a_doubling():
+    """Songs repeat a chorus; only the *entire* lyric appearing twice counts."""
+    lines = ["verse one", "chorus", "verse two", "chorus"]
+    assert yl._undouble(lines) == lines
+
+
+def test_a_near_doubling_is_left_alone():
+    """Anything short of an exact whole-list repetition is real content."""
+    lines = ["a", "b", "c", "a", "b", "d"]
+    assert yl._undouble(lines) == lines
+
+
+def test_an_odd_line_count_cannot_be_doubled():
+    lines = ["a", "b", "c"]
+    assert yl._undouble(lines) == lines
+
+
+def test_the_panel_property_collapses_a_doubled_read():
+    text = "\n".join(["one", "two", "three", "four"] * 2 + ["Bron: LyricFind"])
+    assert _panel(text).lines == ["one", "two", "three", "four"]

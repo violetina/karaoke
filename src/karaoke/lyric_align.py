@@ -63,8 +63,10 @@ BEATS_PER_BAR = 4
 MAX_WORD_BARS = 2.0
 
 # A stretch this long with barely any words in it is an instrumental break, not
-# slow singing. "Three words in four bars" is the shape to look for.
-BREAK_BARS = 4.0
+# slow singing. Eight bars rather than four: four is a normal gap between
+# verses on a mid-tempo track, and treating it as a break pushed a whole chorus
+# minutes late.
+BREAK_BARS = 8.0
 BREAK_MAX_WORDS = 3
 
 
