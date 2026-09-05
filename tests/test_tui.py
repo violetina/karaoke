@@ -935,3 +935,59 @@ def test_the_mood_word_survives_alongside_the_picture(monkeypatch):
     rendered = str(updates[-1])
     assert "TENDER" in rendered
     assert "generated" in rendered      # provenance is stated, not implied
+
+
+# --- the classification read-out under the cover art ----------------------
+
+def _genre_row(genre="trip hop", score=0.62, runner_up="post-punk",
+               runner_up_score=0.45):
+    """A stand-in for a track_genre row."""
+    return {"genre": genre, "score": score, "runner_up": runner_up,
+            "runner_up_score": runner_up_score}
+
+
+def test_a_clear_specific_label_is_shown_plainly():
+    from karaoke.tui import genre_line
+
+    assert genre_line(_genre_row()) == "trip hop"
+
+
+def test_a_narrow_margin_shows_the_runner_up():
+    """"heavy metal, ~punk rock" describes sludge better than either alone."""
+    from karaoke.tui import genre_line
+
+    line = genre_line(_genre_row(genre="heavy metal", score=0.708,
+                                 runner_up="punk rock", runner_up_score=0.689))
+    assert line == "heavy metal ~punk rock"
+
+
+def test_a_broad_label_is_marked_as_weak():
+    """"pop" won 39 of 120 tracks; showing it bare would overstate it."""
+    from karaoke.tui import genre_line
+
+    assert genre_line(_genre_row(genre="pop", runner_up="folk",
+                                 runner_up_score=0.40)) == "pop?"
+
+
+def test_no_genre_shows_nothing():
+    from karaoke.tui import genre_line
+
+    assert genre_line(None) == ""
+
+
+def test_the_read_out_puts_genre_first():
+    """Directly under the cover art, above the lyric provenance."""
+    from karaoke.tui import track_info
+
+    text = track_info(genre="trip hop", source="lrclib", lyric_lines=42)
+    lines = text.splitlines()
+    assert lines[0].startswith("genre")
+    assert any(ln.startswith("source") for ln in lines)
+
+
+def test_a_track_without_a_genre_still_renders():
+    from karaoke.tui import track_info
+
+    text = track_info(source="lrclib", lyric_lines=42)
+    assert "genre" not in text
+    assert "lrclib" in text

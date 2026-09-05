@@ -152,9 +152,36 @@ def lyric_display_state(lyrics) -> str:
     return "none"
 
 
+def genre_line(row) -> str:
+    """The stored genre, with the honesty the label needs.
+
+    A bare label overstates it. "pop" won 39 of 120 tracks and "punk rock" 29,
+    far beyond what the library holds, because both sit close to a great deal
+    of music -- so a thin win on one of those is not the same claim as a clear
+    win on something specific. The runner-up is shown when the margin is
+    narrow, because it is often the better answer: "heavy metal, ~punk rock"
+    describes sludge better than either alone.
+    """
+    if row is None:
+        return ""
+    from .genre import BROAD_LABELS, MIN_MARGIN
+
+    label = row["genre"]
+    score = row["score"] or 0.0
+    runner = row["runner_up"] or ""
+    runner_score = row["runner_up_score"] or 0.0
+    close = runner and (score - runner_score) < MIN_MARGIN
+    if close:
+        return f"{label} ~{runner}"
+    if label in BROAD_LABELS:
+        # Marked rather than hidden: it is a real answer, just a weak one.
+        return f"{label}?"
+    return label
+
+
 def track_info(*, source: str = "", duration: float | None = None,
                offset: float = 0.0, pending: "list[str] | None" = None,
-               lyric_lines: int = 0, error: str = "") -> str:
+               lyric_lines: int = 0, error: str = "", genre: str = "") -> str:
     """Compact per-track read-out for under the cover art.
 
     A label column wide enough for the longest label, ASCII throughout, so the
@@ -168,6 +195,8 @@ def track_info(*, source: str = "", duration: float | None = None,
         return f"! {error}"
 
     rows: list[tuple[str, str]] = []
+    if genre:
+        rows.append(("genre", genre))
     if source:
         # Say plainly when the words are Whisper's guess rather than a real
         # lyric. Nothing else on screen distinguishes them, and the failure is
@@ -2307,11 +2336,14 @@ class KaraokeTui(App):
         try:
             pending = None
             duration = None
+            genre = ""
             if self._current_track_id is not None:
                 from .postprocess_queue import needs_postprocessing
                 with localcache.connect() as conn:
                     pending = needs_postprocessing(self._current_track_id, conn)
                     duration = self._load_duration(self._current_track_id, conn)
+                    genre = genre_line(
+                        localcache.genre_for(self._current_track_id, conn))
             text = track_info(
                 source=(lyrics.source if lyrics else ""),
                 duration=duration,
@@ -2319,6 +2351,7 @@ class KaraokeTui(App):
                 pending=pending,
                 lyric_lines=len(self._timeline.lines),
                 error=self._last_error,
+                genre=genre,
             )
         except Exception as exc:
             log.debug("track info refresh failed", exc_info=True)
