@@ -494,3 +494,17 @@ def test_a_genuinely_short_terminal_still_compacts(app):
             await pilot.pause()
             assert app.screen.has_class("-short")
     _run(go())
+
+
+def test_resizing_redraws_the_header(app):
+    """The banner is computed once per track and sized from the panel, so
+    widening the window mid-song left the title in the plain text it chose
+    when the panel was narrow -- indistinguishable from the figlet breaking."""
+    async def go():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._sync_key = ("swans", "a little god in my hands")
+            await pilot.resize_terminal(301, 54)
+            await pilot.pause()
+            assert app._sync_key is None, "resize must invalidate the header"
+    _run(go())

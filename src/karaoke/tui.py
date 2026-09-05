@@ -869,6 +869,10 @@ class KaraokeTui(App):
         self._log_level = log_level
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
+        # Tracks already offered to the auto-classifier this session. It only
+        # ever adds what is missing, so a second attempt on the same track is
+        # pure cost.
+        self._classified: set[int] = set()
         self._cpu_sample: tuple | None = None
         self._current_song: tuple[str, str, str] | None = None
         self._lyrics_fetched: set[tuple[str, str]] = set()
@@ -1241,6 +1245,12 @@ class KaraokeTui(App):
 
     def on_resize(self, event) -> None:
         self.apply_size_classes(event.size.width, event.size.height)
+        # Force the header to be drawn again. It is computed once per track --
+        # _poll_detection returns early while the sync key is unchanged -- and
+        # the banner is sized from the panel, so widening the window mid-song
+        # left the title in the plain text it had chosen when the panel was
+        # narrow. It looked exactly like the figlet being broken.
+        self._sync_key = None
 
     def action_toggle_focus(self) -> None:
         """`F`: lyrics only, hiding every other panel."""
@@ -1576,6 +1586,23 @@ class KaraokeTui(App):
             return
         self._cancel_sample = True
         self.notify("Stopping the sample — ctrl+c again to quit")
+
+    def _background_classify(self, track_id: int) -> None:
+        """Label a track that has no genre or tone, in a worker thread.
+
+        Runs behind whatever is playing, so it must not raise and must not be
+        worth noticing. The read-out refreshes only when something was added.
+        """
+        from . import autoclassify
+
+        try:
+            with localcache.connect() as conn:
+                added = autoclassify.run(track_id, conn)
+        except Exception:
+            log.debug("auto-classify failed for %s", track_id, exc_info=True)
+            return
+        if added and track_id == self._current_track_id:
+            self.call_from_thread(self._refresh_track_info, None)
 
     def _background_sample(self, artist: str, title: str) -> None:
         """Record and analyse the playing audio, in a worker thread."""
@@ -2236,6 +2263,17 @@ class KaraokeTui(App):
         # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
         # if this track is missing derived assets. Best-effort; no-op if the
         # RabbitMQ broker is unreachable.
+        # Fill in genre and tone for a track that has neither. Cheap work only:
+        # autoclassify will not start a recording, so a Spotify track with no
+        # downloadable audio still needs `k`.
+        if (self._current_track_id is not None
+                and self._current_track_id not in self._classified):
+            self._classified.add(self._current_track_id)
+            self.run_worker(
+                lambda tid=self._current_track_id: self._background_classify(tid),
+                exclusive=False, thread=True,
+            )
+
         pp_key = (display_artist.lower(), display_title.lower())
         if pp_key not in self._postprocess_enqueued:
             self._postprocess_enqueued.add(pp_key)
