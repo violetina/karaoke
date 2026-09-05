@@ -28,9 +28,9 @@ QUEUE_NAME = "karaoke-postprocess"
 def needs_postprocessing(track_id: int, conn: sqlite3.Connection) -> list[str]:
     """Return the list of pending post-processing tasks for a track.
 
-    Possible values: ``"analysis"`` (no key/BPM row) and ``"timings"``
-    (approved synced lyrics lack Enhanced LRC word tags). Empty list = nothing
-    to do.
+    Possible values: ``"analysis"`` (no key/BPM row), ``"timings"`` (approved
+    synced lyrics lack Enhanced LRC word tags) and ``"sync"`` (approved lyrics
+    are plain text with no timings at all). Empty list = nothing to do.
     """
     from . import track_analysis
     from .upgrade_timings import has_word_timings
@@ -49,12 +49,20 @@ def needs_postprocessing(track_id: int, conn: sqlite3.Connection) -> list[str]:
 
     # 2. Word-level timing. Missing if approved synced lyrics carry no word tags.
     cur.execute(
-        "SELECT synced_lyrics FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+        "SELECT synced_lyrics, plain_lyrics FROM lyrics"
+        " WHERE track_id = ? AND kind = 'approved'",
         (track_id,),
     )
     row = cur.fetchone()
     if row and row[0] and not has_word_timings(row[0]):
         pending.append("timings")
+
+    # 3. Any timing at all. Words with no timestamps cannot drive a karaoke
+    # session -- and they are now arriving routinely from the player's own
+    # lyrics panel, which supplies text and nothing else. Whisper can give
+    # them a rhythm without being trusted for the words themselves.
+    if row and not row[0] and row[1]:
+        pending.append("sync")
 
     return pending
 

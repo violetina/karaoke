@@ -7,6 +7,7 @@ side-effect-light so the arithmetic can be tested without audio.
 - [Detection flow](#detection-flow) — pick the active player and the karaoke mode.
 - [Sample flow](#sample-flow) — key/BPM for one track by recording what plays.
 - [Record flow](#record-flow) — unattended capture + marking, then offline decompile.
+- [Lyric rescue flow](#lyric-rescue-flow) — words from the player's own panel, timings from a transcription.
 
 Related: the [Architecture](architecture.md) page covers the lyric-lookup and
 ingest flows; the per-mode pages under [Modes](modes/index.md) describe how each
@@ -242,3 +243,91 @@ before the cut.
 
 The `+recording` method suffix marks the analysis as recording-derived, so it is
 never mistaken for one done on a downloaded master.
+
+## Lyric rescue flow
+
+For a track LRCLIB has never heard of. It can be playing with its full lyrics
+on screen — YouTube Music's SONGTEKST tab, attributed to LyricFind — while the
+TUI beside it reports "no lyrics" and queues the track for backfill. Captions
+are no help: those are a video's subtitle track, a different thing from the
+lyrics panel, and most uploads have none.
+
+The panel has words and no timings. Whisper has the reverse. Joining them is
+the whole flow.
+
+`_background_fetch_lyrics()` → `ytmusic_lyrics.for_playing()` →
+`add_track_and_lyrics()` → `_enqueue_sync()` → the worker's `_run_sync()` →
+`lyric_align.align_lyrics_to_lrc()`.
+
+```mermaid
+flowchart TD
+    A[track playing, no cached lyrics] --> B[fetch_lrclib]
+    B -- found --> Z[store: lrclib]
+    B -- nothing --> C[ytmusic_lyrics.read_panel<br/>over the existing CDP connection]
+    C --> C1{panel present<br/>and >= 4 lines?}
+    C1 -- no --> E1[give up: no words anywhere]
+    C1 -- yes --> D{does the player agree<br/>it is this track?}
+    D -- no --> E2[discard: the panel lags a track change]
+    D -- yes --> F[store as plain<br/>source = ytmusic_panel_lyricfind]
+    F --> G{has downloadable audio?}
+    G -- no --> E3[stop: nothing to align against]
+    G -- yes --> H[enqueue 'sync']
+    subgraph worker[post-processing worker]
+        H --> I[_ensure_download: the whole track]
+        I --> J[transcribe_to_words<br/>Whisper, timings only]
+        J --> K[align_lyrics_to_lrc<br/>real words + Whisper rhythm]
+        K --> L{any timestamps produced?}
+        L -- no --> E4[not stored: an empty LRC<br/>would mark it done]
+        L -- yes --> M[store: whisper_aligned]
+    end
+```
+
+### Why each guard is there
+
+**The panel is verified against the player.** It lags a track change by a
+moment, and attributing one song's words to another is invisible once written,
+so `for_playing()` asks MPRIS what is playing and the two must agree.
+
+**Whisper is used for timing only.** Its words on sung audio are unreliable —
+"up to do" becomes "up to doom", plus musical-note artifacts — so where a real
+source supplied the text, those words are kept and only the timestamps taken.
+The same rule `upgrade_timings` follows for captions.
+
+**Audio is required before queueing.** The panel answers for plenty of tracks
+whose audio cannot be fetched. Queueing those would fail on every retry, the
+way Spotify-only analysis did before `has_downloadable_source` gated it.
+
+**Alignment needs the whole track**, not an excerpt: it spreads every line
+across the full duration, so a 45s sample would compress them all into the
+opening. That is why this goes to the worker rather than being sampled live
+like [key/BPM](#sample-flow).
+
+**An empty alignment is discarded.** Storing a blank LRC would mark the track
+synced and stop anything ever trying again.
+
+### The three lyric task types
+
+`postprocess_queue.needs_postprocessing()` distinguishes them, and conflating
+any two would make a track look handled when it is not:
+
+| task | condition | what it does |
+|---|---|---|
+| `analysis` | no key/BPM row | detect key, tempo, energy |
+| `sync` | lyrics are plain, no timings at all | **add** timings by alignment |
+| `timings` | synced lyrics carry no word tags | **refine** to word level |
+
+### Verified
+
+End to end on *Dinosaur Jr. — "No One's Ready"*, which LRCLIB does not have:
+43 lines read from the panel, a source found on the artist's own channel (195s
+against the track's 194.5s), and alignment produced 1630 characters of LRC.
+
+```
+[00:12.60] no, don't fake me don't ya know no one's ready for your war
+[00:21.16] what's it for
+[00:25.88] born into a world of fire
+```
+
+Note that adding `sync` to the queue required **restarting the workers**: they
+are long-running, and until they were restarted they accepted the task, ran the
+`analysis` half they knew about, and silently skipped the rest.

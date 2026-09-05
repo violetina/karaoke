@@ -2108,9 +2108,19 @@ class KaraokeTui(App):
                     found = ly
                     break
             if found is None:
+                # LRCLIB does not have everything. The player may already be
+                # showing the words in its own lyrics tab -- that panel is the
+                # only source that knows about a track nobody has indexed.
+                found = self._panel_lyrics(artist, title)
+            if found is None:
                 return
             with localcache.connect() as conn:
                 localcache.add_track_and_lyrics(artist, title, found, conn=conn)
+                # Words without timings cannot drive a session. Whisper can
+                # supply the rhythm they lack -- but only from the whole track,
+                # so this goes to the worker rather than being done here.
+                if not found.synced_raw and found.plain:
+                    self._enqueue_sync(artist, title, conn)
             log.info("fetched lyrics for %s - %s (%s)", artist, title, found.source)
             # Force the next poll to re-resolve rather than short-circuit on an
             # unchanged key.
@@ -2118,6 +2128,50 @@ class KaraokeTui(App):
         except Exception as exc:
             log.debug("background lyric fetch failed", exc_info=True)
             self._last_error = f"lyric fetch: {exc}"[:60]
+
+    def _enqueue_sync(self, artist: str, title: str, conn) -> None:
+        """Ask the worker to give plain lyrics a rhythm.
+
+        Only when there is audio to align against: the lyrics panel answers for
+        plenty of tracks whose audio cannot be fetched, and queueing those would
+        fail on every retry the way Spotify-only analysis used to.
+        """
+        from .postprocess_queue import (enqueue_if_needed,
+                                        has_downloadable_source)
+
+        track_id = localcache.find_track_id(artist, title, conn)
+        if track_id is None or not has_downloadable_source(track_id, conn):
+            log.debug("no fetchable audio to sync %s - %s against", artist, title)
+            return
+        row = conn.execute(
+            "SELECT url FROM sources WHERE track_id = ? AND url LIKE '%youtu%'"
+            " LIMIT 1", (track_id,)).fetchone()
+        if enqueue_if_needed(artist, title, (row["url"] if row else "") or "", conn):
+            log.info("queued %s - %s for lyric alignment", artist, title)
+            self.call_from_thread(
+                self.notify, f"Queued {title} for lyric timing")
+
+    def _panel_lyrics(self, artist: str, title: str):
+        """Lyrics from the player's own lyrics tab, as a Lyrics object.
+
+        Unsynced by nature -- LyricFind supplies words, not timings -- so these
+        are stored as plain text and become a candidate for alignment against a
+        transcription, which is what turns them into something singable.
+        """
+        from . import ytmusic_lyrics
+        from .lyrics import Lyrics
+
+        try:
+            panel = ytmusic_lyrics.for_playing(artist, title)
+        except Exception:
+            log.debug("lyrics panel read failed", exc_info=True)
+            return None
+        if panel is None:
+            return None
+        log.info("lyrics panel supplied %d lines for %s - %s (%s)",
+                 len(panel.lines), artist, title, panel.attribution)
+        return Lyrics(plain="\n".join(panel.lines),
+                      source=ytmusic_lyrics.lyrics_source(panel))
 
     def _background_autoload_captions(self, url: str, vid: str) -> None:
         """Fetch, stage, and auto-approve YouTube captions in a worker thread.

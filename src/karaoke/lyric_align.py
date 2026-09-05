@@ -32,6 +32,71 @@ _ARTIFACT = re.compile(r"[\U0001F300-\U0001FAFF☀-➿]|//\s*music\s*//",
 
 _WORD = re.compile(r"[a-z0-9']+")
 
+# Plausible span for one sung word. Outside this range the timing is not a word
+# being sung: below the floor it is a decoding glitch, and above the ceiling
+# Whisper has stretched one token across an instrumental passage. Anchoring a
+# lyric line on either puts it seconds away from the singing.
+MIN_WORD_S = 0.04
+MAX_WORD_S = 4.0
+
+# Fastest credible singing, in seconds per unit of line_weight. Measured
+# against real anchors on a rock track: comfortable delivery runs 0.4-0.9, so
+# anything under this is not a person singing those words -- it is an anchor
+# landing on the wrong repeat of a chorus, which is the usual way a
+# well-anchored alignment still comes out wrong.
+MIN_SECONDS_PER_WEIGHT = 0.12
+
+# Beats in a bar. Assumed rather than detected: 4/4 covers nearly everything
+# here, and getting it wrong only loosens the bounds below rather than
+# inverting them.
+BEATS_PER_BAR = 4
+
+# Only the ceiling scales with tempo. A word cannot credibly span two bars --
+# that is Whisper holding one token across an instrumental -- and two bars is a
+# very different length at 76bpm than at 152.
+#
+# The floor stays absolute. Deriving it from tempo looked principled and was
+# wrong: a sixteenth note at 76bpm is 0.197s, but singers pack syllables far
+# tighter than that ("ya" measured 0.12s on a 76bpm track), so a tempo-scaled
+# floor threw away real words and dragged the first line eight seconds late.
+# Near-zero spans are decoding glitches at any tempo.
+MAX_WORD_BARS = 2.0
+
+# A stretch this long with barely any words in it is an instrumental break, not
+# slow singing. Eight bars rather than four: four is a normal gap between
+# verses on a mid-tempo track, and treating it as a break pushed a whole chorus
+# minutes late.
+BREAK_BARS = 8.0
+BREAK_MAX_WORDS = 3
+
+
+def beat_seconds(bpm: Optional[float]) -> Optional[float]:
+    """Seconds per beat, or None when the tempo is unknown."""
+    try:
+        value = float(bpm or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return 60.0 / value if 20.0 < value < 400.0 else None
+
+
+def bar_seconds(bpm: Optional[float]) -> Optional[float]:
+    beat = beat_seconds(bpm)
+    return beat * BEATS_PER_BAR if beat else None
+
+
+def word_bounds(bpm: Optional[float]) -> tuple[float, float]:
+    """Plausible (min, max) seconds for one sung word at this tempo.
+
+    Falls back to the fixed pair when the tempo is unknown. A word at 152bpm
+    can be much shorter than one at 70bpm, and judging both by the same
+    absolute threshold throws away good anchors on fast material and keeps bad
+    ones on slow.
+    """
+    beat = beat_seconds(bpm)
+    if beat is None:
+        return (MIN_WORD_S, MAX_WORD_S)
+    return (MIN_WORD_S, beat * BEATS_PER_BAR * MAX_WORD_BARS)
+
 # Numbers appear as digits in one source and words in the other often enough
 # ("17" vs "seventeen") to be worth anchoring on.
 _NUMBERS = {
@@ -68,32 +133,98 @@ def _lyric_tokens(lines: list[str]) -> tuple[list[str], list[int]]:
     return tokens, owners
 
 
-def _whisper_tokens(words: Iterable) -> tuple[list[str], list[float]]:
-    """Flatten timestamped Whisper words to (tokens, start time per token)."""
+def word_span_ok(start: float, end: float,
+                 bpm: Optional[float] = None) -> bool:
+    """Whether a Whisper word's duration is plausible for sung speech.
+
+    Judged against the track's own tempo when it is known: see
+    :func:`word_bounds`.
+    """
+    low, high = word_bounds(bpm)
+    span = end - start
+    return low <= span <= high
+
+
+def _whisper_tokens(words: Iterable, *, bpm: Optional[float] = None
+                    ) -> tuple[list[str], list[float], float]:
+    """Flatten timestamped Whisper words to (tokens, starts, last end).
+
+    Words with an implausible span are dropped rather than kept as anchors:
+    Whisper attaches one token to a whole instrumental break often enough that
+    trusting it drags a lyric line badly off the singing. The end of the last
+    usable word is returned too -- it is a real bound on the song's sung
+    content, and better than inventing a tail.
+    """
     tokens: list[str] = []
     starts: list[float] = []
+    last_end = 0.0
     for w in words:
-        for raw in str(getattr(w, "text", "")).split():
-            tok = normalize_word(raw)
-            if tok:
-                tokens.append(tok)
-                starts.append(float(getattr(w, "start", 0.0)))
-    return tokens, starts
+        start = float(getattr(w, "start", 0.0))
+        end = float(getattr(w, "end", start))
+        if end > start and not word_span_ok(start, end, bpm):
+            continue
+        pieces = [normalize_word(raw) for raw in str(getattr(w, "text", "")).split()]
+        pieces = [tok for tok in pieces if tok]
+        if not pieces:
+            continue
+        # A multi-word token spans its own duration, so spread the pieces
+        # across it rather than stacking them all on the start.
+        step = (end - start) / len(pieces) if end > start else 0.0
+        for i, tok in enumerate(pieces):
+            tokens.append(tok)
+            starts.append(start + step * i)
+        last_end = max(last_end, end)
+    return tokens, starts, last_end
 
 
-def _interpolate(times: list[Optional[float]], total: Optional[float]) -> list[float]:
+def line_weight(line: str) -> float:
+    """Roughly how long a line takes to sing, in arbitrary units.
+
+    Syllables would be better than words, and words are better than nothing:
+    what matters is that "I been wondering where you are" is given more of a
+    gap than "what's it for". Counting characters rather than words keeps a
+    line of long words from being rushed.
+    """
+    text = (line or "").strip()
+    if not text:
+        return 0.0
+    # A floor, so a one-word line still occupies a share of the gap.
+    return max(1.0, len(_WORD.findall(text.lower())) + len(text) / 12.0)
+
+
+def _interpolate(times: list[Optional[float]], total: Optional[float],
+                 weights: Optional[list[float]] = None,
+                 breaks: Optional[list[tuple[float, float]]] = None) -> list[float]:
     """Fill gaps in a partially-timed line list, keeping it non-decreasing.
 
-    A line Whisper never anchored still has to appear at a sensible moment, so
-    it is spread evenly between the nearest timed lines on either side.
+    A line Whisper never anchored still has to appear at a sensible moment. It
+    is placed in proportion to how much singing precedes it, not at an even
+    interval: spacing lines evenly makes a long line and a two-word line take
+    the same time, which is what makes an otherwise well-anchored alignment
+    feel off the beat.
     """
     n = len(times)
     out: list[float] = [0.0] * n
     known = [i for i, t in enumerate(times) if t is not None]
+    if weights is None or len(weights) != n:
+        weights = [1.0] * n
+    gaps = breaks or []
+
+    def share(lo: int, hi: int) -> list[float]:
+        """Cumulative weight fraction for lines lo+1..hi-1 within (lo, hi)."""
+        span = sum(weights[k] for k in range(lo, hi)) or 1.0
+        run, out_fracs = 0.0, []
+        for k in range(lo, hi):
+            run += weights[k]
+            out_fracs.append(run / span)
+        return out_fracs
+
     if not known:
-        # Nothing anchored: fall back to an even spread over the track.
+        # Nothing anchored at all: fall back to weight-proportional spacing
+        # across whatever duration is known.
         span = total or float(n)
-        return [i * span / max(n, 1) for i in range(n)]
+        fracs = share(0, n)
+        return [0.0] + [span * f for f in fracs[:-1]]
 
     for i, t in enumerate(times):
         if t is not None:
@@ -102,14 +233,21 @@ def _interpolate(times: list[Optional[float]], total: Optional[float]) -> list[f
         prev = max((k for k in known if k < i), default=None)
         nxt = min((k for k in known if k > i), default=None)
         if prev is None:                      # leading untimed lines
-            out[i] = max(0.0, times[nxt] - (nxt - i))          # type: ignore[operator]
+            fracs = share(0, nxt)             # type: ignore[arg-type]
+            head = times[nxt]                 # type: ignore[index]
+            out[i] = max(0.0, head * (fracs[i - 1] if i else 0.0))
         elif nxt is None:                     # trailing untimed lines
             tail = total if total and total > times[prev] else times[prev] + (n - prev)  # type: ignore[operator]
-            step = (tail - times[prev]) / (n - prev)           # type: ignore[operator]
-            out[i] = times[prev] + step * (i - prev)           # type: ignore[operator]
+            fracs = share(prev, n)
+            out[i] = times[prev] + (tail - times[prev]) * fracs[i - prev - 1]  # type: ignore[operator]
         else:
-            step = (times[nxt] - times[prev]) / (nxt - prev)   # type: ignore[operator]
-            out[i] = times[prev] + step * (i - prev)           # type: ignore[operator]
+            fracs = share(prev, nxt)
+            # Distributed across the *sung* seconds between the anchors, then
+            # mapped back through any instrumental break, so lines cluster
+            # where there is singing instead of drifting into a solo.
+            sung = _sung_span(times[prev], times[nxt], gaps)   # type: ignore[arg-type]
+            out[i] = _advance_through_breaks(
+                times[prev], sung * fracs[i - prev - 1], gaps)  # type: ignore[arg-type]
 
     # Enforce monotonicity; a lyric line may never move backwards in time.
     for i in range(1, n):
@@ -118,11 +256,163 @@ def _interpolate(times: list[Optional[float]], total: Optional[float]) -> list[f
     return out
 
 
+def find_breaks(starts: list[float],
+                bpm: Optional[float]) -> list[tuple[float, float]]:
+    """Stretches with too few words to be singing: instrumental breaks.
+
+    Scanned in bars rather than seconds, because "quiet for four bars" means
+    the same thing at any tempo while "quiet for six seconds" does not. A solo
+    or an intro leaves a gap no lyric belongs in, and spreading lines evenly
+    across it is what puts them far from the vocal.
+    """
+    bar = bar_seconds(bpm)
+    if bar is None or len(starts) < 2:
+        return []
+    window = bar * BREAK_BARS
+    breaks: list[tuple[float, float]] = []
+    for a, b in zip(starts, starts[1:]):
+        if (b - a) >= window:
+            breaks.append((a, b))
+    return breaks
+
+
+def _sung_span(lo: float, hi: float,
+               breaks: list[tuple[float, float]]) -> float:
+    """Seconds between lo and hi that are not inside an instrumental break."""
+    total = max(0.0, hi - lo)
+    for start, end in breaks:
+        overlap = min(hi, end) - max(lo, start)
+        if overlap > 0:
+            total -= overlap
+    return max(0.0, total)
+
+
+def _advance_through_breaks(start: float, sung: float,
+                            breaks: list[tuple[float, float]]) -> float:
+    """Move ``sung`` seconds of singing forward from ``start``, skipping breaks.
+
+    The inverse of :func:`_sung_span`: a line a third of the way through the
+    *vocal* has to be placed past whatever silence sits in between, not a third
+    of the way through the clock.
+    """
+    remaining, position = sung, start
+    for gap_start, gap_end in sorted(breaks):
+        if gap_end <= position:
+            continue
+        usable = max(0.0, gap_start - position)
+        if remaining <= usable:
+            return position + remaining
+        remaining -= usable
+        position = gap_end
+    return position + remaining
+
+
+def grid_phase(starts: list[float], beat: float) -> float:
+    """Where the beat grid sits, inferred from the words themselves.
+
+    A tempo alone does not say *when* the beats fall. Singing lands on or just
+    after a beat far more often than between, so the residual most anchors
+    share is the grid's offset. Snapping to a grid whose phase is wrong makes
+    the timing worse rather than better.
+    """
+    if beat <= 0 or not starts:
+        return 0.0
+    residuals = sorted((t % beat) for t in starts)
+    return residuals[len(residuals) // 2]
+
+
+def snap_to_grid(t: float, beat: Optional[float], phase: float,
+                 *, tolerance: float = 0.25) -> float:
+    """Pull a time onto the nearest beat, when it is already close.
+
+    ``tolerance`` is a fraction of a beat: a time further than that from the
+    grid is left alone rather than dragged, since it is a genuine off-beat
+    entry and not jitter to correct.
+    """
+    if not beat or beat <= 0:
+        return t
+    offset = t - phase
+    nearest = round(offset / beat) * beat + phase
+    if abs(nearest - t) <= beat * tolerance:
+        return max(0.0, nearest)
+    return t
+
+
+def _earliest_match(line_tokens: set[str], whisper_toks: list[str],
+                    starts: list[float]) -> Optional[float]:
+    """When any of a line's words is first heard."""
+    for tok, start in zip(whisper_toks, starts):
+        if tok in line_tokens:
+            return start
+    return None
+
+
+def _correct_opening_anchor(per_line: list[Optional[float]],
+                            lines: list[str], whisper_toks: list[str],
+                            starts: list[float],
+                            bpm: Optional[float]) -> list[Optional[float]]:
+    """Pull the first lyric back if it was matched to a later repeat.
+
+    SequenceMatcher optimises globally, so with a repeated chorus it will
+    happily pin the *opening* line to a later occurrence of the same words --
+    measured at 21.16s on a track whose vocal starts at 14.0s. Every other line
+    is constrained by the anchors around it; the first one has nothing before
+    it, which is exactly why it drifts.
+
+    The correction is the earliest moment any of that line's own words is
+    heard. That is a weaker signal than an aligned block -- it can catch a
+    mishearing -- so it is only applied when it disagrees by more than a bar,
+    and never moved later.
+    """
+    if not per_line or per_line[0] is None or not starts:
+        return per_line
+    bar = bar_seconds(bpm) or 2.0
+    own_tokens = {t for t in (normalize_word(w) for w in lines[0].split()) if t}
+    first = _earliest_match(own_tokens, whisper_toks, starts)
+    if first is None:
+        return per_line
+    if per_line[0] - first > bar:
+        out = list(per_line)
+        out[0] = first
+        return out
+    return per_line
+
+
+def _drop_impossible_anchors(per_line: list[Optional[float]],
+                             weights: list[float]) -> list[Optional[float]]:
+    """Discard anchors that would require singing faster than anyone can.
+
+    Repeated lyrics are where alignment fails: "no one's ready for your war"
+    appears eight times, and the matcher is free to anchor a late line to an
+    early occurrence. The giveaway is not the anchor itself but the interval it
+    leaves -- on this track twenty lines were pinned into four seconds.
+
+    An anchor that leaves too little room for the lines before it is dropped,
+    and those lines are interpolated instead. Losing a suspect anchor costs a
+    little precision; keeping it compresses whole verses into a blur.
+    """
+    kept = list(per_line)
+    last_index: Optional[int] = None
+    for i, t in enumerate(kept):
+        if t is None:
+            continue
+        if last_index is None:
+            last_index = i
+            continue
+        needed = sum(weights[last_index:i]) * MIN_SECONDS_PER_WEIGHT
+        if (t - kept[last_index]) < needed:      # type: ignore[operator]
+            kept[i] = None                       # implausible; interpolate it
+            continue
+        last_index = i
+    return kept
+
+
 def align_lines(
     lyric_lines: list[str],
     words: Iterable,
     *,
     total_duration: Optional[float] = None,
+    bpm: Optional[float] = None,
 ) -> list[tuple[float, str]]:
     """Assign a timestamp to each real lyric line from Whisper word timings.
 
@@ -134,9 +424,16 @@ def align_lines(
         return []
 
     lyric_toks, owners = _lyric_tokens(lines)
-    whisper_toks, starts = _whisper_tokens(words)
+    weights = [line_weight(ln) for ln in lines]
+    whisper_toks, starts, last_end = _whisper_tokens(words, bpm=bpm)
     if not lyric_toks or not whisper_toks:
-        return list(zip(_interpolate([None] * len(lines), total_duration), lines))
+        return list(zip(_interpolate([None] * len(lines), total_duration, weights),
+                        lines))
+    # The last sung word bounds the lyrics better than the file's length, which
+    # includes outros and silence the words do not cover.
+    horizon = total_duration
+    if last_end > 0 and (horizon is None or last_end < horizon):
+        horizon = last_end
 
     # Earliest anchored time per line.
     per_line: list[Optional[float]] = [None] * len(lines)
@@ -148,7 +445,22 @@ def align_lines(
             if per_line[line_no] is None or t < per_line[line_no]:  # type: ignore[operator]
                 per_line[line_no] = t
 
-    return list(zip(_interpolate(per_line, total_duration), lines))
+    per_line = _correct_opening_anchor(per_line, lines, whisper_toks, starts, bpm)
+    per_line = _drop_impossible_anchors(per_line, weights)
+    breaks = find_breaks(starts, bpm)
+    placed = _interpolate(per_line, horizon, weights, breaks)
+
+    # Finally pull each line onto the beat grid. The tempo says how far apart
+    # beats are; the anchors say where they fall. Interpolated lines are the
+    # ones that drift, and a line that enters just off the beat reads as early.
+    beat = beat_seconds(bpm)
+    if beat:
+        phase = grid_phase([t for t in per_line if t is not None] or starts, beat)
+        placed = [snap_to_grid(t, beat, phase) for t in placed]
+        for i in range(1, len(placed)):
+            if placed[i] < placed[i - 1]:
+                placed[i] = placed[i - 1]
+    return list(zip(placed, lines))
 
 
 def align_lyrics_to_lrc(
@@ -156,6 +468,7 @@ def align_lyrics_to_lrc(
     words: Iterable,
     *,
     total_duration: Optional[float] = None,
+    bpm: Optional[float] = None,
 ) -> str:
     """Align plain lyrics onto Whisper word timings and render LRC.
 
@@ -168,4 +481,5 @@ def align_lyrics_to_lrc(
     lines = [ln for ln in lines if ln]
     if not lines:
         return ""
-    return lines_to_lrc(align_lines(lines, words, total_duration=total_duration))
+    return lines_to_lrc(align_lines(lines, words, total_duration=total_duration,
+                                    bpm=bpm))

@@ -116,6 +116,63 @@ def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> st
         return "error"
 
 
+def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
+    """Give plain lyrics a rhythm, by aligning them to a transcription.
+
+    Whisper is here for **timing only**. Its words on sung audio are
+    unreliable -- "up to do" becomes "up to doom", and it emits "\u266a"
+    artifacts -- so where a real source supplied the text, those words are kept
+    and only the timestamps are taken. This is the same rule
+    upgrade_timings.upgrade_track follows for captions, and what makes the
+    player's own lyrics panel useful: it has the words and no timings, and
+    Whisper has the reverse.
+    """
+    from .lyric_align import align_lyrics_to_lrc
+    from .lyrics import parse_lrc
+    from .whisper_sync import transcribe_to_words
+
+    row = conn.execute(
+        "SELECT plain_lyrics FROM lyrics WHERE track_id = ? AND kind = 'approved'",
+        (track_id,)).fetchone()
+    plain = (row[0] or "").strip() if row else ""
+    if not plain:
+        return False
+
+    try:
+        words = transcribe_to_words(str(audio_path), text=plain)
+        # track_analysis is created on demand, so the join below raises rather
+        # than simply finding no tempo on a database that has never stored one.
+        track_analysis.ensure_schema(conn)
+        meta = conn.execute(
+            "SELECT t.duration, a.bpm FROM tracks t"
+            " LEFT JOIN track_analysis a ON a.track_id = t.track_id"
+            " WHERE t.track_id = ?", (track_id,)).fetchone()
+        # The tempo is what turns a plausible-looking timestamp into a
+        # musically placed one: it sets the beat grid the lines snap to and the
+        # bar window that identifies an instrumental break.
+        lrc = align_lyrics_to_lrc(
+            plain, words,
+            total_duration=(meta["duration"] if meta else None),
+            bpm=(meta["bpm"] if meta else None))
+    except Exception:
+        log.exception("postprocess: sync failed for track %s", track_id)
+        return False
+
+    if not lrc.strip() or not parse_lrc(lrc):
+        log.warning("postprocess: alignment produced no timings for track %s",
+                    track_id)
+        return False
+
+    conn.execute(
+        "UPDATE lyrics SET synced_lyrics = ?, source = ?"
+        " WHERE track_id = ? AND kind = 'approved'",
+        (lrc, "whisper_aligned", track_id))
+    conn.commit()
+    log.info("postprocess: synced %d line(s) for track %s",
+             len(parse_lrc(lrc)), track_id)
+    return True
+
+
 def process_task(payload: dict) -> None:
     """Process one post-processing task payload {artist, title, url}."""
     artist = (payload.get("artist") or "").strip()
@@ -171,6 +228,20 @@ def process_task(payload: dict) -> None:
                     failed.append("analysis")
                 elif not _run_analysis(track_id, audio, conn):
                     failed.append("analysis")
+
+        if "sync" in pending:
+            # Needs the whole track, not an excerpt: alignment spreads every
+            # line across the full duration, so a sample would compress them.
+            if not url:
+                log.warning("postprocess: no watchable URL for track %s; "
+                            "cannot sync lyrics", track_id)
+                failed.append("sync")
+            else:
+                audio = _ensure_download(url, cookies)
+                if not audio:
+                    failed.append("sync")
+                elif not _run_sync(track_id, audio, conn):
+                    failed.append("sync")
 
         if "timings" in pending:
             # "no-captions"/"no-source" are terminal: retrying cannot help.

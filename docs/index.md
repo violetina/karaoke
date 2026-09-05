@@ -17,7 +17,8 @@ It combines local music metadata, LRCLIB synced lyrics, optional Whisper transcr
 ## Documentation map
 
 - [Architecture](architecture.md): components, runtime modes and data flows.
-- [Flows](flows.md): schemas for the detection, sample and record/decompile flows.
+- [Flows](flows.md): schemas for the detection, sample, record/decompile and
+  lyric-rescue flows.
 - [The TUI](tui.md): the player-aware Textual shell.
 - [TUI visuals](tui-visuals.md): mood imagery, sentiment arc, rhythm bar and cartwheel.
 - [Modes](modes/index.md): a page per mode — scan, spotify, browse, radio, record, sample.

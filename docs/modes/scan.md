@@ -26,6 +26,19 @@ timeline reloads immediately — no manual `karaoke-stage youtube … && approve
 Untimed captions are left in the staging queue for manual review. Each video is
 attempted once per session and the fetch respects `KARAOKE_COOKIES_FROM_BROWSER`.
 
+## Rescuing lyrics from the player's own panel
+
+Captions only exist for some uploads, and they are a *subtitle track*, not the
+lyrics tab. When LRCLIB has nothing and there are no usable captions, the
+player itself may still be showing the words — YouTube Music's SONGTEKST tab,
+attributed to LyricFind.
+
+Those are read over the CDP connection the playback window already holds, stored
+as plain text, and then queued for alignment: Whisper supplies a rhythm and the
+real words are kept, so an unindexed track ends up properly timed. See the
+[Lyric rescue flow](../flows.md#lyric-rescue-flow) for the schema and the
+guards.
+
 ## Sync offset
 
 Browser MPRIS `position` can run slightly **ahead** of audible output (device
