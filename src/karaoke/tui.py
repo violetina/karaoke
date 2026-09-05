@@ -46,6 +46,7 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
 from .browse import open_song_url
+from .player_open import browser_playback, track_finished
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
 from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
@@ -456,8 +457,7 @@ class KaraokeTui(App):
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
-    #queue { display: none; height: auto; max-height: 12; border: round cyan;
-             padding: 0 1; margin-top: 1; }
+    #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
     #keybpm { height: 6; border: round green; padding: 0 1; margin-bottom: 1; }
     #ascii-visual { height: 1fr; border: round yellow; padding: 0 1; }
@@ -515,6 +515,7 @@ class KaraokeTui(App):
         ("k", "sample_key", "Sample key/BPM"),
         ("slash", "focus_search", "Search"),
         ("greater_than_sign", "queue_next", "Queue next"),
+        ("o", "toggle_play_once", "Play-once"),
         ("O", "toggle_record", "Record"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
@@ -574,6 +575,8 @@ class KaraokeTui(App):
         self._mood_shown = ""      # mood the picture was rendered for
         self._queue: list = []     # search results, in play order
         self._queue_at = -1        # index currently playing
+        self._play_once = True     # queue decides the next track
+        self._last_finished_url = ""
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -598,7 +601,7 @@ class KaraokeTui(App):
                 # The result list lives under the lyrics rather than in the
                 # overlay: it is what plays next, so it belongs where the
                 # playing track is, not behind a panel you have to open.
-                yield Static("", id="queue")
+                yield DataTable(id="queue", cursor_type="row")
                 with Horizontal(id="statusbar"):
                     yield Static("Mode: auto", id="mode-label")
                     yield Static("worker-load: —", id="worker-load")
@@ -629,6 +632,9 @@ class KaraokeTui(App):
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
         self.set_interval(1.0, self._refresh_record_status)
+        # 2s: fast enough to catch the end before the site starts
+        # its own next track, slow enough not to spam CDP.
+        self.set_interval(2.0, self._watch_queue)
         self.apply_size_classes(self.size.width, self.size.height)
         # A row still marked 'recording' with nothing running is a crash, not a
         # live capture. Close it out so the listing does not lie and its audio
@@ -1023,19 +1029,58 @@ class KaraokeTui(App):
 
     def _render_queue(self) -> None:
         """Draw the list, marking what is playing."""
-        panel = self.query_one("#queue", Static)
-        body = Text()
+        table = self.query_one("#queue", DataTable)
+        table.clear()
+        if not table.columns:
+            table.add_columns(" ", "Artist", "Title", "")
         for i, row in enumerate(self._queue):
             playing = i == self._queue_at
-            marker = "▶ " if playing else f"{i + 1:>2}"
-            label = f"{row['artist']} - {row['title']}"
             # A row with no source cannot be played; say so rather than
             # skipping silently when it is reached.
-            suffix = "" if row.get("url") else "   (no source)"
-            body.append(f"{marker} {label}{suffix}\n",
-                        style="bold" if playing else ("dim" if suffix else ""))
-        panel.update(body)
-        panel.border_title = f"queue  {self._queue_at + 1}/{len(self._queue)}"
+            note = "" if row.get("url") else "no source"
+            table.add_row(">" if playing else str(i + 1),
+                          row["artist"][:18], row["title"][:28], note)
+        table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
+                              f"{'  (play-once)' if self._play_once else ''}")
+
+    def on_data_table_row_selected(self, event) -> None:
+        """Click or Enter on a queue row plays it."""
+        if event.data_table.id != "queue":
+            return
+        self.play_queue_index(event.cursor_row)
+
+    def action_toggle_play_once(self) -> None:
+        """`o`: play the queue through once, or let the player carry on.
+
+        With it on, the TUI takes playback back at the end of every track and
+        moves to the next entry. That is what stops YouTube Music's own radio
+        from taking over -- opening a watch URL makes it attach an RD… station,
+        so the "next" song is its suggestion rather than the list you built.
+        """
+        self._play_once = not self._play_once
+        self._render_queue()
+        self.notify("Play-once: queue decides what plays next" if self._play_once
+                    else "Play-once off: the player picks its own next track")
+
+    def _watch_queue(self) -> None:
+        """Advance the queue when the browser finishes a track.
+
+        MPRIS cannot answer this: when the site moves to its own suggestion the
+        metadata simply changes, which looks the same as the user picking
+        something. The page's video element reports that it ended.
+        """
+        if not (self._play_once and self._queue and self._queue_at >= 0):
+            return
+        state = browser_playback()
+        if not track_finished(state):
+            return
+        # Only act once per track: after advancing, the new track is short of
+        # its end again, but a stalled read could otherwise fire repeatedly.
+        url = (state or {}).get("url", "")
+        if url and url == self._last_finished_url:
+            return
+        self._last_finished_url = url
+        self.action_queue_next()
 
     def play_queue_index(self, index: int) -> bool:
         """Open the queue entry at ``index``. Returns whether it played."""

@@ -11,62 +11,123 @@ import subprocess
 from .logger import OPEN_STDERR_LOG, OPEN_STDOUT_LOG, log
 
 
-def try_chrome_cdp_navigate(url: str) -> bool:
-    """Try to navigate an existing Chromium window/tab to the new URL using CDP.
+CDP_URL = "http://localhost:9222/json"
 
-    Returns True on success, False otherwise.
-    """
+
+def _cdp_page_socket(timeout: float = 1.0) -> "str | None":
+    """WebSocket URL of the kiosk browser's first page target, or None."""
     import json
     import urllib.request
-    import asyncio
-    import threading
 
     try:
-        # Check if the debugging API is responsive
-        req = urllib.request.Request("http://localhost:9222/json", method="GET")
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with urllib.request.urlopen(CDP_URL, timeout=timeout) as resp:
             tabs = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    for tab in tabs:
+        if tab.get("type") == "page" and "webSocketDebuggerUrl" in tab:
+            return tab["webSocketDebuggerUrl"]
+    return None
 
-        # Find the first Page/Tab target
-        target = None
-        for tab in tabs:
-            if tab.get("type") == "page" and "webSocketDebuggerUrl" in tab:
-                target = tab
-                break
-        if not target:
-            return False
 
-        ws_url = target["webSocketDebuggerUrl"]
+def _cdp_send(method: str, params: dict, *, timeout: float = 2.0):
+    """Send one CDP command and return its result, or None.
 
-        # Import websockets library to send the CDP navigate command
+    Runs the socket work on its own thread with ``asyncio.run``: the callers
+    here are Textual workers and timers that may already have a running event
+    loop, which ``asyncio.run`` refuses to nest.
+    """
+    import asyncio
+    import json
+    import threading
+
+    ws_url = _cdp_page_socket()
+    if not ws_url:
+        return None
+    try:
         import websockets
+    except ImportError:
+        log.debug("websockets not installed; CDP unavailable")
+        return None
 
-        async def send_nav():
-            async with websockets.connect(ws_url) as ws:
-                payload = {
-                    "id": 1,
-                    "method": "Page.navigate",
-                    "params": {"url": url}
-                }
-                await ws.send(json.dumps(payload))
-                await asyncio.wait_for(ws.recv(), timeout=1.0)
+    out: dict = {}
 
-        # Run send_nav in a background thread to bypass "running event loop" restriction
-        success = [False]
-        def thread_target():
-            try:
-                asyncio.run(send_nav())
-                success[0] = True
-            except Exception:
-                pass
+    async def send():
+        async with websockets.connect(ws_url) as ws:
+            await ws.send(json.dumps({"id": 1, "method": method, "params": params}))
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            out["reply"] = json.loads(raw)
 
-        t = threading.Thread(target=thread_target)
-        t.start()
-        t.join(timeout=2.0)
-        return success[0]
-    except Exception as exc:
-        log.exception("try_chrome_cdp_navigate failed")
+    def run() -> None:
+        try:
+            asyncio.run(send())
+        except Exception:
+            log.debug("CDP %s failed", method, exc_info=True)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout + 1.5)
+    return out.get("reply")
+
+
+def try_chrome_cdp_navigate(url: str) -> bool:
+    """Navigate the existing kiosk window to a URL. True on success."""
+    reply = _cdp_send("Page.navigate", {"url": url})
+    return reply is not None
+
+
+# Reads the page's own <video> element. MPRIS reports a position but not
+# reliably whether a track *finished*: when YouTube Music moves on to its own
+# suggestion the metadata simply changes, which is indistinguishable from the
+# user picking something. The video element says plainly that it ended.
+_PLAYBACK_JS = """(() => {
+  const v = document.querySelector('video');
+  if (!v) return JSON.stringify({present: false});
+  return JSON.stringify({
+    present: true,
+    ended: !!v.ended,
+    paused: !!v.paused,
+    position: v.currentTime || 0,
+    duration: (isFinite(v.duration) ? v.duration : 0) || 0,
+    url: location.href
+  });
+})()"""
+
+
+def browser_playback() -> "dict | None":
+    """What the kiosk browser's video element is doing, or None.
+
+    Returns ``present``, ``ended``, ``paused``, ``position``, ``duration``
+    and ``url``.
+    """
+    import json
+
+    reply = _cdp_send("Runtime.evaluate",
+                      {"expression": _PLAYBACK_JS, "returnByValue": True})
+    if not reply:
+        return None
+    try:
+        raw = reply["result"]["result"]["value"]
+        return json.loads(raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def track_finished(state: "dict | None", *, tail: float = 1.5) -> bool:
+    """Whether the browser's current track has reached its end.
+
+    ``tail`` catches the case where playback is swapped out a moment before
+    ``ended`` is set, which is what happens when the site starts its own next
+    track: by the time ``ended`` would be true the element already holds the
+    replacement.
+    """
+    if not state or not state.get("present"):
         return False
+    if state.get("ended"):
+        return True
+    duration = float(state.get("duration") or 0.0)
+    position = float(state.get("position") or 0.0)
+    return duration > 0 and position >= (duration - tail)
 
 
 def open_song_url(url: str, kind: str | None) -> int | None:
