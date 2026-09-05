@@ -37,6 +37,11 @@ from karaoke.config import settings                  # noqa: E402
 
 _SPOTIFY_ID = re.compile(r"(?:track[/:])([A-Za-z0-9]+)")
 
+# SQLite holds a write lock from a transaction's first write until it commits.
+# Batching a whole run into one transaction locks every other process out for
+# its full duration -- minutes, for the yt-dlp pass -- so it commits as it goes.
+COMMIT_EVERY = 10
+
 
 def probe_duration(path: Path) -> Optional[float]:
     """Exact length of a local file, via ffprobe."""
@@ -105,6 +110,8 @@ def from_cache(conn, rows, *, apply: bool) -> int:
             if apply:
                 store(conn, row["track_id"], duration=seconds)
             filled += 1
+            if apply and filled % COMMIT_EVERY == 0:
+                conn.commit()
             break
     return filled
 
@@ -144,6 +151,8 @@ def from_spotify(conn, rows, *, apply: bool) -> int:
             if apply:
                 store(conn, row["track_id"], duration=seconds, album=album)
             filled += 1
+            if apply and filled % COMMIT_EVERY == 0:
+                conn.commit()
     return filled
 
 
@@ -177,6 +186,8 @@ def from_ytdlp(conn, rows, *, apply: bool) -> int:
         if apply:
             store(conn, row["track_id"], duration=seconds or None, album=album)
         filled += 1
+        if apply and filled % COMMIT_EVERY == 0:
+            conn.commit()
     return filled
 
 

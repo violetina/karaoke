@@ -264,6 +264,16 @@ def art_url(player: str = "") -> Optional[str]:
     return _run(_base_cmd(player) + ["metadata", "mpris:artUrl"])
 
 
+def pause(player: str = "") -> bool:
+    """Pause the (targeted) player. Returns success.
+
+    Distinct from :func:`play_pause`, which toggles: a caller that only wants
+    silence must not start playback because the track happened to be paused
+    already.
+    """
+    return _run(_base_cmd(player) + ["pause"]) is not None
+
+
 def play_pause(player: str = "") -> bool:
     """Toggle play/pause on the (targeted) player. Returns success."""
     return _run(_base_cmd(player) + ["play-pause"]) is not None
