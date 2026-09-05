@@ -52,6 +52,12 @@ _DBC.loader.exec_module(db_cleanup)
 
 SEARCH_URL = "https://music.youtube.com/search?q={query}"
 
+# How many search results to consider. The first is usually right, but when it
+# is not, the song is often second or third -- 53 rows had no album purely
+# because result one was a different track. Verification decides which is ours,
+# so widening costs a little time and no accuracy.
+CANDIDATES = 3
+
 # yt-dlp resolves a search in about 1.6s. A short pause keeps a long run from
 # looking like a scraper without making it materially slower.
 PAUSE_S = 0.4
@@ -94,34 +100,57 @@ def rows_missing_album(conn, limit: Optional[int] = None) -> list:
     return conn.execute(sql).fetchall()
 
 
-def lookup(artist: str, title: str) -> Optional[dict]:
-    """Ask YouTube Music for a song and return its metadata, or None."""
-    url = SEARCH_URL.format(query=quote_plus(f"{artist} {title}"))
-    try:
-        out = subprocess.run(
-            ["yt-dlp", "--skip-download", "--playlist-items", "1",
-             "--print", _FIELDS, url],
-            capture_output=True, text=True, timeout=TIMEOUT_S, check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not out:
-        return None
+def _clean(value: str) -> str:
+    value = (value or "").strip()
+    return "" if value in ("NA", "None") else value
 
-    album, _, rest = out.partition("|")
+
+def _parse(line: str) -> Optional[dict]:
+    """One yt-dlp output line into a metadata dict."""
+    if not line.strip():
+        return None
+    album, _, rest = line.partition("|")
     found_artist, _, rest = rest.partition("|")
     track, _, raw_duration = rest.partition("|")
-
-    def clean(value: str) -> str:
-        value = (value or "").strip()
-        return "" if value in ("NA", "None") else value
-
     try:
         duration = float(raw_duration)
     except (TypeError, ValueError):
         duration = 0.0
-    return {"album": clean(album), "artist": clean(found_artist),
-            "track": clean(track), "duration": duration or None}
+    return {"album": _clean(album), "artist": _clean(found_artist),
+            "track": _clean(track), "duration": duration or None}
+
+
+# yt-dlp's wording when an upload needs a signed-in session. Those cannot be
+# fetched headlessly at all, so they are collected rather than retried.
+_AGE_GATED = re.compile(r"confirm your age|age.?restricted|Sign in to confirm",
+                        re.IGNORECASE)
+
+
+def lookup(artist: str, title: str, *,
+           candidates: int = CANDIDATES) -> tuple[list[dict], str]:
+    """Ask YouTube Music for a song.
+
+    Returns the top results' metadata and any blocking reason -- currently only
+    an age gate, which no amount of retrying will get past without cookies.
+    """
+    url = SEARCH_URL.format(query=quote_plus(f"{artist} {title}"))
+    try:
+        # No check=True: yt-dlp exits non-zero if *any* item fails, and an
+        # age-restricted result among the hits would otherwise discard every
+        # good line that came back with it.
+        out = subprocess.run(
+            ["yt-dlp", "--skip-download", "--ignore-errors",
+             "--playlist-items", f"1:{max(1, candidates)}",
+             "--print", _FIELDS, url],
+            capture_output=True, text=True, timeout=TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ([], "")
+    found = [_parse(line) for line in (out.stdout or "").splitlines()]
+    blocked = ""
+    if _AGE_GATED.search(out.stderr or ""):
+        blocked = "age-restricted; needs a signed-in session"
+    return ([f for f in found if f], blocked)
 
 
 def _is_same_song(found: dict, row) -> bool:
@@ -183,10 +212,30 @@ def store(conn, track_id: int, album: str, duration: Optional[float]) -> None:
 def harvest(conn, rows, *, apply: bool,
             pause: float = PAUSE_S) -> tuple[int, int, int]:
     """Look each track up. Returns (stored, unavailable, wrong song, swapped)."""
-    stored = absent = mismatched = swapped = 0
+    stored = absent = mismatched = swapped = restricted = 0
     for index, row in enumerate(rows, 1):
         label = f"{row['artist']} - {row['title']}"[:46]
-        found = lookup(row["artist"], row["title"])
+        results, blocked = lookup(row["artist"], row["title"])
+        if blocked:
+            # Collected rather than retried: a headless fetch can never get
+            # past this, but the signed-in player window can.
+            print(f"[{index}/{len(rows)}] {label:<48} ! {blocked}", flush=True)
+            if apply:
+                localcache.record_restricted(
+                    row["track_id"], f"{row['artist']} {row['title']}",
+                    blocked, conn)
+            restricted += 1
+            if pause:
+                time.sleep(pause)
+            continue
+        # First result that verifies as ours; the right song is often second or
+        # third when the first is a different track by the same artist.
+        found = next((f for f in results if _is_same_song(f, row) and f["album"]),
+                     None)
+        if found is None:
+            # Nothing verified: keep the first result, so the swap check and the
+            # "got X instead" reporting still have something to work with.
+            found = results[0] if results else None
         if not found:
             print(f"[{index}/{len(rows)}] {label:<48} - no result", flush=True)
             absent += 1
@@ -222,7 +271,7 @@ def harvest(conn, rows, *, apply: bool,
             conn.commit()
         if pause:
             time.sleep(pause)
-    return stored, absent, mismatched, swapped
+    return stored, absent, mismatched, swapped, restricted
 
 
 def main() -> int:
@@ -240,7 +289,7 @@ def main() -> int:
             return 0
         print(f"looking up {len(rows)} track(s) on YouTube Music\n")
         try:
-            stored, absent, mismatched, swapped = harvest(
+            stored, absent, mismatched, swapped, restricted = harvest(
                 conn, rows, apply=args.apply, pause=args.pause)
         except KeyboardInterrupt:
             if args.apply:
@@ -250,7 +299,8 @@ def main() -> int:
         if args.apply:
             conn.commit()
         print(f"\n{stored} album(s) learned, {swapped} row(s) un-swapped, "
-              f"{absent} unavailable, {mismatched} skipped as a different song"
+              f"{absent} unavailable, {mismatched} skipped as a different song, "
+              f"{restricted} age-restricted"
               f"{'' if args.apply else '  (dry run — nothing written)'}")
     return 0
 

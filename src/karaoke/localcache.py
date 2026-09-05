@@ -93,6 +93,16 @@ CREATE TABLE IF NOT EXISTS recording_marks (
 CREATE INDEX IF NOT EXISTS idx_recording_marks_rec
     ON recording_marks (recording_id, at_wall);
 
+CREATE TABLE IF NOT EXISTS restricted_tracks (
+    track_id   INTEGER PRIMARY KEY,
+    -- What the fetcher was asked for when it hit the wall, so a later pass can
+    -- retry the same thing rather than guess.
+    query      TEXT NOT NULL DEFAULT '',
+    reason     TEXT NOT NULL DEFAULT '',
+    noted_at   REAL NOT NULL,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
 CREATE TABLE IF NOT EXISTS spotify_lookups (
     track_id   INTEGER PRIMARY KEY,
     -- NULL means Spotify was asked and had no match. That is a real result and
@@ -231,6 +241,55 @@ def ensure_recording_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_restricted_table(conn: sqlite3.Connection) -> None:
+    """Create the age-restricted list in databases predating it."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS restricted_tracks (
+            track_id   INTEGER PRIMARY KEY,
+            query      TEXT NOT NULL DEFAULT '',
+            reason     TEXT NOT NULL DEFAULT '',
+            noted_at   REAL NOT NULL
+        )
+    """)
+    conn.commit()
+
+
+def record_restricted(track_id: int, query: str, reason: str,
+                      conn: sqlite3.Connection) -> None:
+    """Note that a track could not be fetched without being signed in.
+
+    Age-restricted uploads need a logged-in session, which a headless fetch
+    does not have. Rather than retry them on every run and fail identically,
+    they are collected so one pass can go through them later in the browser
+    window that *is* signed in.
+    """
+    conn.execute(
+        """
+        INSERT INTO restricted_tracks (track_id, query, reason, noted_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            query = excluded.query,
+            reason = excluded.reason,
+            noted_at = excluded.noted_at
+        """,
+        (track_id, query, reason[:200], time.time()),
+    )
+    conn.commit()
+
+
+def restricted_tracks(conn: sqlite3.Connection) -> list:
+    """Tracks waiting on a signed-in session, with their names."""
+    return conn.execute(
+        """
+        SELECT r.track_id, r.query, r.reason, r.noted_at,
+               t.artist, t.title
+        FROM restricted_tracks r
+        JOIN tracks t ON t.track_id = r.track_id
+        ORDER BY t.artist, t.title
+        """
+    ).fetchall()
+
+
 def ensure_spotify_lookup_table(conn: sqlite3.Connection) -> None:
     """Create the Spotify lookup cache in databases predating it."""
     conn.execute("""
@@ -285,6 +344,27 @@ def record_spotify_lookup(track_id: int, uri: Optional[str],
         (track_id, uri or None, time.time()),
     )
     conn.commit()
+
+
+# Above this, a "track" is a full-album upload rather than a song. Album sides
+# run to about 25 minutes and the longest real songs here are well under it --
+# Ren's "The Tale of Jenny & Screech" is 13.5 minutes and genuinely one track.
+# Duration is the fact, so nothing is stored: a row stops being an album upload
+# the moment a better duration lands, with no flag to go stale.
+ALBUM_UPLOAD_SECONDS = 1500.0
+
+
+def is_album_upload(duration) -> bool:
+    """Whether a duration means this row is a whole album, not a song.
+
+    Such rows cannot carry a meaningful key, tempo or album name -- an analysis
+    over 70 minutes of different songs is a number about nothing -- so they are
+    kept out of search results, playlists and the analysis queue.
+    """
+    try:
+        return duration is not None and float(duration) > ALBUM_UPLOAD_SECONDS
+    except (TypeError, ValueError):
+        return False
 
 
 def offset_mode(mode: str) -> str:
@@ -361,6 +441,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_gap_columns(conn)
     ensure_sync_offset_columns(conn)
     ensure_spotify_lookup_table(conn)
+    ensure_restricted_table(conn)
     ensure_recording_tables(conn)
     return conn
 

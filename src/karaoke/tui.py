@@ -2108,6 +2108,11 @@ class KaraokeTui(App):
                     found = ly
                     break
             if found is None:
+                # LRCLIB does not have everything. The player may already be
+                # showing the words in its own lyrics tab -- that panel is the
+                # only source that knows about a track nobody has indexed.
+                found = self._panel_lyrics(artist, title)
+            if found is None:
                 return
             with localcache.connect() as conn:
                 localcache.add_track_and_lyrics(artist, title, found, conn=conn)
@@ -2118,6 +2123,28 @@ class KaraokeTui(App):
         except Exception as exc:
             log.debug("background lyric fetch failed", exc_info=True)
             self._last_error = f"lyric fetch: {exc}"[:60]
+
+    def _panel_lyrics(self, artist: str, title: str):
+        """Lyrics from the player's own lyrics tab, as a Lyrics object.
+
+        Unsynced by nature -- LyricFind supplies words, not timings -- so these
+        are stored as plain text and become a candidate for alignment against a
+        transcription, which is what turns them into something singable.
+        """
+        from . import ytmusic_lyrics
+        from .lyrics import Lyrics
+
+        try:
+            panel = ytmusic_lyrics.for_playing(artist, title)
+        except Exception:
+            log.debug("lyrics panel read failed", exc_info=True)
+            return None
+        if panel is None:
+            return None
+        log.info("lyrics panel supplied %d lines for %s - %s (%s)",
+                 len(panel.lines), artist, title, panel.attribution)
+        return Lyrics(plain="\n".join(panel.lines),
+                      source=ytmusic_lyrics.lyrics_source(panel))
 
     def _background_autoload_captions(self, url: str, vid: str) -> None:
         """Fetch, stage, and auto-approve YouTube captions in a worker thread.

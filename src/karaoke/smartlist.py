@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import visuals
+from .localcache import ALBUM_UPLOAD_SECONDS
 
 # Moods that carry direction. "neutral" is the absence of signal rather than a
 # feeling to match on, so including it would make every unremarkable song look
@@ -124,7 +125,10 @@ def load_candidates(conn: sqlite3.Connection, *,
         JOIN lyrics l ON l.track_id = t.track_id AND l.kind = 'approved'
         LEFT JOIN track_analysis a ON a.track_id = t.track_id
         WHERE length(COALESCE(l.plain_lyrics, l.synced_lyrics, '')) > 40
-        """
+          -- A whole album is not a playlist entry, and its sentiment is the
+          -- average of a dozen different songs.
+          AND (t.duration IS NULL OR t.duration <= :album_seconds)
+        """, {"album_seconds": ALBUM_UPLOAD_SECONDS}
     ).fetchall()
 
     out: list[Candidate] = []

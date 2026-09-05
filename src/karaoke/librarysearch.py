@@ -27,6 +27,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
+from . import localcache
+
 # Relative worth of a hit in each field.
 W_TITLE = 1.0
 W_ALBUM = 0.6
@@ -139,7 +141,9 @@ def search(query: str, conn: sqlite3.Connection, *, limit: int = 25,
                COALESCE(l.plain_lyrics, l.synced_lyrics, '') AS words
         FROM tracks t
         LEFT JOIN lyrics l ON l.track_id = t.track_id AND l.kind = 'approved'
-        """
+        -- A full-album upload is not something you can pick and play.
+        WHERE t.duration IS NULL OR t.duration <= :album_seconds
+        """, {"album_seconds": localcache.ALBUM_UPLOAD_SECONDS}
     ).fetchall()
 
     hits: list[Hit] = []
