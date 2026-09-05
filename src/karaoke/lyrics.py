@@ -108,9 +108,26 @@ def clean_page_title(title: str) -> str:
     return "" if _TITLE_IS_PLATFORM.match(out) else out
 
 
+# Channel-name suffixes an uploader adds that are not part of the artist's
+# name: "Queen Official", "ModjoOfficial", "ArtistVEVO". Deliberately narrow --
+# "Music" and "Records" are not included, because plenty of acts genuinely
+# carry them and stripping would rename the artist rather than clean it.
+_ARTIST_CHANNEL_SUFFIX = re.compile(r"\s*[-–—]?\s*(?:official|vevo)\s*$",
+                                    re.IGNORECASE)
+
+
 def clean_artist(artist: str) -> str:
-    """Strip YouTube auto-channel decoration from an artist name ("- Topic")."""
-    return _ARTIST_TOPIC.sub("", artist.strip()).strip()
+    """Strip channel decoration from an artist name.
+
+    Handles YouTube's auto-generated "- Topic" and the "Official"/"VEVO"
+    suffixes uploaders append to their channel names, which arrive as the
+    artist when a track is learned from a browser tab.
+    """
+    out = _ARTIST_TOPIC.sub("", artist.strip()).strip()
+    cleaned = _ARTIST_CHANNEL_SUFFIX.sub("", out).strip()
+    # Never strip a name away entirely: an act actually called "Official" keeps
+    # its name rather than becoming blank.
+    return cleaned or out
 
 
 @dataclass

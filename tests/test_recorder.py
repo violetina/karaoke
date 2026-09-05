@@ -314,3 +314,88 @@ def test_the_tui_stops_recordings_on_exit():
     finally:
         r.stop_all = original
     assert called == [True]
+
+
+# --- finished recordings do not sit unanalysed -----------------------------
+#
+# Recording and analysing were separate steps with nothing joining them, so
+# sessions accumulated: four of them, nearly a gigabyte, before anyone noticed.
+
+def _record_app(monkeypatch, *, recording_id=7, marks=(5, 6)):
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._recording_id = recording_id
+    app._record_marks = None
+    app._record_tick = 0
+    notes = []
+    app.notify = lambda msg, **k: notes.append(msg)
+    app._refresh_record_status = lambda: None
+    monkeypatch.setattr(recorder, "mark_count", lambda rid: marks)
+    monkeypatch.setattr(recorder, "stop", lambda rid: None)
+    return app, notes
+
+
+def test_stopping_a_recording_starts_its_analysis(monkeypatch):
+    app, notes = _record_app(monkeypatch)
+    started = []
+    monkeypatch.setattr(app, "_analyse_recording",
+                        lambda rid: started.append(rid), raising=False)
+    app.action_toggle_record()
+    assert started == [7]
+    assert app._recording_id is None
+
+
+def test_a_recording_that_identified_nothing_is_not_analysed(monkeypatch):
+    """No marks means no track list; there is nothing to decompile."""
+    app, notes = _record_app(monkeypatch, marks=(0, 4))
+    monkeypatch.setattr(app, "_analyse_recording",
+                        lambda rid: pytest.fail("nothing to analyse"),
+                        raising=False)
+    app.action_toggle_record()
+
+
+def test_unanalysed_recordings_are_pointed_out(tmp_path, monkeypatch):
+    """Quitting mid-recording closes the row without analysing it; without a
+    reminder the audio just sits there and the tracks never gain a key."""
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    db = tmp_path / "t.db"
+    real = localcache.connect
+    conn = real(db)
+    conn.executescript("""
+        INSERT INTO recordings (recording_id, started_at, source, dir, status)
+        VALUES (1, 1000.0, 'x', '/tmp/x', 'complete'),
+               (2, 1000.0, 'x', '/tmp/x', 'analysed'),
+               (3, 1000.0, 'x', '/tmp/x', 'complete');
+    """)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: real(db))
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    notes = []
+    app.notify = lambda msg, **k: notes.append(msg)
+    app._warn_unanalysed_recordings()
+    assert notes and notes[0].startswith("2 recording(s) awaiting")
+
+
+def test_no_reminder_when_everything_is_analysed(tmp_path, monkeypatch):
+    from karaoke import localcache
+    from karaoke.tui import KaraokeTui
+
+    db = tmp_path / "t.db"
+    real = localcache.connect
+    conn = real(db)
+    conn.execute("INSERT INTO recordings (recording_id, started_at, source, dir,"
+                 " status) VALUES (1, 1000.0, 'x', '/tmp/x', 'analysed')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(localcache, "connect", lambda *a, **k: real(db))
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    notes = []
+    app.notify = lambda msg, **k: notes.append(msg)
+    app._warn_unanalysed_recordings()
+    assert notes == []

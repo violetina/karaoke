@@ -133,3 +133,47 @@ def test_fetch_lrclib_no_retry_when_title_clean():
     ly = fetch_lrclib("A", "No One Knows", session=sess)
     assert ly.source == "none"
     assert len(sess.calls) == 2
+
+
+# --- channel names arriving as the artist ----------------------------------
+#
+# A track learned from a browser tab keeps whatever the uploader called their
+# channel. "Queen Official" then fails to match the same song stored as
+# "Queen", so the library ends up holding both.
+
+def test_clean_artist_strips_a_channel_suffix():
+    from karaoke.lyrics import clean_artist
+
+    assert clean_artist("Queen Official") == "Queen"
+    assert clean_artist("ModjoOfficial") == "Modjo"
+    assert clean_artist("Gnome Official") == "Gnome"
+
+
+def test_clean_artist_strips_vevo():
+    from karaoke.lyrics import clean_artist
+
+    assert clean_artist("QueenVEVO") == "Queen"
+
+
+def test_clean_artist_still_strips_topic():
+    from karaoke.lyrics import clean_artist
+
+    assert clean_artist("Portishead - Topic") == "Portishead"
+
+
+def test_clean_artist_leaves_real_names_alone():
+    """Music and Records are not stripped: plenty of acts genuinely carry them,
+    and removing those would rename the artist rather than clean it."""
+    from karaoke.lyrics import clean_artist
+
+    for name in ("Massive Attack", "Lesfm - Music for Study and Relaxing",
+                 "Def Leppard", "Sub Pop Records"):
+        assert clean_artist(name) == name
+
+
+def test_clean_artist_never_empties_a_name():
+    """An act actually called Official keeps its name rather than vanishing."""
+    from karaoke.lyrics import clean_artist
+
+    assert clean_artist("Official") == "Official"
+    assert clean_artist("VEVO") == "VEVO"

@@ -261,3 +261,80 @@ def test_lookups_stop_once_spotify_is_off(tmp_path, monkeypatch):
     app._spotify_off = True
     app._background_fetch_spotify(1, "A", "B")
     assert called == []
+
+
+# --- batch metadata lookup -------------------------------------------------
+
+def test_tracks_by_id_uses_the_single_track_endpoint(monkeypatch):
+    """The obvious choice, /v1/tracks?ids=, answers 403 Forbidden for this app
+    while /v1/tracks/{id} answers 200 on the same token -- an app restriction,
+    not an auth problem, since /me succeeds too."""
+    from karaoke import spotify_client
+
+    called = []
+
+    class _Resp:
+        status_code = 200
+        headers: dict = {}
+
+        def __init__(self, tid):
+            self._tid = tid
+
+        def json(self):
+            return {"id": self._tid, "name": "Song",
+                    "album": {"name": "Record"}, "duration_ms": 211586}
+
+    def fake_get(url, headers=None, timeout=0, params=None):
+        called.append(url)
+        return _Resp(url.rsplit("/", 1)[-1])
+
+    monkeypatch.setattr(spotify_client.requests, "get", fake_get)
+    client = spotify_client.SpotifyClient.__new__(spotify_client.SpotifyClient)
+    client._headers = lambda: {}
+    out = client.tracks_by_id(["aaa", "bbb"], pause=0)
+
+    assert all(u.endswith(("/aaa", "/bbb")) for u in called)
+    assert not any("ids=" in u for u in called)
+    assert out["aaa"]["album"]["name"] == "Record"
+
+
+def test_tracks_by_id_skips_a_dead_id(monkeypatch):
+    """A region-locked or removed track 404s; the rest must still come back."""
+    from karaoke import spotify_client
+
+    class _Resp:
+        headers: dict = {}
+
+        def __init__(self, code, tid=""):
+            self.status_code = code
+            self._tid = tid
+
+        def json(self):
+            return {"id": self._tid, "name": "S", "album": {"name": "A"},
+                    "duration_ms": 1000}
+
+    def fake_get(url, headers=None, timeout=0, params=None):
+        tid = url.rsplit("/", 1)[-1]
+        return _Resp(404) if tid == "dead" else _Resp(200, tid)
+
+    monkeypatch.setattr(spotify_client.requests, "get", fake_get)
+    client = spotify_client.SpotifyClient.__new__(spotify_client.SpotifyClient)
+    client._headers = lambda: {}
+    out = client.tracks_by_id(["dead", "good"], pause=0)
+    assert list(out) == ["good"]
+
+
+def test_tracks_by_id_raises_on_a_rate_limit(monkeypatch):
+    """Never swallowed: a 429 must stop the caller, not look like a miss."""
+    from karaoke import spotify_client
+
+    class _Resp:
+        status_code = 429
+        headers = {"Retry-After": "3600"}
+
+    monkeypatch.setattr(spotify_client.requests, "get",
+                        lambda *a, **k: _Resp())
+    client = spotify_client.SpotifyClient.__new__(spotify_client.SpotifyClient)
+    client._headers = lambda: {}
+    with pytest.raises(spotify_client.SpotifyRateLimited):
+        client.tracks_by_id(["aaa"], pause=0)

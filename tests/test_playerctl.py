@@ -170,3 +170,21 @@ def test_metadata_survives_a_player_that_omits_the_length(monkeypatch):
     monkeypatch.setattr(subprocess, "run", MagicMock(return_value=result))
     meta = playerctl.current_metadata()
     assert meta is not None and meta.duration is None
+
+
+def test_pause_is_not_a_toggle():
+    """A caller that wants silence must not start playback because the track
+    happened to be paused already."""
+    from unittest.mock import MagicMock
+
+    calls = []
+    monkey = MagicMock(side_effect=lambda cmd, **kw: calls.append(cmd) or
+                       MagicMock(stdout="", returncode=0))
+    import karaoke.playerctl as pc
+    original = pc._run
+    pc._run = lambda cmd, **kw: calls.append(cmd) or ""
+    try:
+        pc.pause("spotify")
+    finally:
+        pc._run = original
+    assert calls and calls[-1][-1] == "pause"
