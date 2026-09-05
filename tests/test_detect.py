@@ -143,3 +143,67 @@ def test_detect_active_ignores_a_paused_player(monkeypatch):
     det = detect.detect_active()
     assert det.mode == "spotify"
     assert det.title == "Aqualung"
+
+
+# --- the album survives detection ------------------------------------------
+#
+# Players publish xesam:album, playerctl parsed it and normalize_player_track
+# carried it as far as SongRef -- and then classify dropped it, one field short
+# of being storable. Nothing downstream could pass on what it never received.
+
+def test_a_detection_carries_the_album():
+    meta = PlayerMetadata(artist="System Of A Down", title="B.Y.O.B.",
+                          album="Mezmerize", url="", player="chromium",
+                          mpris_name="chromium.instance1")
+    assert classify(meta).album == "Mezmerize"
+
+
+def test_spotify_detections_carry_it_too():
+    meta = PlayerMetadata(artist="Portishead", title="Glory Box", album="Dummy",
+                          url="", player="spotify", mpris_name="spotify")
+    det = classify(meta)
+    assert det.mode == "spotify" and det.album == "Dummy"
+
+
+def test_a_player_with_no_album_is_not_a_problem():
+    meta = PlayerMetadata(artist="A", title="B", album="", url="",
+                          player="vlc", mpris_name="vlc")
+    assert classify(meta).album == ""
+
+
+def test_playing_a_track_fills_in_a_missing_album(tmp_path):
+    """The library holds hundreds of rows with no album; playing one should
+    fill it rather than requiring a re-import."""
+    from karaoke import localcache
+    from karaoke.detect import Detection, record_gap
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.execute("INSERT INTO tracks (artist, title, album)"
+                     " VALUES ('System Of A Down', 'B.Y.O.B.', '')")
+        conn.commit()
+        record_gap(Detection(mode="scan", player="chromium",
+                             artist="System Of A Down", title="B.Y.O.B.",
+                             url="https://youtu.be/x", album="Mezmerize"), conn)
+        rows = conn.execute("SELECT album FROM tracks").fetchall()
+        assert len(rows) == 1                 # updated, not duplicated
+        assert rows[0]["album"] == "Mezmerize"
+    finally:
+        conn.close()
+
+
+def test_a_blank_album_does_not_erase_a_known_one(tmp_path):
+    """A player that omits the album must not wipe what another one supplied."""
+    from karaoke import localcache
+    from karaoke.detect import Detection, record_gap
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.execute("INSERT INTO tracks (artist, title, album)"
+                     " VALUES ('A', 'B', 'Known Album')")
+        conn.commit()
+        record_gap(Detection(mode="scan", player="vlc", artist="A", title="B",
+                             url="https://youtu.be/x", album=""), conn)
+        assert conn.execute("SELECT album FROM tracks").fetchone()[0] == "Known Album"
+    finally:
+        conn.close()

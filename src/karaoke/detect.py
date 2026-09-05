@@ -38,6 +38,10 @@ class Detection:
     title: str = ""
     url: str = ""
     mpris_name: str = ""
+    # Players publish xesam:album and it was parsed all the way to SongRef,
+    # then dropped here -- one field short of being stored. Carrying it is
+    # what lets the library know which record a track came from.
+    album: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -69,11 +73,13 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
     mpris = meta.mpris_name or meta.player
     ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
     if player.startswith("spotify"):
-        return Detection("spotify", meta.player, ref.artist, ref.title, meta.url, mpris_name=mpris)
+        return Detection("spotify", meta.player, ref.artist, ref.title, meta.url,
+                         mpris_name=mpris, album=ref.album)
     # A desktop or browser player is active: sync to its position. Trust a
     # YouTube URL over the (often stale) browser artist/title for display.
     if ref.title or ref.artist or meta.url:
-        return Detection("scan", meta.player, ref.artist, ref.title, meta.url, mpris_name=mpris)
+        return Detection("scan", meta.player, ref.artist, ref.title, meta.url,
+                         mpris_name=mpris, album=ref.album)
     return Detection(mode="browse")
 
 
@@ -268,6 +274,7 @@ def record_gap(det: Detection, conn: sqlite3.Connection) -> None:
             localcache.add_track_source(
                 det.artist or "Unknown",
                 det.title or det.url,
+                album=det.album,
                 url=det.url,
                 kind=kind,
                 player_name=det.player,
