@@ -641,6 +641,7 @@ class KaraokeTui(App):
         # becomes analysable.
         try:
             recorder.reconcile_stale()
+            self._warn_unanalysed_recordings()
         except Exception:
             log.debug("reconciling stale recordings failed", exc_info=True)
         self._poll_detection()
@@ -1194,12 +1195,19 @@ class KaraokeTui(App):
         """
         if self._recording_id is not None:
             recorded, total = recorder.mark_count(self._recording_id)
-            recorder.stop(self._recording_id)
-            self.notify(f"Recording {self._recording_id} stopped "
+            stopped_id = self._recording_id
+            recorder.stop(stopped_id)
+            self.notify(f"Recording {stopped_id} stopped "
                         f"({recorded}/{total} tracks identified)")
             self._recording_id = None
             self._record_marks = None
             self._refresh_record_status()
+            # Recording and analysing were separate steps with nothing joining
+            # them, so finished sessions simply accumulated -- four of them,
+            # nearly a gigabyte, before anyone noticed. Stopping now starts the
+            # analysis.
+            if recorded:
+                self._analyse_recording(stopped_id)
             return
         try:
             session = recorder.start()
@@ -1213,6 +1221,53 @@ class KaraokeTui(App):
         self._recording_id = session.recording_id
         self.notify(f"Recording {session.recording_id} to {session.directory.name}")
         self._refresh_record_status()
+
+    def _analyse_recording(self, recording_id: int) -> None:
+        """Decompile a finished recording, in a worker thread.
+
+        Minutes of work for an evening's audio, so it cannot run on the UI
+        thread; and it is deliberately *not* run on app exit, where starting a
+        long job during shutdown would be worse than leaving it. A session
+        closed that way is caught by the reminder at mount instead.
+        """
+        def _work() -> None:
+            from . import recording_worker
+            try:
+                lines = recording_worker.analyse(recording_id)
+            except Exception as exc:
+                log.exception("recording analysis failed")
+                self.call_from_thread(self.notify,
+                                      f"Analysis failed: {exc}", severity="error")
+                return
+            done = sum(1 for line in lines if line.strip().startswith("ok"))
+            self.call_from_thread(
+                self.notify,
+                f"Recording {recording_id}: {done} track(s) analysed")
+
+        self.notify(f"Analysing recording {recording_id}…")
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            log.debug("analysis dispatch failed", exc_info=True)
+
+    def _warn_unanalysed_recordings(self) -> None:
+        """Point out sessions that finished without being analysed.
+
+        Quitting mid-recording, or a crash, closes the row without analysing
+        it. Without this they are invisible: the audio sits on disk and the
+        tracks never gain their key or BPM.
+        """
+        try:
+            with localcache.connect() as conn:
+                rows = conn.execute(
+                    "SELECT count(*) n FROM recordings WHERE status = 'complete'"
+                ).fetchone()
+        except Exception:
+            return
+        pending = int(rows["n"]) if rows else 0
+        if pending:
+            self.notify(f"{pending} recording(s) awaiting analysis "
+                        f"(karaoke-recording --analyse)", severity="warning")
 
     def _refresh_record_status(self) -> None:
         """Keep the recording indicator current; also catches a died recorder."""
