@@ -51,6 +51,13 @@ from karaoke.lyrics import parse_lrc
 # it the words arrive visibly off the vocal.
 NOTICEABLE_S = 0.3
 
+# A "median shift" only means anything when the error is close to a pure
+# translation. Past this much scatter the lines are not shifted, they are
+# scattered, and there is no single number to read off: GAUPA - Febersvan
+# reported a +59s shift with 72s of jitter on markers that agreed to 0.1s, so
+# spread alone would have let it into a calibration it says nothing about.
+POOLABLE_JITTER_S = 2.0
+
 
 def ground_truth(track_id: int, conn) -> list[tuple[float, str]]:
     """The approved synced lyrics for a track, parsed, or an empty list."""
@@ -145,6 +152,18 @@ def evaluate(recording_id: int, *, model_size: str = "small",
     marks = [m for m in recorder.load_marks(recording_id, conn) if m.ok]
     segments = rs.segments(marks)
 
+    # The final segment of a still-running capture has no following track to
+    # bound it, so its end is inferred and runs long: GAUPA - Febersvan was
+    # scored over 10.1 minutes of span for an 8-minute track, and 20 lyric
+    # lines interpolated across the surplus came out 59s late and 72s
+    # scattered. That measures the open boundary, not the aligner.
+    still_recording = not record["ended_at"]
+    if still_recording and segments:
+        dropped = segments[-1]
+        segments = segments[:-1]
+        print(f"skipping {dropped.artist} - {dropped.title}: last track of a "
+              "capture still in progress, so its end is unbounded")
+
     scorable, skipped_no_lrc = [], 0
     for seg in segments:
         track_id = localcache.find_track_id(seg.artist, seg.title, conn)
@@ -205,15 +224,33 @@ def evaluate(recording_id: int, *, model_size: str = "small",
 
         stats["label"] = f"{seg.artist} - {seg.title}"
         stats["spread"] = seg.spread
+        # A segment whose own markers disagree has an untrustworthy start, so
+        # its shift says nothing about the aligner or about the recognition
+        # lead. Sonic Youth - Dirty Boots reported -29.23s on a spread of
+        # 14.1s while every well-measured track sat near -13.7s; pooling it
+        # would have dragged a load-bearing constant by seconds.
+        confident = rs.is_confident(seg)
+        translated = stats["median_jitter"] <= POOLABLE_JITTER_S
+        stats["trusted"] = confident and translated
+        if not confident:
+            print(f"    NOT POOLED — markers disagree by {seg.spread:.1f}s "
+                  f"(limit {rs.MAX_SPREAD_S:.0f}s), so the start is unreliable")
+        elif not translated:
+            print(f"    NOT POOLED — {stats['median_jitter']:.1f}s of scatter "
+                  "is not a shift, so it calibrates nothing")
         results.append(stats)
         print(f"  scored {stats['lines']} line(s) of "
               f"{stats['scored_of']} in span ({len(words)} whisper words, "
               f"{time.time() - t0:.0f}s)")
         print(f"    median |error|   {stats['median_abs']:6.2f}s")
+        # Deliberately not labelled "the segment boundary". The median only
+        # shows the error is close to a pure translation; what caused the
+        # translation is a separate question, and calling it the boundary
+        # while a high-spread track sat in the sample was an over-claim.
         print(f"    median signed    {stats['median_signed']:+6.2f}s "
-              "(systematic — segment boundary, not the aligner)")
+              "(systematic — a constant shift, cause unproven here)")
         print(f"    median jitter    {stats['median_jitter']:6.2f}s "
-              "(the aligner's own contribution)")
+              "(scatter after removing the shift)")
         print(f"    p90 |error|      {stats['p90_abs']:6.2f}s")
         print(f"    within {NOTICEABLE_S}s      "
               f"{stats['within'] * 100:5.1f}%  "
@@ -223,8 +260,10 @@ def evaluate(recording_id: int, *, model_size: str = "small",
         print("no track could be scored")
         return 0
 
+    trusted = [r for r in results if r["trusted"]]
     print("=" * 62)
-    print(f"{len(results)} track(s) scored")
+    print(f"{len(results)} track(s) scored, {len(trusted)} with a trustworthy "
+          "start")
     print(f"  median |error| across tracks   "
           f"{statistics.median([r['median_abs'] for r in results]):6.2f}s")
     print(f"  median jitter across tracks    "
@@ -234,9 +273,27 @@ def evaluate(recording_id: int, *, model_size: str = "small",
           f"({max(results, key=lambda r: r['p90_abs'])['label']})")
     print(f"  mean within {NOTICEABLE_S}s           "
           f"{statistics.fmean([r['within'] for r in results]) * 100:5.1f}%")
+
+    if trusted:
+        shifts = [r["median_signed"] for r in trusted]
+        print()
+        print("Calibration, from the trusted tracks only:")
+        print(f"  median shift                   "
+              f"{statistics.median(shifts):+6.2f}s")
+        print(f"  range                          "
+              f"{min(shifts):+.2f}s to {max(shifts):+.2f}s")
+        print(f"  recognition lead in force      "
+              f"{rs.RECOGNITION_LEAD_S:6.2f}s")
+        print()
+        print("  A residual shift near zero means the lead is calibrated. A")
+        print("  consistent non-zero one is the amount to move it by; scatter")
+        print("  across tracks means it is not a single constant at all.")
+
     print()
     print("Measured only on tracks that already have synced lyrics, which is")
     print("not the case the aligner exists for. Read it as an upper bound.")
+    print("Whisper is not deterministic, so a difference smaller than the")
+    print("run-to-run spread is not evidence of anything.")
     conn.close()
     return 0
 

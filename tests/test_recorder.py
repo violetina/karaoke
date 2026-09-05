@@ -110,7 +110,12 @@ def test_a_successful_identification_is_stored(db):
     assert len(marks) == 1
     assert marks[0].ok and marks[0].title == "Glory Box"
     assert marks[0].at_offset == 30.0
-    assert marks[0].start_estimate == pytest.approx(marks[0].at_wall - 30.0)
+    # Less the recognition lead: the offset describes the sampled audio, not
+    # the instant the answer was written.
+    from karaoke.recording_slice import RECOGNITION_LEAD_S
+
+    assert marks[0].start_estimate == pytest.approx(
+        marks[0].at_wall - 30.0 - RECOGNITION_LEAD_S)
 
 
 def test_a_failed_identification_is_stored_too(db):
