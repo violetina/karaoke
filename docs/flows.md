@@ -247,13 +247,39 @@ never mistaken for one done on a downloaded master.
 ## Lyric rescue flow
 
 For a track LRCLIB has never heard of. It can be playing with its full lyrics
-on screen — YouTube Music's SONGTEKST tab, attributed to LyricFind — while the
-TUI beside it reports "no lyrics" and queues the track for backfill. Captions
-are no help: those are a video's subtitle track, a different thing from the
-lyrics panel, and most uploads have none.
+on screen — YouTube Music's lyrics tab (SONGTEKST in Dutch), attributed to
+LyricFind or Musixmatch — while the TUI beside it reports "no lyrics" and
+queues the track for backfill. Captions are no help: those are a video's
+subtitle track, a different thing from the lyrics panel, and most uploads have
+none.
 
 The panel has words and no timings. Whisper has the reverse. Joining them is
 the whole flow.
+
+### What you have to do for this to work
+
+This reads what is **on screen**. It is not a service that can be queried, so
+it only captures a track while that track is in front of you, and two things
+are on the listener rather than the code:
+
+1. **Open the song, not the album or a video.** The lyrics tab exists in song
+   mode — the view for a single track. From an album or playlist view there is
+   no panel to read, so nothing is captured however long the track plays.
+2. **Open the lyrics tab itself.** The panel has to be rendered. YouTube Music
+   does not populate that element until the tab has been selected, so a track
+   played with the tab closed yields nothing.
+
+With the tab open it works well and needs no further attention, but it does
+need that once per track.
+
+!!! tip "Play the audio release, not the video"
+
+    Pick the audio version of a track rather than its video whenever both
+    exist. Video edits carry intros, outros and edits the audio release does
+    not, so the same song needs a different sync offset depending on which one
+    played — and an offset saved against one is wrong for the other. It also
+    affects the words: a live or video-only cut can differ from the studio
+    lyric the panel supplies.
 
 `_background_fetch_lyrics()` → `ytmusic_lyrics.for_playing()` →
 `add_track_and_lyrics()` → `_enqueue_sync()` → the worker's `_run_sync()` →
@@ -268,7 +294,7 @@ flowchart TD
     C1 -- no --> E1[give up: no words anywhere]
     C1 -- yes --> D{does the player agree<br/>it is this track?}
     D -- no --> E2[discard: the panel lags a track change]
-    D -- yes --> F[store as plain<br/>source = ytmusic_panel_lyricfind]
+    D -- yes --> F[store as plain<br/>source = ytmusic_panel_&lt;provider&gt;]
     F --> G{has downloadable audio?}
     G -- no --> E3[stop: nothing to align against]
     G -- yes --> H[enqueue 'sync']
