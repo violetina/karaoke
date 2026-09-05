@@ -194,8 +194,10 @@ make the timeline look continuous when it is not.
 ### Decompile
 
 `recording_worker.analyse()` turns markers back into tracks and analyses each
-confident one at full speed. The marker maths lives in
-`recording_slice` as pure functions over markers, testable without any audio.
+confident one at full speed. It runs automatically when a recording is stopped
+with `O`; the CLI and the control API drive the same function by hand. The
+marker maths lives in `recording_slice` as pure functions over markers, testable
+without any audio.
 
 The key move: a marker doesn't merely name a track, it *dates* it —
 `start_wall = at_wall - at_offset`. Every marker of the same track yields an

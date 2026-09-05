@@ -31,7 +31,17 @@ marks, size, source, blinking dot).
 
 ## Decompile
 
-Offline, at full speed — an evening analyses in minutes:
+Offline, at full speed — an evening analyses in minutes.
+
+**Stopping with `O` starts this automatically.** Recording and analysing used to
+be separate steps with nothing joining them, so finished sessions just
+accumulated: four of them, 987 MB, before anyone noticed. A session that
+identified nothing is skipped, since with no markers there is no track list to
+cut. Analysis deliberately does *not* run on app exit — starting minutes of work
+during shutdown would be worse than leaving it — so a session closed by quitting
+mid-recording is caught by the reminder at mount instead.
+
+To drive it by hand, or to pick up a session closed that way:
 
 ```bash
 make recordings                 # list sessions
@@ -55,10 +65,41 @@ A row still marked `recording` with nothing running is a crash, not a live
 capture. `recorder.reconcile_stale()` closes those out (the TUI runs it on
 mount) so the listing doesn't lie and the audio becomes analysable.
 
+The TUI also stops any capture it owns on exit — without that the ffmpeg child
+outlived the app, its row stayed `recording` forever, and the next TUI started a
+*second* recorder on the same source. One ran unparented for 1h51m alongside a
+live one before this was fixed.
+
+At mount it reports how many finished sessions are still unanalysed. Otherwise
+they are invisible: the audio sits on disk and the tracks never gain a key.
+
 ## HTTP
 
-Record-mode sessions are also exposed over the API: `GET /api/recordings` and
-`GET /api/recordings/{id}`.
+Inspecting a session is read-only over SQLite, so it lives in the
+cluster-deployable API:
+
+```
+GET /api/recordings          sessions with marks, size, status
+GET /api/recordings/{id}     one session and the track list it resolves to
+```
+
+Driving one needs PipeWire, a desktop audio session and a long-lived ffmpeg
+child, none of which exist in a container, so that lives in the host-side
+control API:
+
+```
+POST   /api/record/start
+POST   /api/record/stop
+GET    /api/record/status
+POST   /api/recordings/{id}/analyse     returns immediately; poll the status
+DELETE /api/recordings/{id}/audio       drop the audio, keep the markers
+```
+
+Two distinctions the responses keep separate on purpose: `status` is what the
+database says while `running` is whether a capture is live *in the answering
+process* (a row can read `recording` after a crash, and sessions live only in
+the process that started them); and a failed capture is 409 while a missing
+audio stack is 503, because collapsing them would hide which one to fix.
 
 ## Related
 
