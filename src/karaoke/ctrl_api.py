@@ -10,6 +10,8 @@ be exposed to the network.
 """
 from __future__ import annotations
 
+import html
+import json
 import os
 from typing import Any, Optional
 from urllib.parse import quote_plus
@@ -212,6 +214,97 @@ def record_discard(recording_id: int) -> dict[str, Any]:
     freed = recording_worker.discard_audio(recording_id)
     return {"status": "discarded", "recording_id": recording_id,
             "freed_bytes": freed}
+
+
+# Deliberately plain. This page exists to hold one <audio> element and to
+# declare what is playing; anything more would be a second UI competing with
+# the TUI, which is where browsing actually happens.
+_TRACK_PAGE = """<!doctype html>
+<meta charset="utf-8">
+<title>{artist} - {title}</title>
+<style>
+  body {{ background:#111; color:#eee; font:16px/1.5 sans-serif;
+         display:flex; flex-direction:column; align-items:center;
+         justify-content:center; height:100vh; margin:0; gap:1rem; }}
+  .artist {{ opacity:.7 }}
+  button {{ font-size:1.2rem; padding:.6rem 1.4rem; cursor:pointer }}
+  audio {{ width:min(90vw, 40rem) }}
+</style>
+<div class="artist">{artist}</div>
+<h1>{title}</h1>
+<audio id="a" src="{src}" controls preload="auto"></audio>
+<button id="go" hidden>Play</button>
+<script>
+  const a = document.getElementById('a'), go = document.getElementById('go');
+  // Chromium republishes this over MPRIS, so playerctl reports the real track
+  // and the existing detection path needs no special case for recordings.
+  if ('mediaSession' in navigator) {{
+    navigator.mediaSession.metadata = new MediaMetadata({{
+      title: {title_js}, artist: {artist_js}, album: {album_js}
+    }});
+  }}
+  a.play().catch(() => {{ go.hidden = false; }});
+  go.addEventListener('click', () => {{ a.play(); go.hidden = true; }});
+</script>
+"""
+
+
+@app.get("/api/recordings/{recording_id}/tracks/{index}/audio")
+def record_track_audio(recording_id: int, index: int):
+    """One track out of a recording, cut on demand and cached.
+
+    Served rather than played here. The browser window already open for
+    YouTube Music and Spotify is the project's only audio player, and it
+    publishes MPRIS -- which is where position for lyric sync is already read
+    from. Handing it a URL costs no second player and no second clock.
+
+    Starlette's FileResponse answers Range requests, so seeking works without
+    anything further.
+    """
+    from fastapi.responses import FileResponse
+
+    from . import recording_audio
+
+    path = recording_audio.track_audio(recording_id, index)
+    if path is None:
+        raise HTTPException(status_code=404,
+                            detail="No audio for that track")
+    return FileResponse(path, media_type="audio/flac",
+                        filename=path.name)
+
+
+@app.get("/recordings/{recording_id}/tracks/{index}")
+def record_track_page(recording_id: int, index: int):
+    """A page that plays one recorded track, and names it to the desktop.
+
+    The Media Session metadata is the point. Chromium republishes it over
+    MPRIS, so ``playerctl metadata`` reports this track's real artist and
+    title -- which means :mod:`karaoke.detect` identifies it exactly as it
+    does a stream, and lyrics follow with no special case for recordings.
+
+    Autoplay may be refused without a user gesture, so the page tries and
+    falls back to a button rather than sitting silent with no explanation.
+    """
+    from fastapi.responses import HTMLResponse
+
+    from . import recording_audio
+
+    segment = recording_audio.track_segment(recording_id, index)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="No such track")
+
+    raw_artist = segment.artist or "Unknown artist"
+    raw_title = segment.title or "Unknown track"
+    album = f"Recording {recording_id} — track {index}"
+    src = f"/api/recordings/{recording_id}/tracks/{index}/audio"
+    # Escaped for the context each value lands in: HTML entities in the markup,
+    # JSON for the script. A track title is arbitrary text from a third-party
+    # identification service, so it is never pasted into either raw.
+    return HTMLResponse(_TRACK_PAGE.format(
+        artist=html.escape(raw_artist), title=html.escape(raw_title),
+        src=html.escape(src),
+        artist_js=json.dumps(raw_artist), title_js=json.dumps(raw_title),
+        album_js=json.dumps(album)))
 
 
 @app.post("/api/sample")

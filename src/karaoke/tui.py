@@ -391,6 +391,148 @@ class StatsScreen(ModalScreen[None]):
             yield Static(grid)
 
 
+class RecordingBrowseScreen(ModalScreen[None]):
+    """Browse what a recording captured, and play a track back from it.
+
+    Playback goes to the browser window that is already open, because that
+    window publishes MPRIS and the rest of the app already reads position from
+    there. A recorded track therefore syncs its lyrics through exactly the same
+    path a stream does.
+
+    Two levels: sessions, then the tracks inside one. Tracks that cannot be
+    played -- pruned audio, or a stretch that turned out to be silence -- are
+    listed and marked rather than hidden, because a gap in a session is
+    evidence about the session.
+    """
+
+    CSS = """
+    RecordingBrowseScreen { align: center middle; }
+    #rec-dialog {
+        width: 100; height: auto; max-height: 90%;
+        border: thick $accent; padding: 1 2; background: $surface;
+        border-title-align: center;
+    }
+    #rec-table { height: auto; max-height: 24; }
+    #rec-hint { color: $text-muted; height: 1; }
+    """
+
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("B", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, recordings: list[dict]) -> None:
+        super().__init__()
+        self._recordings = recordings
+        self._recording_id: Optional[int] = None
+        self._rows: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rec-dialog") as dialog:
+            dialog.border_title = "Recordings"
+            dialog.border_subtitle = "enter to open · esc to go back"
+            yield DataTable(id="rec-table", cursor_type="row")
+            yield Static("", id="rec-hint")
+
+    def on_mount(self) -> None:
+        self._show_sessions()
+
+    # -- the two levels ---------------------------------------------------
+
+    def _table(self) -> DataTable:
+        return self.query_one("#rec-table", DataTable)
+
+    def _reset(self, *columns: str) -> DataTable:
+        table = self._table()
+        table.clear(columns=True)
+        table.add_columns(*columns)
+        return table
+
+    def _show_sessions(self) -> None:
+        self._recording_id = None
+        table = self._reset("When", "Status", "Tracks", "Audio")
+        for rec in self._recordings:
+            when = time.strftime("%d %b %H:%M", time.localtime(rec["started_at"]))
+            size = rec.get("audio_bytes") or 0
+            table.add_row(
+                when, rec.get("status", ""), str(rec.get("identified", 0)),
+                f"{size / 1_000_000_000:.1f} GB" if size else "gone",
+                key=str(rec["recording_id"]))
+        self.query_one("#rec-hint", Static).update(
+            f"{len(self._recordings)} session(s)")
+
+    def _show_tracks(self, recording_id: int) -> None:
+        from . import recording_audio
+
+        self._recording_id = recording_id
+        self._rows = recording_audio.browse_rows(recording_id)
+        table = self._reset("At", "Artist", "Title", "Length", "")
+        for row in self._rows:
+            at = time.strftime("%H:%M:%S", time.localtime(row["start_wall"]))
+            # Why a row cannot be played matters: "gone" is a retention
+            # decision, "silent" is what the capture actually contains.
+            if not row["playable"]:
+                note = "audio gone"
+            elif row["silent"]:
+                note = "silent"
+            elif not row["confident"]:
+                note = "boundary ?"
+            else:
+                note = ""
+            table.add_row(at, row["artist"][:24], row["title"][:34],
+                          f"{row['duration_s'] / 60:.1f}m", note,
+                          key=str(row["index"]))
+        playable = sum(1 for r in self._rows if r["playable"] and not r["silent"])
+        self.query_one("#rec-hint", Static).update(
+            f"recording {recording_id}: {len(self._rows)} track(s), "
+            f"{playable} playable")
+
+    # -- interaction ------------------------------------------------------
+
+    def action_back(self) -> None:
+        """esc backs out one level, then closes."""
+        if self._recording_id is None:
+            self.dismiss(None)
+        else:
+            self._show_sessions()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        key = event.row_key.value
+        if key is None:
+            return
+        if self._recording_id is None:
+            self._show_tracks(int(key))
+        else:
+            self._play(int(key))
+
+    def _play(self, index: int) -> None:
+        from . import recording_audio
+        from .player_open import open_song_url
+
+        row = next((r for r in self._rows if r["index"] == index), None)
+        if row is None:
+            return
+        if not row["playable"]:
+            self.app.notify("That track's audio has been pruned",
+                            severity="warning")
+            return
+        if self._recording_id is None:
+            return
+
+        url = recording_audio.track_url(self._recording_id, index)
+        try:
+            open_song_url(url, "recording")
+        except Exception:
+            log.debug("could not open recorded track", exc_info=True)
+            self.app.notify("Could not reach the playback window",
+                            severity="error")
+            return
+        self.app.notify(f"Playing {row['title']} from recording "
+                        f"{self._recording_id}")
+        self.dismiss(None)
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """A tiny yes/no modal used for the staging whitelist confirmation."""
 
@@ -524,6 +666,7 @@ class KaraokeTui(App):
         ("O", "toggle_record", "Record"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
+        ("B", "browse_recordings", "Recordings"),
         ("T", "stats", "Stats"),
         ("question_mark", "help", "Keys"),
         Binding("escape", "hide_browse", "Close browse", show=False),
@@ -1341,6 +1484,34 @@ class KaraokeTui(App):
         self._postprocess_enqueued.discard((artist.lower(), title.lower()))
         ok, message = self.approve_postprocess(artist, title, url)
         self.notify(message, severity="information" if ok else "warning")
+
+    def action_browse_recordings(self) -> None:
+        """`B`: browse recorded sessions and play a track out of one."""
+        from . import recording_worker
+
+        try:
+            with localcache.connect() as conn:
+                rows = conn.execute(
+                    "SELECT recording_id, started_at, status, dir,"
+                    "       (SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m"
+                    "         WHERE m.recording_id = r.recording_id) AS identified"
+                    " FROM recordings r"
+                    " WHERE status != 'discarded'"
+                    " ORDER BY recording_id DESC LIMIT 40").fetchall()
+                recordings = [
+                    {"recording_id": r["recording_id"],
+                     "started_at": r["started_at"],
+                     "status": r["status"],
+                     "identified": r["identified"],
+                     "audio_bytes": recording_worker.audio_bytes(r)}
+                    for r in rows]
+        except Exception as exc:
+            self.notify(f"Recordings unavailable: {exc}", severity="error")
+            return
+        if not recordings:
+            self.notify("No recordings yet")
+            return
+        self.push_screen(RecordingBrowseScreen(recordings))
 
     def action_stats(self) -> None:
         """`T`: library, pipeline and listening statistics."""
