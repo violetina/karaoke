@@ -216,6 +216,31 @@ def lyrics_source(panel: PanelLyrics) -> str:
     return f"ytmusic_panel_{provider}"
 
 
+# MPRIS names the browser per instance ("chromium.instance2630031"), so only a
+# prefix comparison survives a restart -- the same reason detect.classify uses
+# one for Spotify.
+_BROWSER_PREFIXES = ("chromium", "chrome", "brave", "firefox")
+
+
+def _is_browser(player: str) -> bool:
+    """Whether an MPRIS player name is the browser the panel lives in."""
+    name = (player or "").strip().casefold()
+    return any(name.startswith(prefix) for prefix in _BROWSER_PREFIXES)
+
+
+def _browser_among(players: list[str]) -> str:
+    """The browser among several playing players, or "" if none is.
+
+    With two things playing at once the panel is only trustworthy if the
+    browser is the one being listened to; anything else and its window is
+    showing a track nobody is hearing.
+    """
+    for player in players:
+        if _is_browser(player):
+            return player
+    return ""
+
+
 def capture_for_playing(
         artist: str, title: str) -> tuple[Optional[str], Optional[PanelLyrics]]:
     """What the panel is showing for this track, and which kind it is.
@@ -227,11 +252,30 @@ def capture_for_playing(
     """
     from . import detect, playerctl
 
+    # The panel belongs to the browser window. Any other player -- Spotify,
+    # most obviously -- leaves that window showing whatever it played last,
+    # and reading it then attributes one app's lyrics to another app's track.
+    #
+    # This is not hypothetical: Spotify played "Mount Hush - All I See" while
+    # the YouTube Music window still displayed Sonic Youth's "Mary-Christ",
+    # and 1070 characters of the wrong song were stored against the Spotify
+    # track. The check below could not catch it, because both sides of that
+    # comparison were the Spotify track -- what was never verified is that the
+    # *panel* had anything to do with it.
+    playing = playerctl.playing_players()
+    if not playing:
+        return None, None
+    player = playing[0] if len(playing) == 1 else _browser_among(playing)
+    if not _is_browser(player):
+        log.debug("lyrics panel not read: %s is playing, not the browser",
+                  player or "another player")
+        return None, None
+
     panel = read_panel()
     kind = classify(panel)
     if kind is None:
         return None, None
-    meta = playerctl.current_metadata()
+    meta = playerctl.current_metadata(player)
     if meta is None:
         return None, None
     ref = playerctl.normalize_player_track(meta.artist, meta.title,
