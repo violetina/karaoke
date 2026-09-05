@@ -159,12 +159,19 @@ def _row_range(blocks: list[tuple[str, ...]]) -> Optional[tuple[int, int]]:
     return keep[0], keep[-1] + 1
 
 
-def _assemble(words: list[str], rng: tuple[int, int]) -> Optional[BigLine]:
-    """Join per-word blocks side by side over the shared row range."""
+def _assemble(words: list[str], rng: tuple[int, int],
+              font: str = FONT) -> Optional[BigLine]:
+    """Join per-word blocks side by side over the shared row range.
+
+    ``font`` must match whatever measured the words. It defaulted silently
+    before, so passing a narrow font to wrap() and getting wide glyphs back
+    here made every width check compare two different fonts -- and the caller
+    saw only "does not fit".
+    """
     lo, hi = rng
     blocks = []
     for w in words:
-        block = _figlet_rows(w)
+        block = _figlet_rows(w, font)
         if not block:
             return None
         # _figlet_rows already pads every row to the word's width; pad the row
@@ -203,10 +210,10 @@ def render_line(text: str, font: str = FONT) -> Optional[BigLine]:
     if any(not b for b in blocks):
         return None
     rng = _row_range(blocks)
-    return _assemble(words, rng) if rng else None
+    return _assemble(words, rng, font) if rng else None
 
 
-def wrap(text: str, width: int) -> Optional[list[str]]:
+def wrap(text: str, width: int, font: str = FONT) -> Optional[list[str]]:
     """Greedy word wrap measured in RENDERED cells, not characters.
 
     Returns None when a single word cannot fit — a word is never split
@@ -218,7 +225,7 @@ def wrap(text: str, width: int) -> Optional[list[str]]:
 
     widths = []
     for w in words:
-        block = _figlet_rows(w)
+        block = _figlet_rows(w, font)
         if not block:
             return None
         widths.append(len(block[0]))
@@ -243,7 +250,7 @@ def wrap(text: str, width: int) -> Optional[list[str]]:
 
 @lru_cache(maxsize=256)
 def render(text: str, width: int, *,
-           max_rows: int = 2) -> Optional[tuple[BigLine, ...]]:
+           max_rows: int = 2, font: str = FONT) -> Optional[tuple[BigLine, ...]]:
     """Render ``text`` big enough to fit ``width``, or None to fall back.
 
     ``None`` is a normal outcome, not an error: a narrow terminal, a line too
@@ -255,11 +262,11 @@ def render(text: str, width: int, *,
     if _renderable_ratio(text) < 1.0 - UNKNOWN_RATIO:
         return None
 
-    whole = render_line(text)
+    whole = render_line(text, font)
     if whole is not None and whole.width <= width:
         return (whole,)
 
-    fragments = wrap(text, width)
+    fragments = wrap(text, width, font)
     if not fragments or len(fragments) > max_rows:
         return None
 
@@ -267,7 +274,7 @@ def render(text: str, width: int, *,
     # share a height and a baseline. Trimming each fragment on its own would
     # give a line with descenders more rows than one without.
     all_words = [w for f in fragments for w in f.split()]
-    blocks = [_figlet_rows(w) for w in all_words]
+    blocks = [_figlet_rows(w, font) for w in all_words]
     if any(not b for b in blocks):
         return None
     rng = _row_range(blocks)
@@ -278,7 +285,7 @@ def render(text: str, width: int, *,
     word_offset = 0
     for fragment in fragments:
         words = fragment.split()
-        line = _assemble(words, rng)
+        line = _assemble(words, rng, font)
         if line is None or line.width > width:
             return None
         # Word numbering stays continuous across the wrap, so the highlight

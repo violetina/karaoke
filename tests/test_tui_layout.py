@@ -468,3 +468,29 @@ def test_ctrl_c_quits_when_nothing_is_sampling(app):
             await pilot.pause()
             assert not app.is_running
     _run(go())
+
+
+def test_the_block_title_survives_a_slightly_short_terminal(app):
+    """The breakpoint used to sit right where people actually work.
+
+    A 148x32 terminal kept its block title and 148x31 lost it, so a tmux status
+    line or a one-row nudge silently changed how the app looks.
+    """
+    async def go():
+        async with app.run_test(size=(148, 31)) as pilot:
+            await pilot.pause()
+            assert not app.screen.has_class("-short")
+            cs = app.query_one("#now-playing").content_size
+            banner = app.title_banner("Swans", "Screen Shot", cs.width or 0,
+                                      (cs.height or 0) - 1)
+            assert not banner.startswith("♪"), "block title lost at 31 rows"
+    _run(go())
+
+
+def test_a_genuinely_short_terminal_still_compacts(app):
+    """The rule has to keep doing its job; only the threshold moved."""
+    async def go():
+        async with app.run_test(size=(148, 24)) as pilot:
+            await pilot.pause()
+            assert app.screen.has_class("-short")
+    _run(go())

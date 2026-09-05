@@ -112,7 +112,12 @@ SYNC_OFFSET_STEP = 0.1
 # real layout at 80x24 showed the fixed panels taking 72% of the screen, so they
 # have to yield rather than squeeze the lyrics into a corner.
 NARROW_COLS = 110
-SHORT_ROWS = 32
+# Below this the header is compacted to a single line, which costs the figlet
+# banner entirely. 32 put the cliff edge right where people actually sit: a
+# 148x32 terminal keeps its block title and 148x31 loses it, so a tmux status
+# line or a one-row nudge silently changed how the app looks. 28 leaves room
+# either side of the common case.
+SHORT_ROWS = 28
 
 # Mic (radio) mode. songrec needs a few seconds of audio; re-identifying every
 # ~30s corrects drift and catches track changes without hammering the service.
@@ -1175,10 +1180,34 @@ class KaraokeTui(App):
         from . import bigtext
 
         plain = f"♪ {artist} - {title}"
-        if width < bigtext.MIN_WIDTH or height < 6:
+        # Three different thresholds can drop the banner to plain text and the
+        # only visible sign is that the block type is gone. Saying which one
+        # turns "the figlet disappeared" into "the terminal is two rows too
+        # short", which is a thing the reader can act on.
+        if width < bigtext.MIN_WIDTH:
+            log.debug("banner plain: panel is %d cols, needs %d",
+                      width, bigtext.MIN_WIDTH)
             return plain
+        if height < 6:
+            log.debug("banner plain: %d rows for the banner, needs 6 "
+                      "(terminal under %d rows compacts the header)",
+                      height, SHORT_ROWS)
+            return plain
+        # A long title simply does not fit in the big face: "A Little God in
+        # My Hands" wants 100 columns and the panel has 74, which is why the
+        # banner kept vanishing on perfectly ordinary songs. The smaller face
+        # fits it in 3 rows, so it is tried before giving up on block type
+        # altogether -- a smaller title still reads as a title, plain text does
+        # not.
         rendered = bigtext.render(title, width, max_rows=1)
+        used_small_face = False
         if rendered is None:
+            rendered = bigtext.render(title, width, max_rows=1,
+                                      font=bigtext.SMALL_FONT)
+            used_small_face = rendered is not None
+        if rendered is None:
+            log.debug("banner plain: %r does not fit %d cols in either face",
+                      title, width)
             return plain
         title_rows = list(rendered[0].rows)
         if len(title_rows) + 1 > height:
@@ -1188,7 +1217,11 @@ class KaraokeTui(App):
         # descenders, so a fixed header cannot always hold title-plus-artist in
         # block type -- and dropping the whole banner to plain text over one
         # row of overflow loses far more than dropping the artist to plain does.
-        byline = bigtext.render_line(artist, bigtext.SMALL_FONT)
+        # No byline in block type when the title already had to shrink: two
+        # lines in the same small face read as one wrapped title rather than a
+        # heading and its artist.
+        byline = (None if used_small_face
+                  else bigtext.render_line(artist, bigtext.SMALL_FONT))
         if byline is not None and len(title_rows) + len(byline.rows) <= height:
             fits_width = all(len(r) <= width for r in byline.rows)
             if fits_width:
