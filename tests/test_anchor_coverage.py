@@ -150,3 +150,33 @@ def test_the_report_is_optional_and_costs_callers_nothing():
 
     words = [Word(start=1.0, end=1.4, text="hello", probability=0.9)]
     assert align_lines(["hello"], words, total_duration=10.0)
+
+
+def test_a_transcription_with_no_usable_words_still_reports():
+    """The early-return path fills the report too.
+
+    Leaving it empty let this case slip past both the support flag and the
+    caller's zero-anchor refusal: "Jimi Hendrix - Sweet Angel" was stored as
+    980 characters of whisper_aligned timings with no anchor behind any line
+    and nothing recorded to say so. Found because a reporting script crashed
+    formatting a None, not because anything checked.
+    """
+    from karaoke.lyric_align import align_lines
+
+    report: dict = {}
+    placed = align_lines(["first line", "second line"], [],
+                         total_duration=200.0, report=report)
+
+    assert len(placed) == 2                  # still timed, by weight alone
+    assert report["lines"] == 2
+    assert report["anchored"] == 0           # which is what must be visible
+    assert report["unanchored_fraction"] == 1.0
+
+
+def test_no_lyric_lines_needs_no_report():
+    """Nothing to describe, and the caller has nothing to decide."""
+    from karaoke.lyric_align import align_lines
+
+    report: dict = {}
+    assert align_lines([], [], total_duration=10.0, report=report) == []
+    assert report == {}
