@@ -140,6 +140,40 @@ def capture(seconds: float = DEFAULT_SECONDS, *, dest: Optional[Path] = None,
     return Sample(path=target, seconds=seconds, source=src)
 
 
+def _label_genre(track_id: int, wav_path, conn) -> bool:
+    """Label the sampled excerpt's genre, if CLAP is available.
+
+    Sampling is where this earns the most: a Spotify-only track has no
+    downloadable audio, so the excerpt recorded off the monitor is the only
+    copy that exists, and without it such a track can never be labelled at all.
+
+    Best-effort throughout. A missing model or an unreachable index must not
+    cost the key and tempo that were the point of sampling, so every failure
+    returns False rather than raising.
+    """
+    from . import clap_vector, genre, localcache
+
+    if not clap_vector.available():
+        log.debug("CLAP unavailable; sample not labelled")
+        return False
+    try:
+        vector = clap_vector.embed_audio(str(wav_path))
+        if vector is None:
+            return False
+        verdict = genre.classify(vector, genre.label_vectors())
+        if verdict is None:
+            log.info("sample for track %s matched no genre label", track_id)
+            return False
+        localcache.ensure_genre_table(conn)
+        localcache.record_genre(track_id, verdict, conn,
+                                method=f"clap-zero-shot{METHOD_SUFFIX}")
+        log.info("track %s labelled %s", track_id, genre.describe(verdict))
+        return True
+    except Exception:
+        log.debug("genre labelling failed for track %s", track_id, exc_info=True)
+        return False
+
+
 def analyse_sample(sample: Sample, artist: str = "", title: str = "",
                    *, conn=None) -> "object":
     """Analyse a captured excerpt and, given a track, store the result.
@@ -183,6 +217,7 @@ def analyse_sample(sample: Sample, artist: str = "", title: str = "",
                 analyzer_version=result.version,
                 conn=c,
             )
+            _label_genre(track_id, sample.path, c)
     finally:
         if own:
             c.close()
