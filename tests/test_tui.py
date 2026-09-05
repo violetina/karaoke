@@ -1040,3 +1040,21 @@ def test_a_track_with_only_a_tone_shows_that():
     from karaoke.tui import classification_line
 
     assert classification_line(None, _tone_row()) == "cynical"
+
+
+def test_the_title_banner_is_not_only_for_synced_tracks():
+    """It is what is playing, so it should not depend on the lyrics.
+
+    Drawing it only on the synced branch meant the title silently dropped to a
+    one-line "artist - title" for every track without timings -- the state a
+    track is in before any work has been done on it.
+    """
+    import inspect
+
+    from karaoke.tui import KaraokeTui
+
+    src = inspect.getsource(KaraokeTui._poll_detection)
+    body = src.split("state = lyric_display_state(lyrics)", 1)[1]
+    # One banner, computed before the branches, used by all of them.
+    assert body.count("self.title_banner(") == 1
+    assert body.count('f"{banner}\\n') == 3

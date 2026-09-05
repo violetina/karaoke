@@ -403,3 +403,28 @@ def test_the_art_box_does_not_collapse_before_anything_is_drawn(app):
             await pilot.pause()
             assert app.query_one("#beat-art").region.height >= 8
     _run(go())
+
+
+def test_the_art_and_its_facts_share_one_frame(app):
+    """They describe one track. Three boxes down a narrow column read as three
+    subjects rather than one."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            box = app.query_one("#cover-box").region
+            art = app.query_one("#beat-art").region
+            info = app.query_one("#track-info").region
+            # Both inside the frame, art above the facts.
+            assert box.y <= art.y < info.y
+            assert info.bottom <= box.bottom
+    _run(go())
+
+
+def test_the_frame_hugs_its_contents(app):
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            box = app.query_one("#cover-box").region
+            sidebar = app.query_one("#sidebar").region
+            assert box.height < sidebar.height
+    _run(go())
