@@ -738,9 +738,21 @@ class KaraokeTui(App):
                     margin-top: 1; }
     /* Takes the rest of the column so the reserved space is visibly held. */
     /* 1fr: soaks up the slack, so the panels under it sit at the bottom. */
-    #beat-art { height: 1fr; border: round $surface-lighten-2; padding: 0 1; }
-    /* auto height, so the art above takes whatever is left */
-    #track-info { height: auto; padding: 0 1; margin-top: 1;
+    /* Hugs the art rather than filling the column. Since covers are stored and
+       drawn at their own aspect, the image is 6 rows for a 16:9 thumbnail and
+       11 for a square sleeve -- so a fixed height leaves a gap under one and
+       crops the other, and `1fr` left a gap under both.
+
+       padding is 1 row / 2 columns because a terminal cell is about 2.5x
+       taller than wide (coverart.CELL_ASPECT): equal numbers would look
+       lopsided, and this is what reads as an even margin.
+
+       min-height keeps the box from collapsing before the first render, which
+       would make the whole sidebar jump on every track change. */
+    #beat-art { height: auto; min-height: 10; border: round $surface-lighten-2;
+                padding: 1 2; }
+    /* Takes the slack now that the art no longer does. */
+    #track-info { height: 1fr; padding: 0 1; margin-top: 1;
                   color: $text-muted; }
 
     /* Browse overlay. On its own layer so showing it never resizes #workspace.
@@ -1470,8 +1482,21 @@ class KaraokeTui(App):
 
     def _background_sample(self, artist: str, title: str) -> None:
         """Record and analyse the playing audio, in a worker thread."""
+        def _same_track() -> bool:
+            det = self._det
+            return bool(det.artist == artist and det.title == title)
+
         try:
-            result = sample_audio.sample_and_analyse(artist, title)
+            result = sample_audio.sample_and_analyse(
+                artist, title, should_continue=_same_track)
+        except sample_audio.CaptureAborted:
+            # Not a failure: the track changed under it. Sampling on would have
+            # stored this song's key, tempo and genre against the previous one.
+            log.info("sample abandoned: %s - %s stopped playing", artist, title)
+            self.call_from_thread(
+                self.notify, f"Stopped sampling — {title} ended",
+                severity="warning")
+            return
         except sample_audio.CaptureError as exc:
             log.warning("sample failed: %s", exc)
             self.call_from_thread(self.notify, f"Sample failed: {exc}",
@@ -2422,8 +2447,12 @@ class KaraokeTui(App):
                 source = self.cover_source(url)
                 art = None
                 if source is not None and cols > 3 and rows > 1:
-                    art = coverart.render(source, cols,
-                                          min(rows, cols // coverart.CELL_ASPECT))
+                    # Sized from the width alone. The panel is auto-height now,
+                    # so taking its height as a limit would be circular -- a
+                    # small box would draw small art, which would keep the box
+                    # small. coverart.render derives the rows from the width
+                    # and the cell aspect.
+                    art = coverart.render(source, cols)
                 if art is not None:
                     # Keep it while the source still resolves. Spotify's image
                     # URLs expire and YouTube thumbnails change with
@@ -2475,8 +2504,10 @@ class KaraokeTui(App):
             return None
         try:
             with localcache.connect() as conn:
+                # Same reasoning as the live path: width drives the size,
+                # not the panel height, which now follows the content.
                 return cover_store.render_for_track(
-                    track_id, cols, min(rows, max(1, cols // coverart.CELL_ASPECT)),
+                    track_id, cols, max(1, int(cols / coverart.CELL_ASPECT)),
                     conn)
         except Exception:
             log.debug("could not read stored cover art", exc_info=True)

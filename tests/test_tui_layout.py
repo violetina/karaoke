@@ -377,3 +377,29 @@ def test_the_way_out_is_written_on_the_box(app):
             placeholder = app.query_one("#search-input").placeholder
             assert "esc" in placeholder.lower()
     _run(go())
+
+
+def test_the_art_box_does_not_fill_the_column(app):
+    """It hugs the art instead.
+
+    Covers are drawn at their own aspect -- 6 rows for a 16:9 thumbnail, 11 for
+    a square sleeve -- so `1fr` left a gap under every one of them. A wide
+    terminal is needed or the sidebar is hidden entirely.
+    """
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            art = app.query_one("#beat-art").region
+            sidebar = app.query_one("#sidebar").region
+            assert sidebar.height > 0, "sidebar hidden; terminal too narrow"
+            assert art.height < sidebar.height
+    _run(go())
+
+
+def test_the_art_box_does_not_collapse_before_anything_is_drawn(app):
+    """A zero-height box would make the sidebar jump on every track change."""
+    async def go():
+        async with app.run_test(size=(190, 45)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#beat-art").region.height >= 8
+    _run(go())

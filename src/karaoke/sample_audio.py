@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .logger import log
 
@@ -36,11 +37,22 @@ from .logger import log
 DEFAULT_SECONDS = 45.0
 
 # Below this an excerpt is too short for the key vote to mean anything.
+# How often the abort check runs while recording.
+POLL_SECONDS = 0.5
+
 MIN_SECONDS = 20.0
 
 # Marks the analysis as excerpt-derived wherever it is displayed, so a sampled
 # result is never mistaken for a full-track one.
 METHOD_SUFFIX = "+sample"
+
+
+class CaptureAborted(RuntimeError):
+    """The capture was stopped deliberately, not by a failure.
+
+    Separate from CaptureError because it is not a problem to report: the
+    caller asked to stop, usually because the track changed.
+    """
 
 
 class CaptureError(RuntimeError):
@@ -101,8 +113,16 @@ def monitor_source(sink: str = "") -> str:
 
 
 def capture(seconds: float = DEFAULT_SECONDS, *, dest: Optional[Path] = None,
-            source: str = "") -> Sample:
-    """Record ``seconds`` of the given (or currently playing) monitor source."""
+            source: str = "",
+            should_continue: "Callable[[], bool] | None" = None) -> Sample:
+    """Record ``seconds`` of the given (or currently playing) monitor source.
+
+    ``should_continue`` is polled while recording; returning False stops the
+    capture and raises :class:`CaptureAborted`. That is what a caller passes to
+    mean "the track changed" -- a 45-second sample easily spans a song
+    boundary, and one that does would have its key, tempo and genre stored
+    against whichever track happened to be playing when it began.
+    """
     if seconds < MIN_SECONDS:
         raise CaptureError(
             f"need at least {MIN_SECONDS:.0f}s for a usable estimate")
@@ -123,17 +143,36 @@ def capture(seconds: float = DEFAULT_SECONDS, *, dest: Optional[Path] = None,
     ]
     log.info("sampling %.0fs from %s", seconds, src)
     try:
-        # Generous headroom over `seconds`: ffmpeg has to start up, and a
-        # Bluetooth sink can take a moment to produce its first packets.
-        subprocess.run(cmd, capture_output=True, text=True, check=True,
-                       timeout=seconds + 30)
-    except subprocess.TimeoutExpired as exc:
-        raise CaptureError(f"capture timed out after {seconds:.0f}s") from exc
-    except subprocess.CalledProcessError as exc:
-        raise CaptureError(
-            f"ffmpeg failed: {(exc.stderr or '').strip()[:200]}") from exc
+        # Polled rather than waited on, so a track change can cut it short.
+        # Forty-five seconds is long enough to span a song boundary, and a
+        # sample that does spans two songs: its key, tempo and genre would be
+        # stored against whichever track was named when it started.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
     except FileNotFoundError as exc:
         raise CaptureError("ffmpeg is not installed") from exc
+
+    deadline = time.monotonic() + seconds + 30
+    try:
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise CaptureError(f"capture timed out after {seconds:.0f}s")
+            if should_continue is not None and not should_continue():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                target.unlink(missing_ok=True)
+                raise CaptureAborted("the track changed while sampling")
+            time.sleep(POLL_SECONDS)
+    finally:
+        if proc.poll() is None:                 # never leave ffmpeg orphaned
+            proc.kill()
+    if proc.returncode not in (0, None):
+        stderr = (proc.stderr.read() if proc.stderr else "") or ""
+        raise CaptureError(f"ffmpeg failed: {stderr.strip()[:200]}")
 
     if not target.is_file() or target.stat().st_size == 0:
         raise CaptureError("captured nothing; is the sink silent?")
@@ -226,9 +265,10 @@ def analyse_sample(sample: Sample, artist: str = "", title: str = "",
 
 def sample_and_analyse(artist: str = "", title: str = "",
                        seconds: float = DEFAULT_SECONDS,
-                       *, keep: bool = False, conn=None) -> "object":
+                       *, keep: bool = False, conn=None,
+                       should_continue: "Callable[[], bool] | None" = None) -> "object":
     """Record the playing output and analyse it. Deletes the file unless kept."""
-    sample = capture(seconds)
+    sample = capture(seconds, should_continue=should_continue)
     try:
         return analyse_sample(sample, artist, title, conn=conn)
     finally:
