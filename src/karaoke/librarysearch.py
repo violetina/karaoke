@@ -35,6 +35,35 @@ W_ALBUM = 0.6
 W_ARTIST = 0.4
 W_LYRICS = 0.2
 
+# Lyrics that are Whisper's own guess at the words, with nothing corroborating
+# them. They are worth having -- for an album no source carries they are the
+# only text there is -- but they are not evidence in the way a real lyric is,
+# and matching one should not outrank matching a real one.
+#
+# The failure is not subtle when it happens. Einstuerzende Neubauten's
+# "Installation N deg 1" is stored as
+# "HerausforderDisobeylarationDisobeyedzyIt's the lawczywiscieDisobey not":
+# German and Polish fragments fused without spaces, from a track that is mostly
+# industrial noise.
+TRANSCRIBED_SOURCE = "whisper"
+
+# What a lyric match is worth when the words are a transcription. Not zero:
+# 69 tracks in the library have no other text, and excluding them outright
+# would make them unfindable by their words at all. Low enough that any real
+# lyric match wins.
+TRANSCRIBED_PENALTY = 0.25
+
+
+def is_transcribed(source: str) -> bool:
+    """Whether a lyric source is Whisper guessing at the words.
+
+    Deliberately not "does the source mention whisper". ``whisper_aligned``
+    means the *words* came from a real source and only the timings are
+    Whisper's, so those 94 tracks carry text as trustworthy as any other and
+    must not be penalised. Only the 69 with no corroborating source are.
+    """
+    return (source or "").strip().casefold() == TRANSCRIBED_SOURCE
+
 # How a hit within a field scores, by how deliberate the match looks.
 EXACT = 1.0
 PREFIX = 0.75     # starts with the query, at a word boundary
@@ -119,7 +148,12 @@ def score_row(row, query: str, *, search_lyrics: bool = True) -> tuple[float, tu
     if search_lyrics:
         words = lyrics_score(row["words"] if "words" in row.keys() else "", query)
         if words:
-            parts.append((words * W_LYRICS, "lyrics"))
+            keys = row.keys()
+            guessed = is_transcribed(row["lyrics_source"]
+                                     if "lyrics_source" in keys else "")
+            weight = W_LYRICS * (TRANSCRIBED_PENALTY if guessed else 1.0)
+            parts.append((words * weight,
+                          "lyrics?" if guessed else "lyrics"))
 
     if not parts:
         return (0.0, ())
@@ -138,7 +172,8 @@ def search(query: str, conn: sqlite3.Connection, *, limit: int = 25,
     rows = conn.execute(
         """
         SELECT t.track_id, t.artist, t.title, COALESCE(t.album, '') AS album,
-               COALESCE(l.plain_lyrics, l.synced_lyrics, '') AS words
+               COALESCE(l.plain_lyrics, l.synced_lyrics, '') AS words,
+               COALESCE(l.source, '') AS lyrics_source
         FROM tracks t
         LEFT JOIN lyrics l ON l.track_id = t.track_id AND l.kind = 'approved'
         -- A full-album upload is not something you can pick and play.

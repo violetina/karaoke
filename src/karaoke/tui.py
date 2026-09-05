@@ -152,7 +152,15 @@ def track_info(*, source: str = "", duration: float | None = None,
 
     rows: list[tuple[str, str]] = []
     if source:
-        rows.append(("source", source))
+        # Say plainly when the words are Whisper's guess rather than a real
+        # lyric. Nothing else on screen distinguishes them, and the failure is
+        # not always obvious from the text -- though sometimes it is:
+        # Neubauten's "Installation N 1" is stored as German and Polish
+        # fragments fused without spaces.
+        from .librarysearch import is_transcribed
+
+        rows.append(("source",
+                     f"{source}  (guessed)" if is_transcribed(source) else source))
     if lyric_lines:
         rows.append(("lines", str(lyric_lines)))
     if duration:
