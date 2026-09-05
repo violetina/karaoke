@@ -224,3 +224,123 @@ def test_the_result_is_still_one_time_per_line():
     out = la.align_lines(lines, words, total_duration=25.0)
     assert len(out) == len(lines)
     assert [t for t, _ in out] == sorted(t for t, _ in out)
+
+
+# --- tempo-aware placement -------------------------------------------------
+#
+# "3 words in 4 bars" is a break, not slow singing; and a beat grid is what
+# "too early" is measured against. Both need the tempo the analysis already
+# stores.
+
+def test_beat_and_bar_come_from_the_tempo():
+    assert la.beat_seconds(120.0) == pytest.approx(0.5)
+    assert la.bar_seconds(120.0) == pytest.approx(2.0)
+
+
+def test_an_absurd_tempo_is_ignored():
+    for bpm in (0, None, 5.0, 900.0, "fast"):
+        assert la.beat_seconds(bpm) is None
+
+
+def test_only_the_word_ceiling_scales_with_tempo():
+    """A tempo-scaled *floor* threw away real words: a sixteenth note at 76bpm
+    is 0.197s, but "ya" measured 0.12s on that very track, and dropping it
+    dragged the opening line eight seconds late."""
+    slow_lo, slow_hi = la.word_bounds(76.0)
+    fast_lo, fast_hi = la.word_bounds(152.0)
+    assert slow_lo == fast_lo == la.MIN_WORD_S
+    assert slow_hi > fast_hi
+
+
+def test_a_short_sung_word_survives_a_slow_tempo():
+    assert la.word_span_ok(16.36, 16.48, 76.0)      # "ya", 0.12s
+
+
+def test_a_word_held_across_two_bars_is_rejected():
+    assert not la.word_span_ok(0.0, 10.0, 76.0)
+
+
+# -- breaks -------------------------------------------------------------
+
+def test_a_quiet_stretch_of_bars_is_a_break():
+    bar = la.bar_seconds(120.0)                     # 2.0s
+    quiet = 2.0 + bar * la.BREAK_BARS + 1           # one gap past the window
+    starts = [0.0, 1.0, 2.0, quiet, quiet + 1.0]
+    breaks = la.find_breaks(starts, 120.0)
+    assert len(breaks) == 1
+    assert breaks[0] == (2.0, quiet)
+
+
+def test_ordinary_spacing_is_not_a_break():
+    assert la.find_breaks([0.0, 1.0, 2.0, 3.0], 120.0) == []
+
+
+def test_no_tempo_means_no_break_detection():
+    """Bars are the unit; without a tempo there is nothing to count."""
+    assert la.find_breaks([0.0, 100.0], None) == []
+
+
+def test_lines_are_not_spread_into_a_break():
+    """Distributing evenly across a solo puts lyrics where there is no vocal."""
+    breaks = [(10.0, 40.0)]
+    times = [0.0, None, 50.0]
+    out = la._interpolate(times, None, [1.0, 1.0, 1.0], breaks)
+    assert out[1] <= 10.0 or out[1] >= 40.0
+
+
+def test_sung_span_excludes_a_break():
+    assert la._sung_span(0.0, 50.0, [(10.0, 40.0)]) == pytest.approx(20.0)
+
+
+def test_advancing_skips_over_a_break():
+    """Ten seconds of singing from zero, with a solo at 5-35, lands at 40."""
+    assert la._advance_through_breaks(0.0, 10.0, [(5.0, 35.0)]) == pytest.approx(40.0)
+
+
+# -- the beat grid ------------------------------------------------------
+
+def test_the_grid_phase_is_inferred_from_the_words():
+    """A tempo says how far apart beats are, not where they fall."""
+    beat = 0.5
+    starts = [0.2, 0.7, 1.2, 1.7]                   # all 0.2 past a beat
+    assert la.grid_phase(starts, beat) == pytest.approx(0.2)
+
+
+def test_a_time_near_the_grid_is_snapped():
+    assert la.snap_to_grid(1.02, 0.5, 0.0) == pytest.approx(1.0)
+
+
+def test_a_time_far_off_the_grid_is_left_alone():
+    """A deliberate off-beat entry is not jitter to correct."""
+    assert la.snap_to_grid(1.24, 0.5, 0.0) == pytest.approx(1.24)
+
+
+def test_snapping_without_a_tempo_changes_nothing():
+    assert la.snap_to_grid(1.23, None, 0.0) == pytest.approx(1.23)
+
+
+# -- the opening line ---------------------------------------------------
+
+def test_an_opening_line_matched_to_a_later_repeat_is_pulled_back():
+    """Every other line is constrained by its neighbours; the first has
+    nothing before it, which is why it drifts. Measured 21.16s on a track
+    whose vocal starts at 14.0s."""
+    lines = ["dont fake me", "what's it for"]
+    toks = ["dont", "fake", "me", "dont", "fake", "me"]
+    starts = [14.0, 14.5, 15.0, 21.0, 21.5, 22.0]
+    out = la._correct_opening_anchor([21.0, None], lines, toks, starts, 120.0)
+    assert out[0] == pytest.approx(14.0)
+
+
+def test_an_opening_anchor_that_agrees_is_left_alone():
+    lines = ["dont fake me"]
+    toks = ["dont", "fake", "me"]
+    starts = [14.0, 14.5, 15.0]
+    out = la._correct_opening_anchor([14.2], lines, toks, starts, 120.0)
+    assert out[0] == pytest.approx(14.2)
+
+
+def test_the_opening_anchor_is_never_moved_later():
+    lines = ["dont fake me"]
+    out = la._correct_opening_anchor([5.0], lines, ["dont"], [30.0], 120.0)
+    assert out[0] == pytest.approx(5.0)

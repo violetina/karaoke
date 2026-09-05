@@ -59,7 +59,7 @@ def test_alignment_keeps_the_real_words(conn, monkeypatch, tmp_path):
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
                         lambda path, text=None: [])
     monkeypatch.setattr("karaoke.lyric_align.align_lyrics_to_lrc",
-                        lambda plain, words, total_duration=None:
+                        lambda plain, words, total_duration=None, bpm=None:
                         "[00:00.00] one line\n[00:05.00] two line")
 
     assert pw._run_sync(1, tmp_path / "audio.webm", conn) is True
@@ -85,7 +85,7 @@ def test_an_alignment_that_produces_nothing_is_not_stored(conn, monkeypatch,
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
                         lambda path, text=None: [])
     monkeypatch.setattr("karaoke.lyric_align.align_lyrics_to_lrc",
-                        lambda plain, words, total_duration=None: "")
+                        lambda plain, words, total_duration=None, bpm=None: "")
 
     assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
     row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"

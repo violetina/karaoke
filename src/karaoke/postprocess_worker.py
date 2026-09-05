@@ -140,11 +140,20 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
 
     try:
         words = transcribe_to_words(str(audio_path), text=plain)
-        duration = conn.execute(
-            "SELECT duration FROM tracks WHERE track_id = ?", (track_id,)
-        ).fetchone()
-        lrc = align_lyrics_to_lrc(plain, words,
-                                  total_duration=(duration[0] if duration else None))
+        # track_analysis is created on demand, so the join below raises rather
+        # than simply finding no tempo on a database that has never stored one.
+        track_analysis.ensure_schema(conn)
+        meta = conn.execute(
+            "SELECT t.duration, a.bpm FROM tracks t"
+            " LEFT JOIN track_analysis a ON a.track_id = t.track_id"
+            " WHERE t.track_id = ?", (track_id,)).fetchone()
+        # The tempo is what turns a plausible-looking timestamp into a
+        # musically placed one: it sets the beat grid the lines snap to and the
+        # bar window that identifies an instrumental break.
+        lrc = align_lyrics_to_lrc(
+            plain, words,
+            total_duration=(meta["duration"] if meta else None),
+            bpm=(meta["bpm"] if meta else None))
     except Exception:
         log.exception("postprocess: sync failed for track %s", track_id)
         return False
