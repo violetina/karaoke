@@ -765,6 +765,8 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_notes_table(conn)
     ensure_silence_table(conn)
     ensure_alignment_support_table(conn)
+    from .cover_store import ensure_table as _ensure_cover_art
+    _ensure_cover_art(conn)
     return conn
 
 
