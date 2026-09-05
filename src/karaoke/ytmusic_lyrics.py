@@ -54,6 +54,11 @@ _LYRICS_JS = r"""(() => {
 # message, or the tab still loading.
 MIN_LINES = 4
 
+# The attribution sits inside the same element as the words, so it arrives as a
+# final "line" and would otherwise be sung, timed and stored as lyrics.
+_ATTRIBUTION_LINE = re.compile(r"^\s*(?:bron|source|quelle|fuente)\s*[:\-]",
+                               re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class PanelLyrics:
@@ -65,7 +70,14 @@ class PanelLyrics:
 
     @property
     def lines(self) -> list[str]:
-        return [line for line in self.text.splitlines() if line.strip()]
+        """The lyric lines, without the provider attribution.
+
+        "Bron: LyricFind" is rendered inside the same element as the words, so
+        without this it becomes the last line of every song -- timed, stored,
+        and displayed as something to sing.
+        """
+        return [line for line in self.text.splitlines()
+                if line.strip() and not _ATTRIBUTION_LINE.match(line)]
 
     @property
     def source_name(self) -> str:

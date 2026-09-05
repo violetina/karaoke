@@ -135,3 +135,22 @@ def test_the_tui_survives_a_missing_panel(monkeypatch):
     monkeypatch.setattr(yl, "for_playing", lambda a, t: None)
     app = KaraokeTui.__new__(KaraokeTui)
     assert app._panel_lyrics("A", "B") is None
+
+
+def test_the_attribution_is_not_a_lyric():
+    """It renders inside the same element as the words, so without stripping
+    it becomes the last line of every song -- timed, stored and sung."""
+    panel = _panel("first\nsecond\nthird\nfourth\nBron: LyricFind")
+    assert "Bron: LyricFind" not in panel.lines
+    assert panel.lines[-1] == "fourth"
+
+
+def test_an_english_attribution_is_stripped_too():
+    panel = _panel("a\nb\nc\nd\nSource: Musixmatch")
+    assert len(panel.lines) == 4
+
+
+def test_a_lyric_mentioning_a_source_survives():
+    """Only a leading "Bron:"/"Source:" is an attribution."""
+    panel = _panel("the source of all my trouble\nb\nc\nd")
+    assert panel.lines[0] == "the source of all my trouble"

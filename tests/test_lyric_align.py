@@ -1,4 +1,6 @@
 """Tests for laying real lyrics onto Whisper's rhythm (offline)."""
+import pytest
+
 from karaoke import lyric_align as la
 from karaoke.whisper_sync import Word
 
@@ -118,3 +120,107 @@ def test_whisper_hearing_extra_words_does_not_shift_lines():
     out = la.align_lines(lyrics, words)
     assert out[0][0] == 5.0
     assert out[1][0] == 9.0
+
+
+# --- word length and singing rate ------------------------------------------
+#
+# Timings were derived from word *starts* alone, and untimed lines were spaced
+# evenly. Both ignore how long a line takes to sing, which is what made an
+# otherwise well-anchored alignment feel off the beat.
+
+class _W:
+    def __init__(self, text, start, end=None):
+        self.text, self.start = text, start
+        self.end = start if end is None else end
+
+
+def test_a_plausible_word_span_is_accepted():
+    assert la.word_span_ok(1.0, 1.4)
+
+
+def test_an_instantaneous_word_is_rejected():
+    """A zero-length word is a decoding glitch, not a syllable."""
+    assert not la.word_span_ok(1.0, 1.001)
+
+
+def test_a_word_spanning_an_instrumental_is_rejected():
+    """Whisper attaches one token to a whole break; anchoring on it puts the
+    line seconds away from the singing."""
+    assert not la.word_span_ok(10.0, 40.0)
+
+
+def test_implausible_words_are_dropped_from_the_stream():
+    toks, starts, last = la._whisper_tokens(
+        [_W("real", 1.0, 1.4), _W("stretched", 2.0, 30.0), _W("also", 31.0, 31.3)])
+    assert toks == ["real", "also"]
+    assert last == pytest.approx(31.3)
+
+
+def test_a_multi_word_token_is_spread_across_its_span():
+    """Stacking them all on the start loses the rhythm inside the token."""
+    toks, starts, _ = la._whisper_tokens([_W("two words", 10.0, 11.0)])
+    assert toks == ["two", "words"]
+    assert starts[0] == pytest.approx(10.0)
+    assert starts[1] == pytest.approx(10.5)
+
+
+def test_a_longer_line_weighs_more():
+    short = la.line_weight("what's it for")
+    long = la.line_weight(
+        "no, don't fake me don't ya know no one's ready for your war")
+    assert long > short * 2
+
+
+def test_even_a_one_word_line_has_weight():
+    assert la.line_weight("hey") >= 1.0
+    assert la.line_weight("") == 0.0
+
+
+# -- weighted interpolation ---------------------------------------------
+
+def test_untimed_lines_are_spaced_by_length_not_evenly():
+    """A long line and a two-word line should not take the same time."""
+    times = [0.0, None, None, 12.0]
+    weights = [1.0, 10.0, 2.0, 1.0]
+    out = la._interpolate(times, None, weights)
+    first_gap = out[1] - out[0]
+    second_gap = out[2] - out[1]
+    assert second_gap > first_gap * 3     # the long line eats the gap
+
+
+def test_interpolation_stays_non_decreasing():
+    out = la._interpolate([5.0, None, None, 1.0], None, [1.0] * 4)
+    assert out == sorted(out)
+
+
+# -- rejecting impossible anchors ---------------------------------------
+
+def test_an_anchor_needing_impossible_speed_is_dropped():
+    """Repeated lyrics let the matcher anchor a late line to an early repeat.
+    On a real track that pinned twenty lines into four seconds."""
+    weights = [10.0] * 5
+    per_line = [0.0, None, None, None, 1.0]      # 4 long lines in 1 second
+    kept = la._drop_impossible_anchors(per_line, weights)
+    assert kept[4] is None                        # the suspect anchor is gone
+    assert kept[0] == 0.0                         # the first is kept
+
+
+def test_a_comfortable_anchor_is_kept():
+    weights = [10.0] * 5
+    per_line = [0.0, None, None, None, 40.0]
+    kept = la._drop_impossible_anchors(per_line, weights)
+    assert kept[4] == 40.0
+
+
+def test_dropping_anchors_leaves_the_first_one_alone():
+    kept = la._drop_impossible_anchors([None, 5.0, 5.1], [10.0] * 3)
+    assert kept[1] == 5.0
+    assert kept[2] is None
+
+
+def test_the_result_is_still_one_time_per_line():
+    lines = ["a longer line here", "short", "another longish line", "end"]
+    words = [_W("longer", 1.0, 1.4), _W("end", 20.0, 20.4)]
+    out = la.align_lines(lines, words, total_duration=25.0)
+    assert len(out) == len(lines)
+    assert [t for t, _ in out] == sorted(t for t, _ in out)
