@@ -2116,6 +2116,11 @@ class KaraokeTui(App):
                 return
             with localcache.connect() as conn:
                 localcache.add_track_and_lyrics(artist, title, found, conn=conn)
+                # Words without timings cannot drive a session. Whisper can
+                # supply the rhythm they lack -- but only from the whole track,
+                # so this goes to the worker rather than being done here.
+                if not found.synced_raw and found.plain:
+                    self._enqueue_sync(artist, title, conn)
             log.info("fetched lyrics for %s - %s (%s)", artist, title, found.source)
             # Force the next poll to re-resolve rather than short-circuit on an
             # unchanged key.
@@ -2123,6 +2128,28 @@ class KaraokeTui(App):
         except Exception as exc:
             log.debug("background lyric fetch failed", exc_info=True)
             self._last_error = f"lyric fetch: {exc}"[:60]
+
+    def _enqueue_sync(self, artist: str, title: str, conn) -> None:
+        """Ask the worker to give plain lyrics a rhythm.
+
+        Only when there is audio to align against: the lyrics panel answers for
+        plenty of tracks whose audio cannot be fetched, and queueing those would
+        fail on every retry the way Spotify-only analysis used to.
+        """
+        from .postprocess_queue import (enqueue_if_needed,
+                                        has_downloadable_source)
+
+        track_id = localcache.find_track_id(artist, title, conn)
+        if track_id is None or not has_downloadable_source(track_id, conn):
+            log.debug("no fetchable audio to sync %s - %s against", artist, title)
+            return
+        row = conn.execute(
+            "SELECT url FROM sources WHERE track_id = ? AND url LIKE '%youtu%'"
+            " LIMIT 1", (track_id,)).fetchone()
+        if enqueue_if_needed(artist, title, (row["url"] if row else "") or "", conn):
+            log.info("queued %s - %s for lyric alignment", artist, title)
+            self.call_from_thread(
+                self.notify, f"Queued {title} for lyric timing")
 
     def _panel_lyrics(self, artist: str, title: str):
         """Lyrics from the player's own lyrics tab, as a Lyrics object.
