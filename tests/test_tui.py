@@ -1004,3 +1004,39 @@ def test_a_track_without_a_genre_still_renders():
     text = track_info(source="lrclib", lyric_lines=42)
     assert "genre" not in text
     assert "lrclib" in text
+
+
+def _tone_row(tone="cynical and sarcastic", score=0.42,
+              runner_up="sad and mournful", runner_up_score=0.30):
+    return {"tone": tone, "score": score, "runner_up": runner_up,
+            "runner_up_score": runner_up_score}
+
+
+def test_a_clear_tone_qualifies_the_genre_in_the_readout():
+    from karaoke.tui import classification_line
+
+    assert classification_line(_genre_row(genre="pop", runner_up="folk",
+                                          runner_up_score=0.4),
+                               _tone_row()) == "cynical pop"
+
+
+def test_an_unclear_tone_does_not_qualify_it():
+    from karaoke.tui import classification_line
+
+    close = _tone_row(score=0.42, runner_up_score=0.415)
+    assert classification_line(_genre_row(genre="pop", runner_up="folk",
+                                          runner_up_score=0.4),
+                               close) == "pop"
+
+
+def test_a_track_with_no_tone_shows_its_genre():
+    from karaoke.tui import classification_line
+
+    assert classification_line(_genre_row(), None) == "trip hop"
+
+
+def test_a_track_with_only_a_tone_shows_that():
+    """The axes are independent: audio may never have been embedded."""
+    from karaoke.tui import classification_line
+
+    assert classification_line(None, _tone_row()) == "cynical"

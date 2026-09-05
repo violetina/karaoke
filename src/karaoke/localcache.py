@@ -536,6 +536,73 @@ def clear_genre(track_id: int, conn: sqlite3.Connection) -> bool:
     return bool(removed)
 
 
+def ensure_tone_table(conn: sqlite3.Connection) -> None:
+    """Create the lyric-tone table in databases predating it."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS track_tone (
+            track_id        INTEGER PRIMARY KEY,
+            tone            TEXT NOT NULL,
+            score           REAL,
+            runner_up       TEXT NOT NULL DEFAULT '',
+            runner_up_score REAL,
+            method          TEXT NOT NULL DEFAULT '',
+            labelled_at     REAL NOT NULL,
+            FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_track_tone_tone ON track_tone (tone);
+    """)
+    conn.commit()
+
+
+def record_tone(track_id: int, verdict: Any, conn: sqlite3.Connection, *,
+                method: str = "embed-zero-shot") -> bool:
+    """Store a lyric's tone. Separate from genre because the two axes come
+    from different material and either can exist without the other: an
+    instrumental has a genre and no tone, and a track whose audio was never
+    embedded can still have its words read."""
+    if verdict is None or not getattr(verdict, "tone", ""):
+        return False
+    conn.execute(
+        """
+        INSERT INTO track_tone (track_id, tone, score, runner_up,
+                                runner_up_score, method, labelled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            tone            = excluded.tone,
+            score           = excluded.score,
+            runner_up       = excluded.runner_up,
+            runner_up_score = excluded.runner_up_score,
+            method          = excluded.method,
+            labelled_at     = excluded.labelled_at
+        """,
+        (track_id, verdict.tone, verdict.score, verdict.runner_up,
+         verdict.runner_up_score, method, time.time()),
+    )
+    conn.commit()
+    return True
+
+
+def clear_tone(track_id: int, conn: sqlite3.Connection) -> bool:
+    """Remove a track's tone, when a re-read decides it cannot be judged."""
+    removed = conn.execute("DELETE FROM track_tone WHERE track_id = ?",
+                           (track_id,)).rowcount
+    conn.commit()
+    return bool(removed)
+
+
+def tone_for(track_id: int, conn: sqlite3.Connection) -> Any:
+    """One track's stored tone row, or None."""
+    return conn.execute(
+        "SELECT * FROM track_tone WHERE track_id = ?", (track_id,)).fetchone()
+
+
+def tone_counts(conn: sqlite3.Connection) -> list:
+    """How many tracks carry each tone, commonest first."""
+    return conn.execute(
+        "SELECT tone, count(*) AS n, avg(score) AS mean_score"
+        "  FROM track_tone GROUP BY tone ORDER BY n DESC").fetchall()
+
+
 def genre_for(track_id: int, conn: sqlite3.Connection) -> Any:
     """One track's stored genre row, or None."""
     return conn.execute(
@@ -854,6 +921,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_notes_table(conn)
     ensure_silence_table(conn)
     ensure_genre_table(conn)
+    ensure_tone_table(conn)
     ensure_alignment_support_table(conn)
     from .cover_store import ensure_table as _ensure_cover_art
     _ensure_cover_art(conn)
