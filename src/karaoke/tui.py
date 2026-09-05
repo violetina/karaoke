@@ -112,7 +112,12 @@ SYNC_OFFSET_STEP = 0.1
 # real layout at 80x24 showed the fixed panels taking 72% of the screen, so they
 # have to yield rather than squeeze the lyrics into a corner.
 NARROW_COLS = 110
-SHORT_ROWS = 32
+# Below this the header is compacted to a single line, which costs the figlet
+# banner entirely. 32 put the cliff edge right where people actually sit: a
+# 148x32 terminal keeps its block title and 148x31 loses it, so a tmux status
+# line or a one-row nudge silently changed how the app looks. 28 leaves room
+# either side of the common case.
+SHORT_ROWS = 28
 
 # Mic (radio) mode. songrec needs a few seconds of audio; re-identifying every
 # ~30s corrects drift and catches track changes without hammering the service.
@@ -864,6 +869,10 @@ class KaraokeTui(App):
         self._log_level = log_level
         self._autoloaded: set[str] = set()
         self._postprocess_enqueued: set[tuple[str, str]] = set()
+        # Tracks already offered to the auto-classifier this session. It only
+        # ever adds what is missing, so a second attempt on the same track is
+        # pure cost.
+        self._classified: set[int] = set()
         self._cpu_sample: tuple | None = None
         self._current_song: tuple[str, str, str] | None = None
         self._lyrics_fetched: set[tuple[str, str]] = set()
@@ -1175,10 +1184,34 @@ class KaraokeTui(App):
         from . import bigtext
 
         plain = f"♪ {artist} - {title}"
-        if width < bigtext.MIN_WIDTH or height < 6:
+        # Three different thresholds can drop the banner to plain text and the
+        # only visible sign is that the block type is gone. Saying which one
+        # turns "the figlet disappeared" into "the terminal is two rows too
+        # short", which is a thing the reader can act on.
+        if width < bigtext.MIN_WIDTH:
+            log.debug("banner plain: panel is %d cols, needs %d",
+                      width, bigtext.MIN_WIDTH)
             return plain
+        if height < 6:
+            log.debug("banner plain: %d rows for the banner, needs 6 "
+                      "(terminal under %d rows compacts the header)",
+                      height, SHORT_ROWS)
+            return plain
+        # A long title simply does not fit in the big face: "A Little God in
+        # My Hands" wants 100 columns and the panel has 74, which is why the
+        # banner kept vanishing on perfectly ordinary songs. The smaller face
+        # fits it in 3 rows, so it is tried before giving up on block type
+        # altogether -- a smaller title still reads as a title, plain text does
+        # not.
         rendered = bigtext.render(title, width, max_rows=1)
+        used_small_face = False
         if rendered is None:
+            rendered = bigtext.render(title, width, max_rows=1,
+                                      font=bigtext.SMALL_FONT)
+            used_small_face = rendered is not None
+        if rendered is None:
+            log.debug("banner plain: %r does not fit %d cols in either face",
+                      title, width)
             return plain
         title_rows = list(rendered[0].rows)
         if len(title_rows) + 1 > height:
@@ -1188,7 +1221,11 @@ class KaraokeTui(App):
         # descenders, so a fixed header cannot always hold title-plus-artist in
         # block type -- and dropping the whole banner to plain text over one
         # row of overflow loses far more than dropping the artist to plain does.
-        byline = bigtext.render_line(artist, bigtext.SMALL_FONT)
+        # No byline in block type when the title already had to shrink: two
+        # lines in the same small face read as one wrapped title rather than a
+        # heading and its artist.
+        byline = (None if used_small_face
+                  else bigtext.render_line(artist, bigtext.SMALL_FONT))
         if byline is not None and len(title_rows) + len(byline.rows) <= height:
             fits_width = all(len(r) <= width for r in byline.rows)
             if fits_width:
@@ -1208,6 +1245,12 @@ class KaraokeTui(App):
 
     def on_resize(self, event) -> None:
         self.apply_size_classes(event.size.width, event.size.height)
+        # Force the header to be drawn again. It is computed once per track --
+        # _poll_detection returns early while the sync key is unchanged -- and
+        # the banner is sized from the panel, so widening the window mid-song
+        # left the title in the plain text it had chosen when the panel was
+        # narrow. It looked exactly like the figlet being broken.
+        self._sync_key = None
 
     def action_toggle_focus(self) -> None:
         """`F`: lyrics only, hiding every other panel."""
@@ -1543,6 +1586,23 @@ class KaraokeTui(App):
             return
         self._cancel_sample = True
         self.notify("Stopping the sample — ctrl+c again to quit")
+
+    def _background_classify(self, track_id: int) -> None:
+        """Label a track that has no genre or tone, in a worker thread.
+
+        Runs behind whatever is playing, so it must not raise and must not be
+        worth noticing. The read-out refreshes only when something was added.
+        """
+        from . import autoclassify
+
+        try:
+            with localcache.connect() as conn:
+                added = autoclassify.run(track_id, conn)
+        except Exception:
+            log.debug("auto-classify failed for %s", track_id, exc_info=True)
+            return
+        if added and track_id == self._current_track_id:
+            self.call_from_thread(self._refresh_track_info, None)
 
     def _background_sample(self, artist: str, title: str) -> None:
         """Record and analyse the playing audio, in a worker thread."""
@@ -2203,6 +2263,17 @@ class KaraokeTui(App):
         # Enqueue background post-processing (key/BPM analysis, word-timing upgrade)
         # if this track is missing derived assets. Best-effort; no-op if the
         # RabbitMQ broker is unreachable.
+        # Fill in genre and tone for a track that has neither. Cheap work only:
+        # autoclassify will not start a recording, so a Spotify track with no
+        # downloadable audio still needs `k`.
+        if (self._current_track_id is not None
+                and self._current_track_id not in self._classified):
+            self._classified.add(self._current_track_id)
+            self.run_worker(
+                lambda tid=self._current_track_id: self._background_classify(tid),
+                exclusive=False, thread=True,
+            )
+
         pp_key = (display_artist.lower(), display_title.lower())
         if pp_key not in self._postprocess_enqueued:
             self._postprocess_enqueued.add(pp_key)

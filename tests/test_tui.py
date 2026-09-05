@@ -1131,3 +1131,50 @@ def test_the_mood_panel_does_not_label_where_the_art_came_from():
 
     src = inspect.getsource(KaraokeTui._update_mood)
     assert "_mood_source" not in src.split("label = Text(")[1]
+
+
+def test_the_plain_fallback_says_why(caplog):
+    """Three thresholds can drop the banner and the only visible sign is that
+    the block type is gone. "the terminal is two rows too short" is actionable;
+    "the figlet disappeared" is not."""
+    import logging
+
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    with caplog.at_level(logging.DEBUG, logger="karaoke"):
+        app.title_banner("A", "B", 20, 99)          # too narrow
+        app.title_banner("A", "B", 200, 2)          # too short
+    text = caplog.text
+    assert "cols" in text and "rows" in text
+
+
+def test_a_long_title_uses_a_smaller_face_rather_than_giving_up():
+    """"A Little God in My Hands" wants 100 columns in the big face and the
+    panel has 74, which is why the banner kept vanishing on ordinary songs. A
+    smaller title still reads as a title; plain text does not."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    out = app.title_banner("Swans", "A Little God in My Hands", 74, 6)
+    assert not out.startswith("♪")
+
+
+def test_a_shrunken_title_does_not_get_a_block_byline():
+    """Two lines in the same small face read as one wrapped title."""
+    from karaoke import bigtext
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    out = app.title_banner("Swans", "A Little God in My Hands", 74, 6)
+    assert out.splitlines()[-1].strip() == "Swans"
+
+
+def test_a_short_title_still_gets_the_big_face_and_a_block_byline():
+    from karaoke import bigtext
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    out = app.title_banner("Swans", "Screen Shot", 74, 6)
+    byline = bigtext.render_line("Swans", bigtext.SMALL_FONT).rows
+    assert out.splitlines()[-len(byline):] == list(byline)

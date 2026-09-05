@@ -168,3 +168,16 @@ def test_render_is_cached():
     a = bt.render(LINE, 110)
     b = bt.render(LINE, 110)
     assert a is b
+
+
+def test_the_font_reaches_every_measurement():
+    """wrap() measured with the font it was given while _assemble rebuilt the
+    glyphs with the default, so every width check compared two different fonts
+    and the caller saw only "does not fit"."""
+    from karaoke import bigtext
+
+    text = "A Little God in My Hands"
+    assert bigtext.render(text, 74, max_rows=1) is None          # big face
+    small = bigtext.render(text, 74, max_rows=1, font=bigtext.SMALL_FONT)
+    assert small is not None
+    assert max(len(r) for r in small[0].rows) <= 74
