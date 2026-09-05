@@ -141,3 +141,33 @@ def test_clap_is_better_spread_than_the_spectral_vector():
     clap_spread = cv.SIMILARITY_NOTABLE - cv.SIMILARITY_TYPICAL
     spectral_spread = search.SIMILARITY_NOTABLE - search.SIMILARITY_TYPICAL
     assert clap_spread > spectral_spread
+
+
+def test_progress_bars_are_disabled_before_loading(monkeypatch):
+    """tqdm builds a multiprocessing.RLock for its write lock, and inside a
+    Textual worker thread that reaches the resource tracker and fails -- so the
+    progress bar took the model load down with it. Every `k` sample logged
+    "CLAP audio embedding failed" while the same call worked from a shell.
+    """
+    import os
+
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    cv._silence_progress_bars()
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert os.environ["TQDM_DISABLE"] == "1"
+
+
+def test_silencing_survives_transformers_being_absent(monkeypatch):
+    """It runs before the import that might fail, so it must not itself fail."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_transformers(name, *args, **kwargs):
+        if name.startswith("transformers"):
+            raise ImportError("no transformers")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_transformers)
+    cv._silence_progress_bars()          # must not raise
