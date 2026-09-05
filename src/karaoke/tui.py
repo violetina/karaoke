@@ -711,7 +711,12 @@ class KaraokeTui(App):
     #main { width: 1fr; padding: 0 1; }
     #visuals { width: 34; border: round magenta; padding: 1; }
     /* Tall enough for the figlet title banner (5 rows + artist + status). */
-    #now-playing { height: 11; border: round green; padding: 0 1; margin-bottom: 1; }
+    /* 9 rather than 11. The banner is a 4-row title over a 2-row artist over
+       the status line -- 7 -- and the two spare rows read as the panel being
+       loose rather than as breathing room. title_banner drops the artist to
+       plain text when a descender pushes either font a row taller, which
+       costs one line instead of the whole block. */
+    #now-playing { height: 9; border: round green; padding: 0 1; margin-bottom: 1; }
     /* overflow-y is hidden, not auto: a scrollbar appearing mid-song steals a
        column and shears the block glyphs, and #lyrics is a non-focusable
        Static so the scrollbar is unreachable by keyboard anyway. */
@@ -1173,9 +1178,22 @@ class KaraokeTui(App):
         if width < bigtext.MIN_WIDTH or height < 6:
             return plain
         rendered = bigtext.render(title, width, max_rows=1)
-        if rendered is None or len(rendered[0].rows) + 1 > height:
+        if rendered is None:
             return plain
-        return "\n".join((*rendered[0].rows, f"  {artist}"))
+        title_rows = list(rendered[0].rows)
+        if len(title_rows) + 1 > height:
+            return plain
+
+        # Ladder rather than all-or-nothing. Both fonts grow a row for
+        # descenders, so a fixed header cannot always hold title-plus-artist in
+        # block type -- and dropping the whole banner to plain text over one
+        # row of overflow loses far more than dropping the artist to plain does.
+        byline = bigtext.render_line(artist, bigtext.SMALL_FONT)
+        if byline is not None and len(title_rows) + len(byline.rows) <= height:
+            fits_width = all(len(r) <= width for r in byline.rows)
+            if fits_width:
+                return "\n".join((*title_rows, *byline.rows))
+        return "\n".join((*title_rows, f"  {artist}"))
 
     # -- responsive chrome ------------------------------------------------
     def apply_size_classes(self, width: int, height: int) -> None:
@@ -2314,8 +2332,10 @@ class KaraokeTui(App):
                 f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
             )
             return
-        label = Text(f"{mood.upper()}  ", style="bold")
-        label.append(self._mood_source, style="dim")
+        # The mood is the label; where the picture came from is not something
+        # to read on every track, and "cover" sat next to the art competing
+        # with it for attention. Kept in _mood_source for the log.
+        label = Text(mood.upper(), style="bold")
         panel.update(Text("\n").join([label, self._mood_art]))
 
     def _refresh_mood_art(self, mood: str) -> None:

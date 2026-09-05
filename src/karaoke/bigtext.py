@@ -38,6 +38,12 @@ from typing import Optional
 # (~3.5 cells per character) and more legible than the alternatives.
 FONT = "small"
 
+# A shorter font for a second line. "threepoint" is three rows against small's
+# five, which is what makes an artist read as a byline under the title rather
+# than as a second heading -- and it is what keeps the header from growing when
+# the artist joined it.
+SMALL_FONT = "threepoint"
+
 # Below this many cells big type is not worth attempting — the wrap would be
 # so aggressive that the plain renderer reads better.
 MIN_WIDTH = 60
@@ -116,11 +122,16 @@ def words_of(text: str) -> list[str]:
 
 
 @lru_cache(maxsize=512)
-def _figlet_rows(word: str) -> tuple[str, ...]:
-    """Rows for one word, padded to equal length. Cached: fonts are slow."""
+def _figlet_rows(word: str, font: str = FONT) -> tuple[str, ...]:
+    """Rows for one word, padded to equal length. Cached: fonts are slow.
+
+    ``font`` exists so a second line can be set smaller than the first: the
+    title carries the panel and the artist sits under it, and at the same size
+    they compete rather than reading as a heading and its byline.
+    """
     from pyfiglet import Figlet
 
-    rendered = Figlet(font=FONT).renderText(word)
+    rendered = Figlet(font=font).renderText(word)
     rows = rendered.split("\n")
     while rows and not rows[-1]:
         rows.pop()                       # trailing newline artefact
@@ -183,12 +194,12 @@ def _assemble(words: list[str], rng: tuple[int, int]) -> Optional[BigLine]:
     return BigLine(tuple(rows), tuple(spans), col, " ".join(words))
 
 
-def render_line(text: str) -> Optional[BigLine]:
+def render_line(text: str, font: str = FONT) -> Optional[BigLine]:
     """Render one line unconditionally, ignoring width. None if unrenderable."""
     words = words_of(text)
     if not words:
         return None
-    blocks = [_figlet_rows(w) for w in words]
+    blocks = [_figlet_rows(w, font) for w in words]
     if any(not b for b in blocks):
         return None
     rng = _row_range(blocks)
