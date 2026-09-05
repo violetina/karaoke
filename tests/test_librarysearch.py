@@ -143,3 +143,86 @@ def test_a_browser_url_is_preferred_over_spotify(conn):
 
 def test_a_track_with_no_source_has_no_url(conn):
     assert ls.playable_url(4, conn) is None
+
+
+# --- harvest_albums matching -----------------------------------------------
+#
+# A featured credit migrates between the artist and title fields depending on
+# the source, and a row can have the two exchanged outright. Both cost albums.
+
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+_HA = _ilu.spec_from_file_location(
+    "harvest_albums", _Path(__file__).resolve().parent.parent
+    / "scripts" / "harvest_albums.py")
+harvest_albums = _ilu.module_from_spec(_HA)
+_HA.loader.exec_module(harvest_albums)
+
+
+def test_bare_title_drops_a_featured_credit():
+    """"Kungs - I FEEL SO BAD ft. Ephemerals" and "Kungs, Ephemerals - I Feel
+    So Bad" are the same song; only the side the credit landed on differs."""
+    assert harvest_albums.bare_title("I FEEL SO BAD ft. Ephemerals") == "I FEEL SO BAD"
+    assert harvest_albums.bare_title(
+        "Instant Crush (feat. Julian Casablancas)") == "Instant Crush"
+
+
+def test_bare_title_keeps_a_version_marker():
+    """A remix is a different recording, not a credit."""
+    assert harvest_albums.bare_title(
+        "Prayer in C (Nitefreak Remix)") == "Prayer in C (Nitefreak Remix)"
+
+
+def test_bare_title_never_empties_a_title():
+    assert harvest_albums.bare_title("feat. Someone") == "feat. Someone"
+
+
+def test_a_credit_difference_no_longer_rejects_the_match():
+    found = {"artist": "Daft Punk, Julian Casablancas",
+             "track": "Instant Crush (feat. Julian Casablancas)"}
+    row = {"artist": "Daft Punk", "title": "Instant Crush ft. Julian Casablancas"}
+    assert harvest_albums._is_same_song(found, row) is True
+
+
+def test_a_different_song_is_still_rejected():
+    found = {"artist": "Boards of Canada", "track": "Ready Lets Go"}
+    row = {"artist": "Boards of Canada", "title": "Music Is Math"}
+    assert harvest_albums._is_same_song(found, row) is False
+
+
+# -- swapped artist/title ------------------------------------------------
+
+def test_a_swap_is_detected_from_the_exchanged_fields():
+    """Not guessed from the strings -- "Faint" and "Linkin Park" carry no clue
+    about which is which. The evidence is the two fields coming back swapped."""
+    found = {"artist": "Linkin Park", "track": "Faint"}
+    row = {"artist": "Faint", "title": "Linkin Park"}
+    assert harvest_albums.looks_swapped(found, row) is True
+
+
+def test_an_ordinary_mismatch_is_not_a_swap():
+    found = {"artist": "Boards of Canada", "track": "Ready Lets Go"}
+    row = {"artist": "Boards of Canada", "title": "Music Is Math"}
+    assert harvest_albums.looks_swapped(found, row) is False
+
+
+def test_a_known_artist_blocks_the_swap(tmp_path):
+    """There is a real band called Mighty Ships with a song called "Tom
+    Waits", so exchanged fields are not proof. An artist naming nine other
+    tracks here is an artist, and that row is not swapped."""
+    from karaoke import localcache
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.executescript("""
+            INSERT INTO tracks (track_id, artist, title) VALUES
+                (1, 'Tom Waits', 'Mighty Ships'),
+                (2, 'Tom Waits', 'Army Ants'),
+                (3, 'Faint', 'Linkin Park');
+        """)
+        conn.commit()
+        assert harvest_albums.artist_used_elsewhere(conn, "Tom Waits", 1) is True
+        assert harvest_albums.artist_used_elsewhere(conn, "Faint", 3) is False
+    finally:
+        conn.close()

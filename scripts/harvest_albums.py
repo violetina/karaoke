@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,19 @@ TIMEOUT_S = 60.0
 COMMIT_EVERY = 10
 
 _FIELDS = "%(album)s|%(artist)s|%(track)s|%(duration)s"
+
+# A featured credit migrates between the artist and title fields depending on
+# the source: "Kungs - I FEEL SO BAD ft. Ephemerals" here,
+# "Kungs, Ephemerals - I Feel So Bad" there. Comparing bare titles keeps the
+# same song from being rejected over which side the credit landed on.
+_FEAT = re.compile(
+    r"\s*[\(\[]?\s*(?:feat\.?|ft\.?|featuring|w/|with)\s+[^)\]]*[\)\]]?\s*$",
+    re.IGNORECASE)
+
+
+def bare_title(title: str) -> str:
+    """A title without its featured-artist credit."""
+    return _FEAT.sub("", title or "").strip() or (title or "").strip()
 
 
 def rows_missing_album(conn, limit: Optional[int] = None) -> list:
@@ -118,9 +132,39 @@ def _is_same_song(found: dict, row) -> bool:
     "Feint, Veela" there -- and rejecting those loses real albums, while
     accepting a different title would attribute the wrong record entirely.
     """
-    if not detect.same_track("", found["track"], "", row["title"]):
+    if not detect.same_track("", bare_title(found["track"]), "",
+                             bare_title(row["title"])):
         return False
     return db_cleanup.are_artists_compatible(found["artist"], row["artist"])
+
+
+def artist_used_elsewhere(conn, artist: str, track_id: int) -> bool:
+    """Whether this artist names other tracks in the library.
+
+    The corroboration a swap needs. There is a real band called Mighty Ships
+    with a song called "Tom Waits", so YouTube Music answering with the fields
+    exchanged is not proof on its own -- but an artist that names nine other
+    tracks here is an artist, and that row is not swapped.
+    """
+    row = conn.execute(
+        "SELECT count(*) n FROM tracks WHERE artist = ? AND track_id != ?",
+        (artist, track_id)).fetchone()
+    return bool(row and int(row["n"]) > 0)
+
+
+def looks_swapped(found: dict, row) -> bool:
+    """Whether this row has its artist and title the wrong way round.
+
+    Not guessed from the strings -- "Faint" and "Linkin Park" carry no clue
+    about which is which. The evidence is that YouTube Music, asked about this
+    row, returns the two fields *exchanged*: our title matches its artist and
+    our artist matches its track.
+    """
+    if not (found.get("artist") and found.get("track")):
+        return False
+    return (detect.same_track("", bare_title(found["track"]), "",
+                              bare_title(row["artist"]))
+            and db_cleanup.are_artists_compatible(found["artist"], row["title"]))
 
 
 def store(conn, track_id: int, album: str, duration: Optional[float]) -> None:
@@ -138,14 +182,26 @@ def store(conn, track_id: int, album: str, duration: Optional[float]) -> None:
 
 def harvest(conn, rows, *, apply: bool,
             pause: float = PAUSE_S) -> tuple[int, int, int]:
-    """Look each track up. Returns (stored, unavailable, wrong song)."""
-    stored = absent = mismatched = 0
+    """Look each track up. Returns (stored, unavailable, wrong song, swapped)."""
+    stored = absent = mismatched = swapped = 0
     for index, row in enumerate(rows, 1):
         label = f"{row['artist']} - {row['title']}"[:46]
         found = lookup(row["artist"], row["title"])
         if not found:
             print(f"[{index}/{len(rows)}] {label:<48} - no result", flush=True)
             absent += 1
+        elif (looks_swapped(found, row)
+              and not artist_used_elsewhere(conn, row["artist"], row["track_id"])):
+            # The row itself is wrong, not the search: repair it, and take the
+            # album while we are here.
+            print(f"[{index}/{len(rows)}] {label:<48} SWAPPED -> "
+                  f"{found['artist']} - {found['track']}"[:110], flush=True)
+            if apply:
+                conn.execute(
+                    "UPDATE tracks SET artist = ?, title = ? WHERE track_id = ?",
+                    (found["artist"], found["track"], row["track_id"]))
+                store(conn, row["track_id"], found["album"], found["duration"])
+            swapped += 1
         elif not _is_same_song(found, row):
             # The search drifted to another song; its album is not this one's.
             print(f"[{index}/{len(rows)}] {label:<48} ~ got "
@@ -166,7 +222,7 @@ def harvest(conn, rows, *, apply: bool,
             conn.commit()
         if pause:
             time.sleep(pause)
-    return stored, absent, mismatched
+    return stored, absent, mismatched, swapped
 
 
 def main() -> int:
@@ -184,8 +240,8 @@ def main() -> int:
             return 0
         print(f"looking up {len(rows)} track(s) on YouTube Music\n")
         try:
-            stored, absent, mismatched = harvest(conn, rows, apply=args.apply,
-                                                 pause=args.pause)
+            stored, absent, mismatched, swapped = harvest(
+                conn, rows, apply=args.apply, pause=args.pause)
         except KeyboardInterrupt:
             if args.apply:
                 conn.commit()
@@ -193,8 +249,8 @@ def main() -> int:
             return 130
         if args.apply:
             conn.commit()
-        print(f"\n{stored} album(s) learned, {absent} unavailable, "
-              f"{mismatched} skipped as a different song"
+        print(f"\n{stored} album(s) learned, {swapped} row(s) un-swapped, "
+              f"{absent} unavailable, {mismatched} skipped as a different song"
               f"{'' if args.apply else '  (dry run — nothing written)'}")
     return 0
 
