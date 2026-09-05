@@ -450,17 +450,59 @@ def _drop_impossible_anchors(per_line: list[Optional[float]],
     return kept
 
 
+def anchor_coverage(per_line: list[Optional[float]],
+                    horizon: Optional[float]) -> tuple[float, float]:
+    """How much of a track the anchors actually cover.
+
+    Returns ``(longest_unanchored_seconds, unanchored_fraction)``.
+
+    Interpolation is only as good as the anchors it runs between. Across a
+    short gap it is reliable; across a long one it is a guess dressed as a
+    measurement -- on GAUPA - Febersvan, anchors existed in the first 58s and
+    after 337s of a 448-second track, and the eleven lines interpolated across
+    the 280-second middle came out up to 183 seconds wrong.
+
+    That gap cannot be closed by matching harder. Whisper heard the vocal at
+    the right moment and got the words wrong ("She'll turn" for "Our
+    shelter"), and no character or phonetic similarity admits that pairing
+    while rejecting "feel"/"fell" and "feel"/"feet", which sit at the same
+    ratio and would manufacture false anchors in a song whose lyric is mostly
+    the word "feel". So the honest move is to notice the drought and say so.
+    """
+    anchored = sorted(t for t in per_line if t is not None)
+    if not anchored:
+        return (horizon or 0.0, 1.0)
+    span = horizon if horizon and horizon > 0 else anchored[-1]
+    if span <= 0:
+        return (0.0, 0.0)
+
+    # Gaps between consecutive anchors, plus the run-in before the first and
+    # the run-out after the last: an alignment anchored only in its opening
+    # thirty seconds is as poorly covered as one anchored only in the middle.
+    edges = [anchored[0]] + [b - a for a, b in zip(anchored, anchored[1:])] \
+        + [max(0.0, span - anchored[-1])]
+    longest = max(edges)
+    return (longest, min(1.0, longest / span))
+
+
 def align_lines(
     lyric_lines: list[str],
     words: Iterable,
     *,
     total_duration: Optional[float] = None,
     bpm: Optional[float] = None,
+    report: Optional[dict] = None,
 ) -> list[tuple[float, str]]:
     """Assign a timestamp to each real lyric line from Whisper word timings.
 
     Returns ``(seconds, line_text)`` with the ORIGINAL line text — punctuation,
     capitalisation and all. Only the timings come from Whisper.
+
+    ``report``, if given, is filled with diagnostics about how well the
+    timings are supported: how many lines were anchored rather than
+    interpolated, and how long the worst unanchored stretch was. A caller can
+    use those to decide whether to trust the result, which matters because a
+    poorly anchored alignment looks exactly like a good one from the outside.
     """
     lines = [ln for ln in (lyric_lines or [])]
     if not lines:
@@ -491,6 +533,22 @@ def align_lines(
 
     per_line = _correct_opening_anchor(per_line, lines, whisper_toks, starts, bpm)
     per_line = _drop_impossible_anchors(per_line, weights)
+    if report is not None:
+        longest, fraction = anchor_coverage(per_line, horizon)
+        report.update(
+            lines=len(lines),
+            anchored=sum(1 for t in per_line if t is not None),
+            longest_gap_s=longest,
+            unanchored_fraction=fraction,
+            # Coverage is measured against the *sung* span, not the file: the
+            # horizon is pulled back to the last heard word so that outros and
+            # trailing silence do not read as a drought. That makes the two
+            # worth reporting separately -- a sung span far shorter than the
+            # track is its own pathology, where every line is crammed into
+            # whatever fragment Whisper happened to hear.
+            horizon_s=horizon,
+            total_duration_s=total_duration,
+        )
     breaks = find_breaks(starts, bpm)
     placed = _interpolate(per_line, horizon, weights, breaks)
 

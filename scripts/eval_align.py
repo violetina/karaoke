@@ -212,9 +212,16 @@ def evaluate(recording_id: int, *, model_size: str = "small",
                 continue
 
         plain = "\n".join(text for _t, text in truth)
-        produced = parse_lrc(lyric_align.align_lyrics_to_lrc(
-            plain, words, total_duration=horizon,
-            bpm=track_bpm(track_id, conn)))
+        report: dict = {}
+        placed = lyric_align.align_lines(
+            [ln for ln in plain.splitlines() if ln.strip()], words,
+            total_duration=horizon, bpm=track_bpm(track_id, conn),
+            report=report)
+        produced = [(t, text) for t, text in placed]
+        if report:
+            print(f"  anchored {report['anchored']}/{report['lines']} lines, "
+                  f"worst unanchored stretch {report['longest_gap_s']:.0f}s "
+                  f"({report['unanchored_fraction'] * 100:.0f}% of the track)")
 
         stats = score(produced, truth, horizon)
         if stats is None:
