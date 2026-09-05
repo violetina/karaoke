@@ -2057,6 +2057,16 @@ class KaraokeTui(App):
                 if source is not None and cols > 3 and rows > 1:
                     art = coverart.render(source, cols,
                                           min(rows, cols // coverart.CELL_ASPECT))
+                if art is not None:
+                    # Keep it while the source still resolves. Spotify's image
+                    # URLs expire and YouTube thumbnails change with
+                    # re-uploads, so this is the only moment the art is
+                    # reliably obtainable.
+                    self._remember_cover(source, url)
+                elif cols > 3 and rows > 1:
+                    # The source is gone or unreadable; a kept copy is what
+                    # makes that recoverable rather than simply blank.
+                    art = self._stored_cover(cols, rows)
                 self.call_from_thread(panel.update, art if art is not None else "")
             except Exception as exc:
                 log.debug("cover art refresh failed", exc_info=True)
@@ -2066,6 +2076,50 @@ class KaraokeTui(App):
             self.run_worker(_work, exclusive=False, thread=True)
         except Exception:
             log.debug("cover art dispatch failed", exc_info=True)
+
+    def _current_track_id(self) -> Optional[int]:
+        """Library id of what is playing, or None."""
+        det = getattr(self, "_det", None)
+        if det is None or not getattr(det, "artist", "") :
+            return None
+        try:
+            with localcache.connect() as conn:
+                return localcache.find_track_id(det.artist, det.title, conn)
+        except Exception:
+            log.debug("could not resolve the playing track", exc_info=True)
+            return None
+
+    def _remember_cover(self, source, url: str) -> None:
+        """Keep the art that just rendered, so it outlives its URL."""
+        from . import cover_store
+
+        track_id = self._current_track_id()
+        if track_id is None or source is None:
+            return
+        try:
+            with localcache.connect() as conn:
+                cover_store.ensure_table(conn)
+                if cover_store.grid_for_track(track_id, conn) is not None:
+                    return          # already kept; sampling again buys nothing
+                cover_store.capture(track_id, source, conn, source_url=url)
+        except Exception:
+            log.debug("could not store cover art", exc_info=True)
+
+    def _stored_cover(self, cols: int, rows: int):
+        """Art from the database, for when the source no longer resolves."""
+        from . import cover_store, coverart
+
+        track_id = self._current_track_id()
+        if track_id is None:
+            return None
+        try:
+            with localcache.connect() as conn:
+                return cover_store.render_for_track(
+                    track_id, cols, min(rows, max(1, cols // coverart.CELL_ASPECT)),
+                    conn)
+        except Exception:
+            log.debug("could not read stored cover art", exc_info=True)
+            return None
 
     def _background_fetch_spotify(self, track_id: int, artist: str,
                                   title: str) -> None:
