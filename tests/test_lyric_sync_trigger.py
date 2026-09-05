@@ -57,7 +57,11 @@ def test_alignment_keeps_the_real_words(conn, monkeypatch, tmp_path):
     from karaoke import postprocess_worker as pw
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
-                        lambda path, text=None: [])
+                        # **kwargs because the real signature also takes
+                        # language=, model_size= and more: a double that
+                        # refuses them fails on a caller change rather than on
+                        # a behaviour change.
+                        lambda path, text=None, **kwargs: [])
 
     def _aligned(lines, words, total_duration=None, bpm=None, report=None):
         # Anchored, so the zero-anchor refusal does not fire: this test is
@@ -90,7 +94,11 @@ def test_an_alignment_that_produces_nothing_is_not_stored(conn, monkeypatch,
     from karaoke import postprocess_worker as pw
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
-                        lambda path, text=None: [])
+                        # **kwargs because the real signature also takes
+                        # language=, model_size= and more: a double that
+                        # refuses them fails on a caller change rather than on
+                        # a behaviour change.
+                        lambda path, text=None, **kwargs: [])
     monkeypatch.setattr("karaoke.lyric_align.align_lines",
                         lambda lines, words, total_duration=None, bpm=None,
                         report=None: [])
@@ -113,7 +121,11 @@ def test_an_alignment_with_no_anchors_at_all_is_not_stored(conn, monkeypatch,
     from karaoke import postprocess_worker as pw
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
-                        lambda path, text=None: [])
+                        # **kwargs because the real signature also takes
+                        # language=, model_size= and more: a double that
+                        # refuses them fails on a caller change rather than on
+                        # a behaviour change.
+                        lambda path, text=None, **kwargs: [])
 
     def _unanchored(lines, words, total_duration=None, bpm=None, report=None):
         if report is not None:
@@ -136,7 +148,11 @@ def test_a_sparsely_anchored_alignment_is_stored_and_flagged(conn, monkeypatch,
     from karaoke import postprocess_worker as pw
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
-                        lambda path, text=None: [])
+                        # **kwargs because the real signature also takes
+                        # language=, model_size= and more: a double that
+                        # refuses them fails on a caller change rather than on
+                        # a behaviour change.
+                        lambda path, text=None, **kwargs: [])
 
     def _sparse(lines, words, total_duration=None, bpm=None, report=None):
         if report is not None:

@@ -149,7 +149,19 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
                      else "whisper_aligned")
 
     try:
-        words = transcribe_to_words(str(audio_path), text=plain)
+        # Tell Whisper the language rather than letting it detect one from the
+        # opening of the audio, which on music is regularly an instrumental
+        # intro. The lyrics are already in hand, so the answer is knowable --
+        # and a wrong language is worse than none, since it produces fluent
+        # words in the wrong vocabulary that then anchor nothing at all.
+        # lyric_language.detect returns None when unsure, which restores the
+        # previous behaviour exactly.
+        from .lyric_language import detect as detect_language
+
+        language = detect_language(plain)
+        if language:
+            log.info("postprocess: transcribing track %s as %s", track_id, language)
+        words = transcribe_to_words(str(audio_path), text=plain, language=language)
         # track_analysis is created on demand, so the join below raises rather
         # than simply finding no tempo on a database that has never stored one.
         track_analysis.ensure_schema(conn)
