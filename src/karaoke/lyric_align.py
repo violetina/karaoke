@@ -51,6 +51,14 @@ MIN_SECONDS_PER_WEIGHT = 0.12
 # inverting them.
 BEATS_PER_BAR = 4
 
+# Confidence below which a word is only trusted if the real lyrics corroborate
+# it. Measured, not guessed: on a track whose vocal onset is known, "neighal"
+# (a pure hallucination before the singing starts) scored 0.001 while "no,",
+# "don\u2019t" and "ya" -- all genuinely sung -- scored 0.000, 0.229 and 0.048.
+# Sung words are inherently low-confidence, so a plain floor discards real ones;
+# what separates them is whether the word appears in the lyrics at all.
+LOW_CONFIDENCE = 0.15
+
 # Only the ceiling scales with tempo. A word cannot credibly span two bars --
 # that is Whisper holding one token across an instrumental -- and two bars is a
 # very different length at 76bpm than at 152.
@@ -145,7 +153,37 @@ def word_span_ok(start: float, end: float,
     return low <= span <= high
 
 
-def _whisper_tokens(words: Iterable, *, bpm: Optional[float] = None
+def trust_word(token: str, probability: Optional[float],
+               lyric_tokens: Optional[set[str]]) -> bool:
+    """Whether a transcribed word is worth anchoring a lyric line to.
+
+    Confidence alone is not enough: singing is indistinct, and the three real
+    words at the start of the measured track scored 0.000, 0.229 and 0.048 --
+    a floor that rejected those would cost the whole opening line.
+
+    So a low-confidence word is kept when the *real lyrics* contain it, and
+    dropped when they do not. That combination is what identifies a
+    hallucination: "neighal" at 0.001 appears nowhere in the song, while "no,"
+    at 0.000 is its first word. The lyrics are information Whisper does not
+    have, and this is where it pays.
+
+    Without lyrics to compare against -- a track no source has words for --
+    only the confidence is available, and it is applied loosely: the goal is
+    to drop obvious junk, not to second-guess the transcription that is the
+    only text there is.
+    """
+    if probability is None:
+        return True
+    if probability >= LOW_CONFIDENCE:
+        return True
+    if lyric_tokens is None:
+        # No corroboration available; reject only near-zero confidence.
+        return probability > 0.005
+    return token in lyric_tokens
+
+
+def _whisper_tokens(words: Iterable, *, bpm: Optional[float] = None,
+                    lyric_tokens: Optional[set[str]] = None
                     ) -> tuple[list[str], list[float], float]:
     """Flatten timestamped Whisper words to (tokens, starts, last end).
 
@@ -165,6 +203,11 @@ def _whisper_tokens(words: Iterable, *, bpm: Optional[float] = None
             continue
         pieces = [normalize_word(raw) for raw in str(getattr(w, "text", "")).split()]
         pieces = [tok for tok in pieces if tok]
+        if not pieces:
+            continue
+        probability = getattr(w, "probability", None)
+        pieces = [tok for tok in pieces
+                  if trust_word(tok, probability, lyric_tokens)]
         if not pieces:
             continue
         # A multi-word token spans its own duration, so spread the pieces
@@ -425,7 +468,8 @@ def align_lines(
 
     lyric_toks, owners = _lyric_tokens(lines)
     weights = [line_weight(ln) for ln in lines]
-    whisper_toks, starts, last_end = _whisper_tokens(words, bpm=bpm)
+    whisper_toks, starts, last_end = _whisper_tokens(
+        words, bpm=bpm, lyric_tokens=set(lyric_toks))
     if not lyric_toks or not whisper_toks:
         return list(zip(_interpolate([None] * len(lines), total_duration, weights),
                         lines))

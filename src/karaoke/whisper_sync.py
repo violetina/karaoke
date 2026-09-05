@@ -18,11 +18,19 @@ _MAX_WORDS = 10         # hard cap on words per line
 
 @dataclass
 class Word:
-    """One word timestamp emitted by faster-whisper."""
+    """One word timestamp emitted by faster-whisper.
+
+    ``probability`` is the model's own confidence in the token, which is the
+    cheapest signal available for telling a heard word from an invented one --
+    faster-whisper computes it and this wrapper used to discard it. None when
+    the transcriber did not report one (a whole-segment fallback, or an older
+    backend).
+    """
 
     start: float
     end: float
     text: str
+    probability: Optional[float] = None
 
 
 def group_words_to_lines(
@@ -127,13 +135,18 @@ def transcribe_to_words(
         vad_filter=vad_filter,
         # Suppress runaway repetition (Whisper looping a line on music beds).
         condition_on_previous_text=False,
+        # faster-whisper's own guard against text invented over silence, which
+        # is where the worst artifacts come from on music: an intro or an
+        # instrumental break gets a plausible-looking line attached to it.
+        hallucination_silence_threshold=2.0,
     )
     words: list[Word] = []
     for seg in segments:
         seg_words = getattr(seg, "words", None)
         if seg_words:
             for w in seg_words:
-                words.append(Word(start=w.start, end=w.end, text=w.word))
+                words.append(Word(start=w.start, end=w.end, text=w.word,
+                                  probability=getattr(w, "probability", None)))
         else:
             # no word timestamps -> fall back to one line per segment
             words.append(Word(start=seg.start, end=seg.end, text=seg.text))
@@ -152,15 +165,31 @@ def transcribe_to_lrc(
     """Transcribe an audio file to LRC text using faster-whisper.
 
     Groups :func:`transcribe_to_words` output into lines and renders LRC. A
-    post-hoc dedup pass drops adjacent repeats. Returns an LRC string (may be
-    empty if nothing was transcribed).
+    post-hoc dedup pass drops adjacent repeats, and
+    :mod:`karaoke.whisper_clean` removes artifacts and runaway repetition --
+    this path is used when nothing else has the words, so nothing else will
+    catch them. Returns an LRC string (may be empty).
     """
     words = transcribe_to_words(
         audio_path, text=text, model_size=model_size, language=language,
         compute_type=compute_type, vad_filter=vad_filter,
     )
     lines = _dedup_adjacent(group_words_to_lines(words))
-    return lines_to_lrc(lines)
+    # Where Whisper is the only source of words there is nothing to corroborate
+    # them against, so the artifacts have to be filtered on their own terms:
+    # note glyphs over instrumentals, bracketed stage directions, and the same
+    # phrase repeated past anything a chorus does.
+    from .whisper_clean import is_artifact, drop_runaway_repeats
+
+    kept = [(t, txt) for t, txt in lines if not is_artifact(txt)]
+    texts = drop_runaway_repeats([txt for _, txt in kept])
+    remaining = list(texts)
+    filtered: list[tuple[float, str]] = []
+    for t, txt in kept:
+        if remaining and remaining[0] == txt:
+            filtered.append((t, txt))
+            remaining.pop(0)
+    return lines_to_lrc(filtered)
 
 
 def _cli() -> int:  # pragma: no cover - manual run
