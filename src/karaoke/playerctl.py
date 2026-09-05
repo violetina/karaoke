@@ -24,6 +24,9 @@ class PlayerMetadata:
     url: str = ""
     player: str = ""
     mpris_name: str = ""
+    # Seconds. MPRIS reports mpris:length in *microseconds*; converted on the
+    # way in so nothing downstream has to know that.
+    duration: Optional[float] = None
 
 
 def _clean_piece(text: str) -> str:
@@ -111,9 +114,25 @@ def normalize_player_track(artist: str, title: str, album: str = "", url: str = 
     return SongRef(artist=a, title=t, album=_clean_piece(album), url=url, source="player")
 
 
+def _length_seconds(raw: str) -> Optional[float]:
+    """Convert an ``mpris:length`` value to seconds, or None.
+
+    The spec puts it in microseconds. Players that do not know the length omit
+    it or report zero -- both mean "unknown", and returning 0.0 would be read
+    downstream as a real, absurdly short track.
+    """
+    try:
+        micros = float(_clean_piece(raw))
+    except (TypeError, ValueError):
+        return None
+    seconds = micros / 1_000_000.0
+    return seconds if seconds > 0 else None
+
+
 def _metadata_format() -> str:
     # Unit Separator between fields; unlikely in song metadata and easy to split.
-    return "{{artist}}\x1f{{title}}\x1f{{album}}\x1f{{xesam:url}}\x1f{{playerName}}"
+    return ("{{artist}}\x1f{{title}}\x1f{{album}}\x1f{{xesam:url}}"
+            "\x1f{{playerName}}\x1f{{mpris:length}}")
 
 
 def list_players() -> list[str]:
@@ -167,7 +186,7 @@ def current_metadata(player: str = "") -> Optional[PlayerMetadata]:
     parts = proc.stdout.rstrip("\n").split("\x1f")
     if len(parts) < 2:
         return None
-    parts += [""] * (5 - len(parts))
+    parts += [""] * (6 - len(parts))
     raw_player = _clean_piece(parts[4])
     player_name = raw_player
     title_text = _clean_piece(parts[1])
@@ -184,6 +203,7 @@ def current_metadata(player: str = "") -> Optional[PlayerMetadata]:
         url=url_text,
         player=player_name,
         mpris_name=raw_player,
+        duration=_length_seconds(parts[5]),
     )
     if not meta.artist and not meta.title:
         return None

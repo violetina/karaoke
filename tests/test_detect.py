@@ -207,3 +207,43 @@ def test_a_blank_album_does_not_erase_a_known_one(tmp_path):
         assert conn.execute("SELECT album FROM tracks").fetchone()[0] == "Known Album"
     finally:
         conn.close()
+
+
+def test_a_detection_carries_the_duration():
+    """Without it the deduplicator's duration guard abstains on every pair."""
+    meta = PlayerMetadata(artist="A", title="B", album="C", url="",
+                          player="vlc", mpris_name="vlc", duration=205.5)
+    assert classify(meta).duration == 205.5
+
+
+def test_playing_a_track_fills_in_a_missing_duration(tmp_path):
+    from karaoke import localcache
+    from karaoke.detect import Detection, record_gap
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.execute("INSERT INTO tracks (artist, title, duration)"
+                     " VALUES ('A', 'B', NULL)")
+        conn.commit()
+        record_gap(Detection(mode="scan", player="vlc", artist="A", title="B",
+                             url="https://youtu.be/x", duration=205.5), conn)
+        rows = conn.execute("SELECT duration FROM tracks").fetchall()
+        assert len(rows) == 1 and rows[0]["duration"] == 205.5
+    finally:
+        conn.close()
+
+
+def test_an_unknown_duration_does_not_erase_a_known_one(tmp_path):
+    from karaoke import localcache
+    from karaoke.detect import Detection, record_gap
+
+    conn = localcache.connect(tmp_path / "t.db")
+    try:
+        conn.execute("INSERT INTO tracks (artist, title, duration)"
+                     " VALUES ('A', 'B', 300.0)")
+        conn.commit()
+        record_gap(Detection(mode="scan", player="vlc", artist="A", title="B",
+                             url="https://youtu.be/x", duration=None), conn)
+        assert conn.execute("SELECT duration FROM tracks").fetchone()[0] == 300.0
+    finally:
+        conn.close()

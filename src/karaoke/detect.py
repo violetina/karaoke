@@ -42,6 +42,9 @@ class Detection:
     # then dropped here -- one field short of being stored. Carrying it is
     # what lets the library know which record a track came from.
     album: str = ""
+    # Seconds. Duration is what lets the deduplicator tell a demo or a live
+    # take from the studio cut; without it that guard abstains on every pair.
+    duration: Optional[float] = None
 
     @property
     def is_active(self) -> bool:
@@ -74,12 +77,14 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
     ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
     if player.startswith("spotify"):
         return Detection("spotify", meta.player, ref.artist, ref.title, meta.url,
-                         mpris_name=mpris, album=ref.album)
+                         mpris_name=mpris, album=ref.album,
+                         duration=meta.duration)
     # A desktop or browser player is active: sync to its position. Trust a
     # YouTube URL over the (often stale) browser artist/title for display.
     if ref.title or ref.artist or meta.url:
         return Detection("scan", meta.player, ref.artist, ref.title, meta.url,
-                         mpris_name=mpris, album=ref.album)
+                         mpris_name=mpris, album=ref.album,
+                         duration=meta.duration)
     return Detection(mode="browse")
 
 
@@ -275,6 +280,7 @@ def record_gap(det: Detection, conn: sqlite3.Connection) -> None:
                 det.artist or "Unknown",
                 det.title or det.url,
                 album=det.album,
+                duration=det.duration,
                 url=det.url,
                 kind=kind,
                 player_name=det.player,
