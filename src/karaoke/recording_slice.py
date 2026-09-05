@@ -8,7 +8,14 @@ hours-long recording be cut back into songs and analysed offline.
 
 The key move is that a marker does not merely name a track, it *dates* it::
 
-    start_wall = at_wall - at_offset
+    start_wall = at_wall - at_offset - RECOGNITION_LEAD_S
+
+That last term is not a fudge factor. ``at_offset`` describes the audio songrec
+*sampled*, while ``at_wall`` is stamped when the answer comes back -- after the
+sample window and the recognition that follows it. Without the correction every
+boundary sits a recognition-cycle late, which is invisible while the boundaries
+are only compared against each other and obvious the moment they are compared
+against a track whose real timings are known.
 
 Every marker of the same track therefore yields an independent estimate of when
 that track began, and those estimates should agree. That is the entire basis for
@@ -36,6 +43,27 @@ from typing import Iterable, Optional
 # have been played twice than to have run continuously with every intervening
 # identification failing.
 MAX_MARK_GAP_S = 240.0
+
+# How long after the sampled audio a marker's timestamp is written. songrec
+# records its own window and then recognises it, while ``add_mark`` stamps
+# ``at_wall`` with the clock at the moment the result is stored -- so a raw
+# ``at_wall - at_offset`` names an instant that is this much *after* the track
+# actually began.
+#
+# Measured, not assumed. Aligning six recorded tracks against their known LRC
+# timings (scripts/eval_align.py) put the bias at -13.09, -13.24, -13.66,
+# -14.22 and -14.24 seconds for the five whose markers agreed to within half a
+# second, with the aligner itself contributing under 0.8s of jitter in each
+# case. The median is taken rather than the mean: one bad segment should not
+# move a constant this load-bearing.
+#
+# player.DEFAULT_LEAD_S (12.6) is the same phenomenon measured on the radio
+# path, and is deliberately left alone -- that path has its own clock, and a
+# shared constant would tie two independently measured things together.
+#
+# Re-measure with `python scripts/eval_align.py <recording>` after any change
+# to the identification cadence or to songrec itself.
+RECOGNITION_LEAD_S = 13.66
 
 # How far apart the per-marker start estimates may sit before the boundary is
 # considered unreliable. songrec offsets are already median-clustered upstream
@@ -66,10 +94,18 @@ class Mark:
 
     @property
     def start_estimate(self) -> Optional[float]:
-        """When the track began, per this marker alone."""
+        """When the track began, per this marker alone.
+
+        Corrected for the recognition lead: ``at_offset`` belongs to the audio
+        songrec sampled, ``at_wall`` to the moment its answer was stored, and
+        the gap between them is a whole sample-and-recognise cycle. Leaving it
+        in put every boundary ~13.7s late, which made aligned lyrics arrive
+        that much early -- the "seems bit too early" that no amount of tuning
+        inside the aligner could fix, because the aligner was not the cause.
+        """
         if self.at_offset is None:
             return None
-        return self.at_wall - self.at_offset
+        return self.at_wall - self.at_offset - RECOGNITION_LEAD_S
 
 
 @dataclass(frozen=True)
@@ -148,7 +184,12 @@ def segment_from(group: list[Mark], *, end_wall: Optional[float] = None) -> Segm
     if end_wall is None:
         # Without a following track, assume it ran at least to the last marker
         # plus whatever of it we had already heard.
-        end_wall = last.at_wall + (last.at_offset or 0.0)
+        #
+        # Corrected by the same lead as the start. This end is derived from the
+        # identical biased clock, so leaving it uncorrected while the start
+        # moved would stretch every unbounded segment by the lead -- a caught
+        # regression: a 150s segment measured 163.66s.
+        end_wall = last.at_wall + (last.at_offset or 0.0) - RECOGNITION_LEAD_S
     return Segment(
         artist=group[0].artist,
         title=group[0].title,
