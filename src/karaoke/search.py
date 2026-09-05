@@ -277,7 +277,14 @@ def similar_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
         conn.close()
 
     print(f"sounds like: {row['artist']} - {row['title']}\n")
-    hits = similar_sounding(track_id, k=args.k)
+    # CLAP where the track has an embedding; the spectral vector otherwise.
+    # They are different spaces, so the CLI says which one answered rather
+    # than presenting two incomparable scores as though they were one scale.
+    hits = sounds_like_track(track_id, k=args.k)
+    space = "clap"
+    if not hits:
+        hits = similar_sounding(track_id, k=args.k)
+        space = "spectral"
     if not hits:
         print("No sound vector for that track.")
         print("Vectors come from record-mode analysis or scripts/vectorize_cached.py,")
@@ -291,7 +298,144 @@ def similar_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
               f"{hit.artist[:22]:24} {hit.title[:26]:28} {key:9} {bpm} "
               f"{hit.source}")
 
-    print(f"\nBetween unrelated tracks the median is {SIMILARITY_TYPICAL:.3f} and "
-          f"the 95th percentile {SIMILARITY_NOTABLE:.3f},")
-    print("so treat anything below 'close' as ordinary rather than a match.")
+    if space == "clap":
+        from .clap_vector import SIMILARITY_NOTABLE as CN
+        from .clap_vector import SIMILARITY_TYPICAL as CT
+
+        print(f"\n[clap] unrelated tracks sit near {CT:.2f}; {CN:.2f} is the "
+              "95th percentile.")
+    else:
+        print(f"\n[spectral] between unrelated tracks the median is "
+              f"{SIMILARITY_TYPICAL:.3f} and the 95th percentile "
+              f"{SIMILARITY_NOTABLE:.3f},")
+        print("so treat anything below 'close' as ordinary rather than a match.")
+    return 0
+
+
+def clap_vector_for(track_id: int, os_client: Any = None) -> Optional[list[float]]:
+    """A track's CLAP embedding, or None if it has not been embedded."""
+    from . import clap_vector
+    from .osclient import client
+
+    c = os_client or client()
+    try:
+        res = c.search(index=clap_vector.CLAP_INDEX, body={
+            "size": 1, "query": {"term": {"track_id": track_id}}})
+    except Exception:
+        return None
+    hits = res["hits"]["hits"]
+    return hits[0]["_source"].get("clap_vector") if hits else None
+
+
+def _clap_hits(res, exclude: set[int], k: int,
+               query_vector: list[float]) -> list[SoundHit]:
+    """Turn a CLAP kNN response into hits, one per track."""
+    from . import clap_vector
+
+    seen = set(exclude)
+    out: list[SoundHit] = []
+    for hit in res["hits"]["hits"]:
+        src = hit["_source"]
+        tid = int(src.get("track_id", 0))
+        if tid in seen:
+            continue
+        seen.add(tid)
+        vector = src.get("clap_vector")
+        out.append(SoundHit(
+            track_id=tid,
+            artist=src.get("artist", ""),
+            title=src.get("title", ""),
+            similarity=(sum(a * b for a, b in zip(query_vector, vector))
+                        if vector else 0.0),
+            source=src.get("source", "") or clap_vector.CLAP_INDEX,
+            detected_key=src.get("detected_key", "") or "",
+            bpm=src.get("bpm"),
+        ))
+        if len(out) >= k:
+            break
+    return out
+
+
+def sounds_like_text(query: str, k: int = 10,
+                     os_client: Any = None) -> list[SoundHit]:
+    """Tracks matching a *description* of how they sound.
+
+    The thing no other search here can do. A lyric query needs a track to have
+    words, and the spectral vector has no text side at all, so an instrumental
+    was unreachable by any query. CLAP puts audio and text in one space, so
+    "heavy distorted guitar rock" returns Mastodon and Dinosaur Jr. from a
+    library the model has never seen.
+    """
+    from . import clap_vector
+    from .osclient import client
+
+    vector = clap_vector.embed_text(query)
+    if vector is None:
+        return []
+    c = os_client or client()
+    try:
+        res = c.search(index=clap_vector.CLAP_INDEX, body={
+            "size": k, "query": {"knn": {"clap_vector": {"vector": vector,
+                                                         "k": k}}}})
+    except Exception:
+        return []
+    return _clap_hits(res, exclude=set(), k=k, query_vector=vector)
+
+
+def sounds_like_track(track_id: int, k: int = 10,
+                      os_client: Any = None) -> list[SoundHit]:
+    """Tracks whose CLAP embedding resembles this one's.
+
+    Preferred over :func:`similar_sounding` where an embedding exists. The
+    spectral vector was measured putting The Cranberries next to Macy Gray,
+    and centring the space widened the scores without reordering them -- the
+    features, not the normalisation, were the limit.
+    """
+    from . import clap_vector
+    from .osclient import client
+
+    vector = clap_vector_for(track_id, os_client)
+    if vector is None:
+        return []
+    c = os_client or client()
+    try:
+        res = c.search(index=clap_vector.CLAP_INDEX, body={
+            "size": max(k * 2, k + 3),
+            "query": {"knn": {"clap_vector": {"vector": vector,
+                                              "k": max(k * 2, k + 3)}}}})
+    except Exception:
+        return []
+    return _clap_hits(res, exclude={track_id}, k=k, query_vector=vector)
+
+
+def describe_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
+    """CLI: find tracks by describing how they sound.
+
+    The query nothing else here can answer. Lyric search needs a track to have
+    words; an instrumental has none, so before this it could not be found by
+    any query at all.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-sounds-like",
+        description='Find tracks by description, e.g. "heavy distorted guitar rock"')
+    ap.add_argument("query", help="a description of the sound")
+    ap.add_argument("-k", type=int, default=8)
+    args = ap.parse_args(argv)
+
+    hits = sounds_like_text(args.query, k=args.k)
+    if not hits:
+        print(f"nothing for {args.query!r}")
+        print("Tracks need a CLAP embedding: scripts/clap_index.py")
+        return 0
+    print(f"sounds like: {args.query!r}\n")
+    for hit in hits:
+        key = hit.detected_key or ""
+        bpm = f"{hit.bpm:5.0f}" if hit.bpm else "     "
+        print(f"  {hit.similarity:+.3f}  {hit.artist[:24]:26} "
+              f"{hit.title[:28]:30} {key:9} {bpm}")
+    print("\nScores are cosine against the text; a description that matches "
+          "nothing\nstill returns its nearest tracks, so read low scores as "
+          "'no real match'.")
     return 0

@@ -137,3 +137,89 @@ def test_an_unreachable_index_returns_nothing_rather_than_raising():
             raise RuntimeError("opensearch down")
 
     assert search.similar_sounding(1, os_client=_Broken()) == []
+
+
+# --- CLAP: text into the same space as audio ------------------------------
+
+class _ClapClient:
+    """Stands in for OpenSearch holding CLAP documents."""
+
+    def __init__(self, own=None, neighbours=()):
+        self._own = own
+        self._neighbours = list(neighbours)
+        self.queries: list[dict] = []
+
+    def search(self, index, body):
+        self.queries.append(body)
+        if "knn" in body.get("query", {}):
+            return {"hits": {"hits": [{"_source": n} for n in self._neighbours]}}
+        return {"hits": {"hits": [{"_source": self._own}] if self._own else []}}
+
+
+def _clap_doc(track_id, artist, title, vector):
+    return {"track_id": track_id, "artist": artist, "title": title,
+            "clap_vector": vector, "source": "library",
+            "detected_key": "", "bpm": None}
+
+
+def _unit(*values):
+    from karaoke.clap_vector import CLAP_DIM
+
+    raw = list(values) + [0.0] * (CLAP_DIM - len(values))
+    norm = sum(v * v for v in raw) ** 0.5 or 1.0
+    return [v / norm for v in raw]
+
+
+def test_a_description_finds_tracks(monkeypatch):
+    """The query nothing else here can answer: an instrumental has no words,
+    so before this it was unreachable by any search at all."""
+    from karaoke import clap_vector
+
+    monkeypatch.setattr(clap_vector, "embed_text", lambda q: _unit(1.0, 0.0))
+    client = _ClapClient(neighbours=[_clap_doc(2, "Mastodon", "The Three Fates",
+                                               _unit(0.9, 0.1))])
+    hits = search.sounds_like_text("heavy distorted guitar rock",
+                                   os_client=client)
+    assert [h.title for h in hits] == ["The Three Fates"]
+    assert hits[0].similarity > 0.9
+
+
+def test_a_description_that_cannot_be_embedded_returns_nothing(monkeypatch):
+    from karaoke import clap_vector
+
+    monkeypatch.setattr(clap_vector, "embed_text", lambda q: None)
+    assert search.sounds_like_text("anything", os_client=_ClapClient()) == []
+
+
+def test_by_example_excludes_the_query_track(monkeypatch):
+    own = _clap_doc(1, "A", "One", _unit(1.0, 0.0))
+    client = _ClapClient(own=own, neighbours=[own, _clap_doc(2, "B", "Two",
+                                                            _unit(0.8, 0.2))])
+    hits = search.sounds_like_track(1, os_client=client)
+    assert [h.track_id for h in hits] == [2]
+
+
+def test_a_track_without_an_embedding_falls_through(monkeypatch):
+    """So the CLI can drop back to the spectral vector rather than show
+    nothing: most of the library is not embedded yet."""
+    assert search.sounds_like_track(99, os_client=_ClapClient()) == []
+
+
+def test_clap_similarity_is_computed_not_taken_from_the_engine():
+    """OpenSearch reports 1/(1+distance); everything here speaks cosine."""
+    own = _clap_doc(1, "A", "One", _unit(1.0, 0.0))
+    client = _ClapClient(own=own,
+                         neighbours=[_clap_doc(2, "B", "Two", _unit(1.0, 0.0))])
+    assert search.sounds_like_track(1, os_client=client)[0].similarity == \
+        pytest.approx(1.0)
+
+
+def test_a_broken_index_returns_nothing_rather_than_raising():
+    class _Broken:
+        def search(self, index, body):
+            raise RuntimeError("down")
+
+    assert search.sounds_like_track(1, os_client=_Broken()) == []
+    from karaoke import clap_vector
+    if clap_vector.available():
+        pass          # embed_text would load the model; not exercised here

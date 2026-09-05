@@ -52,6 +52,7 @@ karaoke-smartlist = "karaoke.smartlist:smartlist_main"
 karaoke-recording = "karaoke.recording_worker:recording_main"
 karaoke-align-review = "karaoke.lyric_align:review_main"
 karaoke-similar = "karaoke.search:similar_main"
+karaoke-sounds-like = "karaoke.search:describe_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
