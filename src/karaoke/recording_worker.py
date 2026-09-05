@@ -46,6 +46,17 @@ METHOD_SUFFIX = "+recording"
 # to mean anything. Matches sample_audio's floor for the same reason.
 MIN_AUDIO_S = 20.0
 
+# Audio is kept after analysis rather than deleted, because analysis is not the
+# only thing that needs it: lyric alignment happens later, when a track has
+# words but no timings, and a Spotify-only track has no other source of audio
+# at all. Deleting immediately made those two steps mutually exclusive.
+#
+# Retention is time first, then size. A week covers the gap between hearing a
+# track and getting round to its lyrics; the cap is the backstop for a week of
+# heavy listening.
+RETAIN_DAYS = 7.0
+MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024
+
 _SEG_NAME = re.compile(r"seg-(\d{8})-(\d{6})\.flac$")
 
 
@@ -333,6 +344,74 @@ def discard_audio(recording_id: int, *, conn=None) -> int:
     return freed
 
 
+def audio_bytes(record) -> int:
+    """Bytes of captured audio still on disk for a recording row."""
+    directory = Path(record["dir"])
+    if not directory.is_dir():
+        return 0
+    try:
+        return sum(f.stat().st_size for f in directory.glob("seg-*.flac")
+                   if f.is_file())
+    except OSError:
+        return 0
+
+
+def prune_recordings(*, retain_days: float = RETAIN_DAYS,
+                     max_bytes: int = MAX_TOTAL_BYTES,
+                     conn=None) -> list[str]:
+    """Drop old or excess recording audio, keeping every marker.
+
+    Markers are tiny and are what the track list is derived from, so they are
+    never deleted -- only the audio goes. A pruned recording can still be
+    inspected with ``--show``; it just cannot be re-analysed.
+
+    Age first, then size, oldest last-played first. ``keep_audio`` pins a
+    recording against the age rule, since that is an explicit choice, but not
+    against the size cap: a pinned session cannot be allowed to fill the disk.
+    """
+    own = conn is None
+    c = conn or localcache.connect()
+    notes: list[str] = []
+    try:
+        rows = c.execute(
+            "SELECT recording_id, dir, status, keep_audio, started_at"
+            " FROM recordings WHERE status != 'recording'"
+            " ORDER BY started_at"
+        ).fetchall()
+        live = [(r, audio_bytes(r)) for r in rows]
+        live = [(r, n) for r, n in live if n > 0]
+        if not live:
+            return notes
+
+        cutoff = time.time() - retain_days * 86400.0
+        for record, size in list(live):
+            if record["keep_audio"]:
+                continue
+            if float(record["started_at"] or 0.0) < cutoff:
+                freed = discard_audio(int(record["recording_id"]), conn=c)
+                notes.append(f"  pruned recording {record['recording_id']}: "
+                             f"{freed / 1e6:.0f} MB, older than "
+                             f"{retain_days:.0f} days")
+                live = [(r, n) for r, n in live
+                        if r["recording_id"] != record["recording_id"]]
+
+        total = sum(n for _, n in live)
+        # Oldest first: the newest session is the one most likely to still be
+        # wanted for the lyrics of something just heard.
+        for record, size in list(live):
+            if total <= max_bytes:
+                break
+            freed = discard_audio(int(record["recording_id"]), conn=c)
+            total -= freed
+            notes.append(f"  pruned recording {record['recording_id']}: "
+                         f"{freed / 1e6:.0f} MB, over the "
+                         f"{max_bytes / 1e9:.0f} GB cap")
+    finally:
+        if own:
+            c.close()
+    return notes
+
+
 def analyse(recording_id: int, *, keep: Optional[bool] = None) -> list[str]:
     """Analyse every confident segment of a recording. Returns status lines."""
     from . import recorder
@@ -372,13 +451,12 @@ def analyse(recording_id: int, *, keep: Optional[bool] = None) -> list[str]:
                   (recording_id,))
         c.commit()
 
-    keep_audio = bool(record["keep_audio"]) if keep is None else keep
-    if not keep_audio:
-        freed = discard_audio(recording_id)
-        lines.append(f"  discarded {freed / 1e6:.0f} MB of audio "
-                     f"({analysed} analysed)")
-    else:
-        lines.append(f"  kept audio in {record['dir']}")
+    # The audio stays. Lyric alignment needs it later, and for a Spotify-only
+    # track there is no other source of it -- deleting here made analysis and
+    # alignment mutually exclusive. Retention handles the disk instead.
+    lines.append(f"  {analysed} analysed; audio kept in {record['dir']}")
+    if keep is not True:
+        lines.extend(prune_recordings())
     return lines
 
 
@@ -446,6 +524,9 @@ def recording_main(argv: Optional[list[str]] = None) -> int:
                     dest="analyse", help="analyse a recording into the database")
     ap.add_argument("--discard", type=int, metavar="ID",
                     help="delete a recording's audio, keeping its markers")
+    ap.add_argument("--prune", action="store_true",
+                    help=f"drop audio older than {RETAIN_DAYS:.0f} days or over "
+                         f"{MAX_TOTAL_BYTES / 1e9:.0f} GB, keeping all markers")
     ap.add_argument("--keep", action="store_true",
                     help="with --analyse, keep the audio afterwards")
     args = ap.parse_args(argv)
@@ -459,11 +540,15 @@ def recording_main(argv: Optional[list[str]] = None) -> int:
     if args.analyse is not None:
         print("\n".join(analyse(args.analyse, keep=args.keep or None)))
         return 0
+    if args.prune:
+        notes = prune_recordings()
+        print("\n".join(notes) if notes else "nothing to prune")
+        return 0
     if args.discard is not None:
         freed = discard_audio(args.discard)
         print(f"freed {freed / 1e6:.0f} MB")
         return 0
-    ap.error("give --list, --show, --analyse or --discard")
+    ap.error("give --list, --show, --analyse, --discard or --prune")
     return 2
 
 

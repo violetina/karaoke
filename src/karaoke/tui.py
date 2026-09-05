@@ -642,6 +642,10 @@ class KaraokeTui(App):
         try:
             recorder.reconcile_stale()
             self._warn_unanalysed_recordings()
+            # Audio is kept after analysis now, so something has to bound it.
+            from . import recording_worker
+            for note in recording_worker.prune_recordings():
+                log.info("recording retention:%s", note)
         except Exception:
             log.debug("reconciling stale recordings failed", exc_info=True)
         self._poll_detection()
