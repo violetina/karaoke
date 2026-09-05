@@ -54,6 +54,20 @@ _LYRICS_JS = r"""(() => {
 # message, or the tab still loading.
 MIN_LINES = 4
 
+# The same description shelf renders the *artist biography* when a track has no
+# lyrics, and it was being stored as one: a Wikipedia paragraph about the band,
+# complete with a view count, saved against four tracks. Prose is easy to tell
+# from lyrics by line length -- a sung line is short, a paragraph is not.
+MAX_MEAN_LINE_CHARS = 90
+
+# Real lyrics carry a provider ("Bron: LyricFind"). The biography carries none,
+# which is the cheapest and most reliable signal that this is not a lyric tab.
+# Prose gives itself away too.
+_PROSE_MARKER = re.compile(
+    r"weergaven|\bviews\b|van wikipedia|from wikipedia|creative commons|"
+    r"https?://|\bCC-BY\b",
+    re.IGNORECASE)
+
 # The attribution sits inside the same element as the words, so it arrives as a
 # final "line" and would otherwise be sung, timed and stored as lyrics.
 _ATTRIBUTION_LINE = re.compile(r"^\s*(?:bron|source|quelle|fuente)\s*[:\-]",
@@ -129,9 +143,34 @@ def read_panel() -> Optional[PanelLyrics]:
                        url=data.get("url", ""))
 
 
+def looks_like_prose(lines: list[str]) -> bool:
+    """Whether these lines are a paragraph rather than a lyric.
+
+    The artist biography renders in the same shelf as the lyrics, so "the tab
+    exists and has text" is not enough. Sung lines are short; a Wikipedia
+    paragraph averages hundreds of characters and mentions its own source.
+    """
+    if not lines:
+        return False
+    mean = sum(len(ln) for ln in lines) / len(lines)
+    if mean > MAX_MEAN_LINE_CHARS:
+        return True
+    return any(_PROSE_MARKER.search(ln) for ln in lines)
+
+
 def usable(panel: Optional[PanelLyrics]) -> bool:
-    """Whether a panel holds enough to be worth storing."""
-    return bool(panel and len(panel.lines) >= MIN_LINES)
+    """Whether a panel holds enough to be worth storing.
+
+    An attribution is required. Real lyrics always name their provider, and
+    its absence is what distinguished the biography that was stored against
+    four tracks from the lyrics that were not there.
+    """
+    if not panel or len(panel.lines) < MIN_LINES:
+        return False
+    if not panel.source_name:
+        log.debug("lyrics panel has no provider; not lyrics")
+        return False
+    return not looks_like_prose(panel.lines)
 
 
 def lyrics_source(panel: PanelLyrics) -> str:

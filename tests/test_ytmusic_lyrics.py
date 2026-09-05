@@ -198,3 +198,49 @@ def test_an_odd_line_count_cannot_be_doubled():
 def test_the_panel_property_collapses_a_doubled_read():
     text = "\n".join(["one", "two", "three", "four"] * 2 + ["Bron: LyricFind"])
     assert _panel(text).lines == ["one", "two", "three", "four"]
+
+
+# --- the artist biography is not a lyric -----------------------------------
+#
+# YouTube Music renders the artist description in the *same* shelf as the
+# lyrics when a track has none. A Wikipedia paragraph about the band, complete
+# with a view count, was stored as the lyrics of four tracks.
+
+BIO = ("Over\n148.423 weergaven\n"
+       "De Wizards of Ooze was een Belgische band in de jaren 90 die in "
+       "Antwerpen werd opgericht en veel platen maakte.\n"
+       "Van Wikipedia (https://nl.wikipedia.org/wiki/Wizards) onder CC-BY-SA")
+
+
+def test_a_biography_is_not_usable():
+    assert not yl.usable(yl.PanelLyrics(text=BIO, attribution=""))
+
+
+def test_prose_is_detected_by_line_length():
+    """A sung line is short; a paragraph is hundreds of characters."""
+    paragraph = ["x" * 300, "y" * 250, "z" * 280, "w" * 260]
+    assert yl.looks_like_prose(paragraph)
+
+
+def test_short_lines_are_not_prose():
+    assert not yl.looks_like_prose(["no, don't fake me", "what's it for",
+                                    "born into a world of fire", "keep it warm"])
+
+
+@pytest.mark.parametrize("marker", [
+    "148.423 weergaven", "1,204,000 views", "Van Wikipedia",
+    "from Wikipedia", "Creative Commons", "https://example.org",
+])
+def test_prose_markers_are_recognised(marker):
+    assert yl.looks_like_prose(["short", "lines", "here", marker])
+
+
+def test_lyrics_without_a_provider_are_refused():
+    """Real lyrics always name their source; the biography named none, which
+    is the cheapest signal that this is not a lyric tab."""
+    panel = yl.PanelLyrics(text=LYRICS, attribution="")
+    assert not yl.usable(panel)
+
+
+def test_lyrics_with_a_provider_are_accepted():
+    assert yl.usable(yl.PanelLyrics(text=LYRICS, attribution="Bron: LyricFind"))
