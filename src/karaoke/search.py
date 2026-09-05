@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .config import settings
+from .librarysearch import TRANSCRIBED_SOURCE, is_transcribed
+
+# How much a match is worth when the "lyrics" are Whisper's own guess at the
+# words. Shared rule with librarysearch so the two search paths cannot drift
+# into disagreeing about which tracks are trustworthy.
+TRANSCRIBED_BOOST = 0.25
 
 
 @dataclass
@@ -18,6 +24,10 @@ class SearchHit:
     source: str
     has_synced: bool
     path: Optional[str] = None
+    # Whether the words are Whisper's guess rather than a real lyric. Carried
+    # on the hit so a caller can say so, instead of every caller having to know
+    # which source strings mean "transcribed".
+    transcribed: bool = False
 
 
 def _hit(raw: dict[str, Any]) -> SearchHit:
@@ -30,6 +40,7 @@ def _hit(raw: dict[str, Any]) -> SearchHit:
         source=s.get("source", ""),
         has_synced=bool(s.get("has_synced")),
         path=s.get("path"),
+        transcribed=is_transcribed(s.get("lyrics_source", "")),
     )
 
 
@@ -53,9 +64,21 @@ def keyword_search(query: str, k: int = 5, os_client: Any = None) -> list[Search
     body = {
         "size": k,
         "query": {
-            "multi_match": {
-                "query": query,
-                "fields": ["title^2", "artist^2", "album", "plain_lyrics"],
+            "boosting": {
+                "positive": {
+                    "multi_match": {
+                        "query": query,
+                        "fields": ["title^2", "artist^2", "album", "plain_lyrics"],
+                    }
+                },
+                # Demoted, not filtered. A transcription is the only text 69
+                # tracks have, so removing them would make those songs
+                # unfindable by their words; they simply must not outrank a
+                # track whose lyrics are real. `whisper_aligned` is untouched:
+                # there the words came from a real source and only the timings
+                # are Whisper's.
+                "negative": {"term": {"lyrics_source": TRANSCRIBED_SOURCE}},
+                "negative_boost": TRANSCRIBED_BOOST,
             }
         },
     }
