@@ -566,6 +566,18 @@ def align_lines(
     whisper_toks, starts, last_end = _whisper_tokens(
         words, bpm=bpm, lyric_tokens=set(lyric_toks))
     if not lyric_toks or not whisper_toks:
+        # Nothing was heard, so every line below is spaced by weight alone.
+        # The report is filled here as well as on the main path: leaving it
+        # empty let this case slip past both the support flag and the caller's
+        # zero-anchor refusal, and "Jimi Hendrix - Sweet Angel" was stored as
+        # 980 characters of whisper_aligned timings with no anchors behind any
+        # of them and nothing recorded to say so.
+        if report is not None:
+            report.update(lines=len(lines), anchored=0,
+                          longest_gap_s=(total_duration or 0.0),
+                          unanchored_fraction=1.0,
+                          horizon_s=total_duration,
+                          total_duration_s=total_duration)
         return list(zip(_interpolate([None] * len(lines), total_duration, weights),
                         lines))
     # The last sung word bounds the lyrics better than the file's length, which

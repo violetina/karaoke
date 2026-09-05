@@ -175,3 +175,36 @@ def test_both_search_paths_share_one_rule():
 
     assert os_search.is_transcribed is is_transcribed
     assert os_search.TRANSCRIBED_SOURCE == librarysearch.TRANSCRIBED_SOURCE
+
+
+# --- timing a guess must not launder it -----------------------------------
+
+def test_a_timed_transcription_is_still_a_guess():
+    """whisper_synced: Whisper's words, since given timings from its own audio.
+
+    Singable, but no better corroborated. Storing it as whisper_aligned -- which
+    means *real* words with Whisper timings, and is deliberately not demoted --
+    would have hidden that.
+    """
+    assert is_transcribed("whisper_synced") is True
+
+
+def test_real_words_with_whisper_timings_stay_undemoted():
+    assert is_transcribed("whisper_aligned") is False
+
+
+def test_the_guessed_sources_are_a_closed_set():
+    assert set(librarysearch.TRANSCRIBED_SOURCES) == {"whisper", "whisper_synced"}
+
+
+def test_a_timed_guess_scores_below_a_real_lyric():
+    real = score_row(_row(title="x", artist="y"), "disobey")[0]
+    timed_guess = score_row(_row(title="x", artist="y",
+                                 lyrics_source="whisper_synced"), "disobey")[0]
+    assert 0 < timed_guess < real
+
+
+def test_the_readout_marks_a_timed_guess_too():
+    from karaoke.tui import track_info
+
+    assert "(guessed)" in track_info(source="whisper_synced")

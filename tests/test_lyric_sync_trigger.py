@@ -58,9 +58,16 @@ def test_alignment_keeps_the_real_words(conn, monkeypatch, tmp_path):
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words",
                         lambda path, text=None: [])
-    monkeypatch.setattr("karaoke.lyric_align.align_lyrics_to_lrc",
-                        lambda plain, words, total_duration=None, bpm=None:
-                        "[00:00.00] one line\n[00:05.00] two line")
+
+    def _aligned(lines, words, total_duration=None, bpm=None, report=None):
+        # Anchored, so the zero-anchor refusal does not fire: this test is
+        # about the words surviving, not about how well they were timed.
+        if report is not None:
+            report.update(lines=len(lines), anchored=len(lines),
+                          longest_gap_s=1.0, unanchored_fraction=0.0)
+        return [(0.0, "one line"), (5.0, "two line")]
+
+    monkeypatch.setattr("karaoke.lyric_align.align_lines", _aligned)
 
     assert pw._run_sync(1, tmp_path / "audio.webm", conn) is True
     row = conn.execute("SELECT synced_lyrics, plain_lyrics, source FROM lyrics"

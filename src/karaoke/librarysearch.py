@@ -47,6 +47,16 @@ W_LYRICS = 0.2
 # industrial noise.
 TRANSCRIBED_SOURCE = "whisper"
 
+# Sources whose *words* are Whisper's guess, however the timings were obtained.
+#
+# `whisper_synced` is a transcription that has since been given timings by
+# aligning it against its own audio. That is a real improvement -- it becomes
+# singable -- but the words are no better corroborated than before, and storing
+# it as `whisper_aligned` would have hidden that: `whisper_aligned` means real
+# words with Whisper timings, and it is deliberately not demoted. Timing a
+# guess must not launder it into evidence.
+TRANSCRIBED_SOURCES = (TRANSCRIBED_SOURCE, "whisper_synced")
+
 # What a lyric match is worth when the words are a transcription. Not zero:
 # 69 tracks in the library have no other text, and excluding them outright
 # would make them unfindable by their words at all. Low enough that any real
@@ -60,9 +70,11 @@ def is_transcribed(source: str) -> bool:
     Deliberately not "does the source mention whisper". ``whisper_aligned``
     means the *words* came from a real source and only the timings are
     Whisper's, so those 94 tracks carry text as trustworthy as any other and
-    must not be penalised. Only the 69 with no corroborating source are.
+    must not be penalised. Only the ones with no corroborating source are --
+    whether or not they have since been given timings, which improves how they
+    play without making the words any more likely to be right.
     """
-    return (source or "").strip().casefold() == TRANSCRIBED_SOURCE
+    return (source or "").strip().casefold() in TRANSCRIBED_SOURCES
 
 # How a hit within a field scores, by how deliberate the match looks.
 EXACT = 1.0

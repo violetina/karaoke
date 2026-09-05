@@ -132,11 +132,21 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
     from .whisper_sync import lines_to_lrc, transcribe_to_words
 
     row = conn.execute(
-        "SELECT plain_lyrics FROM lyrics WHERE track_id = ? AND kind = 'approved'",
-        (track_id,)).fetchone()
-    plain = (row[0] or "").strip() if row else ""
+        "SELECT plain_lyrics, source FROM lyrics"
+        " WHERE track_id = ? AND kind = 'approved'", (track_id,)).fetchone()
+    plain = (row["plain_lyrics"] or "").strip() if row else ""
     if not plain:
         return False
+
+    # Where the *words* came from decides what this becomes. `whisper_aligned`
+    # means real words with Whisper timings and is deliberately not demoted in
+    # search; stamping it onto a track whose words are themselves a Whisper
+    # guess would launder the guess into evidence and lose the "(guessed)"
+    # label. Timing a transcription makes it singable, not corroborated.
+    from .librarysearch import is_transcribed
+
+    synced_source = ("whisper_synced" if is_transcribed(row["source"] or "")
+                     else "whisper_aligned")
 
     try:
         words = transcribe_to_words(str(audio_path), text=plain)
@@ -188,7 +198,7 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
     conn.execute(
         "UPDATE lyrics SET synced_lyrics = ?, source = ?"
         " WHERE track_id = ? AND kind = 'approved'",
-        (lrc, "whisper_aligned", track_id))
+        (lrc, synced_source, track_id))
     conn.commit()
 
     # Stored whether the alignment looks well supported or not. This is a flag,
@@ -198,7 +208,7 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
     # scored 2.63s, so poor coverage predicts uncertainty, not error.
     localcache.ensure_alignment_support_table(conn)
     localcache.record_alignment_support(track_id, report, conn,
-                                        source="whisper_aligned")
+                                        source=synced_source)
     trustworthy = localcache.alignment_is_trustworthy(
         localcache.alignment_support(track_id, conn))
     log.info("postprocess: synced %d line(s) for track %s "
