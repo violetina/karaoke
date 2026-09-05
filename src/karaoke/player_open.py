@@ -32,44 +32,173 @@ def _cdp_page_socket(timeout: float = 1.0) -> "str | None":
     return None
 
 
-def _cdp_send(method: str, params: dict, *, timeout: float = 2.0):
-    """Send one CDP command and return its result, or None.
+class _CdpChannel:
+    """One CDP connection on one thread, reused by every caller.
 
-    Runs the socket work on its own thread with ``asyncio.run``: the callers
-    here are Textual workers and timers that may already have a running event
-    loop, which ``asyncio.run`` refuses to nest.
+    The previous version ran each command in a fresh thread with
+    ``asyncio.run`` and then abandoned that thread on timeout::
+
+        thread.start()
+        thread.join(timeout=timeout + 1.5)   # gives up
+        return out.get("reply")              # ...and walks away
+
+    A thread that outlives the join keeps a whole event loop alive, and
+    :func:`browser_playback` is called from a two-second timer, so every slow
+    reply from Chromium leaked one. Observed in a live TUI: **46 stranded
+    ``asyncio`` threads**, which on a 24-core box cannot even come from one
+    executor -- its cap is 28 -- so they were 46 separate loops.
+
+    They cost more than memory. Quitting joins them, and anyio replaces
+    CPython's bounded wait with ``thread.join()`` carrying no timeout at all
+    (``anyio/_backends/_asyncio.py``), so the 300-second warning fires and then
+    shutdown blocks for good. That is issue #39.
+
+    One connection, one thread, so there is nothing left to strand. A caller
+    that times out gives up on its *reply*; the thread stays and serves the
+    next request. Commands are serialised by an ``asyncio.Lock`` held inside
+    the loop rather than a lock held across threads, so a slow reply delays
+    other callers only as far as their own timeouts.
     """
-    import asyncio
-    import json
-    import threading
 
-    ws_url = _cdp_page_socket()
-    if not ws_url:
-        return None
-    try:
+    def __init__(self) -> None:
+        import itertools
+        import threading
+
+        self._start_lock = threading.Lock()
+        self._loop = None
+        self._thread = None
+        self._ws = None
+        self._send_lock = None
+        self._ids = itertools.count(1)
+
+    # -- the loop thread ---------------------------------------------------
+
+    def _ensure_loop(self):
+        """The channel's event loop, started on first use."""
+        import asyncio
+        import threading
+
+        with self._start_lock:
+            if self._loop is not None and self._thread.is_alive():
+                return self._loop
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever, name="cdp", daemon=True)
+            thread.start()
+            self._loop, self._thread = loop, thread
+            self._ws, self._send_lock = None, None
+            return loop
+
+    # -- the connection ----------------------------------------------------
+
+    async def _connection(self):
+        """The open socket, reconnecting if the browser dropped it."""
         import websockets
-    except ImportError:
-        log.debug("websockets not installed; CDP unavailable")
-        return None
 
-    out: dict = {}
+        if self._ws is not None:
+            # Chromium drops the socket when the page navigates away, and a
+            # send on a dead one raises rather than returning.
+            if getattr(self._ws, "close_code", None) is not None:
+                self._ws = None
+            else:
+                try:
+                    await self._ws.ping()
+                    return self._ws
+                except Exception:
+                    self._ws = None
 
-    async def send():
-        async with websockets.connect(ws_url) as ws:
-            await ws.send(json.dumps({"id": 1, "method": method, "params": params}))
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            out["reply"] = json.loads(raw)
+        url = _cdp_page_socket()
+        if not url:
+            return None
+        self._ws = await websockets.connect(url)
+        return self._ws
 
-    def run() -> None:
+    async def _request(self, method: str, params: dict, timeout: float):
+        import asyncio
+        import json
+
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+
+        async with self._send_lock:
+            ws = await self._connection()
+            if ws is None:
+                return None
+            request_id = next(self._ids)
+            await ws.send(json.dumps(
+                {"id": request_id, "method": method, "params": params}))
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return None
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                message = json.loads(raw)
+                # CDP interleaves unsolicited events with replies; only a
+                # matching id answers this call.
+                if message.get("id") == request_id:
+                    return message
+
+    def send(self, method: str, params: dict, timeout: float = 2.0):
+        """Run one command, or return None."""
+        import asyncio
+
         try:
-            asyncio.run(send())
-        except Exception:
-            log.debug("CDP %s failed", method, exc_info=True)
+            import websockets  # noqa: F401
+        except ImportError:
+            log.debug("websockets not installed; CDP unavailable")
+            return None
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout + 1.5)
-    return out.get("reply")
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._request(method, params, timeout), loop)
+        try:
+            return future.result(timeout=timeout + 1.5)
+        except Exception:
+            # Cancelling matters: it releases the lock and drops the socket
+            # rather than leaving the next caller behind a dead request.
+            future.cancel()
+            self._drop()
+            log.debug("CDP %s failed", method, exc_info=True)
+            return None
+
+    def _drop(self) -> None:
+        """Forget the socket so the next call reconnects."""
+        import asyncio
+
+        ws, self._ws = self._ws, None
+        if ws is not None and self._loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), self._loop)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Stop the loop and its thread. Safe to call more than once."""
+        with self._start_lock:
+            loop, thread = self._loop, self._thread
+            self._loop, self._thread, self._ws = None, None, None
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+
+_CHANNEL = _CdpChannel()
+
+
+def _cdp_send(method: str, params: dict, *, timeout: float = 2.0):
+    """Send one CDP command and return its result, or None."""
+    return _CHANNEL.send(method, params, timeout=timeout)
+
+
+def close_cdp() -> None:
+    """Shut the shared CDP connection down, for use when an app exits."""
+    _CHANNEL.close()
 
 
 def try_chrome_cdp_navigate(url: str) -> bool:

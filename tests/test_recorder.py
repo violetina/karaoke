@@ -404,3 +404,38 @@ def test_no_reminder_when_everything_is_analysed(tmp_path, monkeypatch):
     app.notify = lambda msg, **k: notes.append(msg)
     app._warn_unanalysed_recordings()
     assert notes == []
+
+
+def test_the_tui_stops_the_mic_on_exit():
+    """A thread worker cannot be cancelled from outside -- Textual can only
+    ask -- and `_mic_loop` watches this event and nothing else. Left running,
+    it keeps the executor alive and the quit blocks on a join that anyio
+    performs with no timeout at all (issue #39)."""
+    import threading as t
+
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._mic_stop = t.Event()
+    import karaoke.recorder as r
+    original = r.stop_all
+    r.stop_all = lambda: None
+    try:
+        app.on_unmount()
+    finally:
+        r.stop_all = original
+    assert app._mic_stop.is_set()
+
+
+def test_stopping_on_exit_survives_a_mic_that_was_never_on():
+    """The common case: `R` never pressed, so there is no event to set."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    import karaoke.recorder as r
+    original = r.stop_all
+    r.stop_all = lambda: None
+    try:
+        app.on_unmount()          # must not raise
+    finally:
+        r.stop_all = original
