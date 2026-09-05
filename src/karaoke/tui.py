@@ -180,6 +180,33 @@ def genre_line(row) -> str:
     return label
 
 
+def classification_line(genre_row, tone_row) -> str:
+    """Genre qualified by the attitude of its words: "cynical pop".
+
+    The two axes come from different material and neither implies the other --
+    an instrumental has a genre and no words, and a track whose audio was never
+    embedded can still be read. So each is shown when present, and the compound
+    only forms when the tone is clear enough to be worth attaching.
+    """
+    from .tone import MIN_MARGIN as TONE_MARGIN
+
+    genre = genre_line(genre_row)
+    if tone_row is None:
+        return genre
+    tone_name = tone_row["tone"] or ""
+    margin = (tone_row["score"] or 0.0) - (tone_row["runner_up_score"] or 0.0)
+    from .tone import SHORT
+
+    short = SHORT.get(tone_name, tone_name.split()[0] if tone_name else "")
+    if not short:
+        return genre
+    if margin < TONE_MARGIN:
+        # Too close to call. Qualifying a genre with a coin toss reads as a
+        # finding rather than the noise it is.
+        return genre
+    return f"{short} {genre}".strip() if genre else short
+
+
 def track_info(*, source: str = "", duration: float | None = None,
                offset: float = 0.0, pending: "list[str] | None" = None,
                lyric_lines: int = 0, error: str = "", genre: str = "") -> str:
@@ -2343,8 +2370,9 @@ class KaraokeTui(App):
                 with localcache.connect() as conn:
                     pending = needs_postprocessing(self._current_track_id, conn)
                     duration = self._load_duration(self._current_track_id, conn)
-                    genre = genre_line(
-                        localcache.genre_for(self._current_track_id, conn))
+                    genre = classification_line(
+                        localcache.genre_for(self._current_track_id, conn),
+                        localcache.tone_for(self._current_track_id, conn))
             text = track_info(
                 source=(lyrics.source if lyrics else ""),
                 duration=duration,
