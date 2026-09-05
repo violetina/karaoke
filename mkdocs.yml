@@ -78,6 +78,7 @@ nav:
       - Record: modes/record.md
       - Sample: modes/sample.md
   - Browser cookies: browser-cookies.md
+  - Search and weights: search.md
   - Search how-to: search-howto.md
   - Troubleshooting: troubleshooting.md
   - Roadmap / TODO: todo.md
