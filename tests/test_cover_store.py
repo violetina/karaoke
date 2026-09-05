@@ -8,6 +8,7 @@ rather than only in OpenSearch: vector_index is explicit that the index holds
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -173,10 +174,17 @@ def test_a_zero_sized_panel_is_refused():
 
 
 def test_rendering_returns_something_drawable(conn):
+    """Fitted into the panel, not stretched to fill it.
+
+    A 2:1 grid offered a 16x8 panel keeps its proportions rather than taking
+    all 8 rows -- stretching here would undo the fitting done at capture.
+    """
     cover_store.link(1, cover_store.store(_grid(64, 32), conn), conn)
     text = cover_store.render_for_track(1, 16, 8, conn)
     assert text is not None
-    assert len(text.plain.splitlines()) == 8
+    rows = len(text.plain.splitlines())
+    assert 0 < rows <= 8
+    assert len(text.plain.splitlines()[0]) <= 16
 
 
 def test_rendering_an_unknown_track_is_none_not_an_error(conn):
@@ -232,3 +240,90 @@ def test_remembering_a_cover_does_nothing_without_a_track(monkeypatch, tmp_path)
     app._current_track_id = None
     app._remember_cover(tmp_path / "art.jpg", "u")
     assert captured == []
+
+
+# --- proportions ----------------------------------------------------------
+
+def test_a_wide_source_is_stored_wide(monkeypatch):
+    """coverart.render measures the source "so a 16:9 frame and a square cover
+    both keep their proportions". Sampling everything into a fixed 64x32 threw
+    that away: a 1280x720 thumbnail belongs at 64x14 and was stored at 64x32,
+    stretched vertically by more than double.
+    """
+    from karaoke import cover_store as cs
+    from karaoke import coverart
+
+    asked = {}
+
+    def _sample(source, cols, rows, **kw):
+        asked["size"] = (cols, rows)
+        return _grid(cols, rows)
+
+    monkeypatch.setattr(coverart, "probe_size", lambda p, **k: (1280, 720))
+    monkeypatch.setattr(coverart, "sample", _sample)
+    conn = localcache.connect(":memory:")
+    try:
+        cs.ensure_table(conn)
+        conn.execute("INSERT INTO tracks (artist, title) VALUES ('A', 'B')")
+        conn.commit()
+        cs.capture(1, Path("/nonexistent.jpg"), conn)
+    finally:
+        conn.close()
+
+    cols, rows = asked["size"]
+    assert cols / rows > 3.0, f"16:9 source stored at {cols}x{rows}"
+
+
+def test_a_square_source_is_stored_squarer(monkeypatch):
+    from karaoke import cover_store as cs
+    from karaoke import coverart
+
+    asked = {}
+    monkeypatch.setattr(coverart, "probe_size", lambda p, **k: (600, 600))
+    monkeypatch.setattr(coverart, "sample",
+                        lambda source, cols, rows, **kw:
+                        (asked.update(size=(cols, rows)), _grid(cols, rows))[1])
+    conn = localcache.connect(":memory:")
+    try:
+        cs.ensure_table(conn)
+        conn.execute("INSERT INTO tracks (artist, title) VALUES ('A', 'B')")
+        conn.commit()
+        cs.capture(1, Path("/nonexistent.jpg"), conn)
+    finally:
+        conn.close()
+
+    wide_cols, wide_rows = asked["size"]
+    assert wide_cols / wide_rows < 3.0
+
+
+def test_an_unmeasurable_source_falls_back_to_the_stored_box(monkeypatch):
+    from karaoke import cover_store as cs
+    from karaoke import coverart
+
+    asked = {}
+    monkeypatch.setattr(coverart, "probe_size", lambda p, **k: None)
+    monkeypatch.setattr(coverart, "sample",
+                        lambda source, cols, rows, **kw:
+                        (asked.update(size=(cols, rows)), _grid(cols, rows))[1])
+    conn = localcache.connect(":memory:")
+    try:
+        cs.ensure_table(conn)
+        conn.execute("INSERT INTO tracks (artist, title) VALUES ('A', 'B')")
+        conn.commit()
+        cs.capture(1, Path("/nonexistent.jpg"), conn)
+    finally:
+        conn.close()
+
+    assert asked["size"] == (cs.STORE_COLS, cs.STORE_ROWS)
+
+
+def test_rendering_fits_rather_than_fills(conn):
+    """Stretching at render time would undo the fitting done at capture."""
+    from karaoke import cover_store as cs
+
+    wide = _grid(64, 14)                      # a 16:9 cover, stored fitted
+    cs.link(1, cs.store(wide, conn), conn)
+    text = cs.render_for_track(1, 40, 30, conn)
+    assert text is not None
+    # Offered a 40x30 panel, it must not stretch a wide image to 30 rows.
+    assert len(text.plain.splitlines()) < 20

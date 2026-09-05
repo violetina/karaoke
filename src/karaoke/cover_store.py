@@ -166,7 +166,16 @@ def capture(track_id: int, source: Path, conn: sqlite3.Connection, *,
     """Sample a local image or video frame and keep it for this track."""
     from . import coverart
 
-    pixels = coverart.sample(source, STORE_COLS, STORE_ROWS)
+    # Fitted, not forced into a fixed box. coverart.render measures the source
+    # so "a 16:9 frame and a square cover both keep their proportions", and
+    # sampling everything at STORE_COLS x STORE_ROWS threw that away: a
+    # 1280x720 thumbnail belongs at 64x14 and was being stored at 64x32,
+    # stretched vertically by more than double. The table keeps cols and rows
+    # per row, so a variable shape costs nothing.
+    size = coverart.probe_size(source)
+    fitted = coverart.fit(size, STORE_COLS, STORE_ROWS) if size else None
+    cols, rows = fitted if fitted else (STORE_COLS, STORE_ROWS)
+    pixels = coverart.sample(source, cols, rows)
     if not pixels:
         log.debug("could not sample art from %s", source)
         return None
@@ -199,7 +208,14 @@ def render_for_track(track_id: int, cols: int, rows: int,
     grid = grid_for_track(track_id, conn)
     if grid is None:
         return None
-    fitted = rescale(grid, cols, rows)
+    # Fit the stored shape into the panel rather than filling it: the grid has
+    # its own aspect now, and stretching it here would undo the fitting done
+    # when it was captured.
+    have = (len(grid[0]), len(grid))
+    size = coverart.fit(have, cols, rows)
+    if size is None:
+        return None
+    fitted = rescale(grid, size[0], size[1])
     if fitted is None:
         return None
     return coverart.to_text(fitted, pad_to=pad_to)
