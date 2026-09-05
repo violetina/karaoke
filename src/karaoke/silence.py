@@ -133,6 +133,110 @@ def loudest_span(stretches: list[Silence], total: float) -> Optional[tuple[float
     return best
 
 
+def scan(recording_id: int, *, conn=None, rescan: bool = False,
+         skip_last: bool = True) -> dict[str, list[Silence]]:
+    """Detect and store the silence map for a recording, per segment file.
+
+    Already-scanned files are skipped unless ``rescan`` -- not because
+    detection is slow (36 minutes of audio takes about a second) but because
+    the stored map outlives the audio, which is deleted after a week.
+
+    ``skip_last`` leaves the newest segment alone: while a recording is running
+    that file is still being written, so its silence map would be a snapshot of
+    an incomplete file and its measured duration would be wrong. Recording 13
+    is live as this lands, and scanning it must not require stopping it.
+    """
+    from . import localcache
+    from .recorder import session_directory
+    from .recording_worker import load_recording, segment_files
+
+    own = conn is None
+    conn = conn or localcache.connect()
+    try:
+        record = load_recording(recording_id, conn)
+        directory = Path(record["dir"]) if record and record["dir"] else \
+            session_directory(recording_id)
+        if not directory or not Path(directory).is_dir():
+            log.debug("recording %s has no audio directory", recording_id)
+            return {}
+
+        files = segment_files(Path(directory))
+        if skip_last and files:
+            files = files[:-1]
+        done = localcache.silence_scans(recording_id, conn)
+
+        found: dict[str, list[Silence]] = {}
+        for seg in files:
+            name = seg.path.name
+            if name in done and not rescan:
+                continue
+            stretches = detect(seg.path)
+            localcache.record_silence(
+                recording_id, name, [(s.start, s.end) for s in stretches],
+                conn, duration_s=measured_duration(seg.path))
+            found[name] = stretches
+            log.info("recording %s %s: %d silent stretch(es), %.0fs quiet",
+                     recording_id, name, len(stretches),
+                     total_silence(stretches))
+        return found
+    finally:
+        if own:
+            conn.close()
+
+
+def stored_map(recording_id: int, conn) -> dict[str, list[Silence]]:
+    """The silence map as stored, per segment file name."""
+    from . import localcache
+
+    out: dict[str, list[Silence]] = {}
+    for row in localcache.silence_for_recording(recording_id, conn):
+        out.setdefault(row["file"], []).append(
+            Silence(start=row["start_s"], end=row["end_s"]))
+    return out
+
+
+def audible_until(recording_id: int, conn) -> Optional[float]:
+    """Wall-clock instant after which the recording holds nothing but silence.
+
+    This is where a capture *effectively* ended, which is not where it stopped:
+    recording 12 ran for 36 minutes and its last 6 were entirely quiet because
+    YouTube Music had moved playback to another device.
+
+    It matters for scoring alignment on a skipped track. A song skipped part
+    way through is captured in part, and the aligner must be judged on the
+    lines that actually played rather than penalised for the ones that never
+    did.
+
+    None means nothing in the recording was ever audible, which is a different
+    claim from "the audio ended when capture began" -- a caller must handle it
+    rather than be handed a zero-length span that looks like a real one.
+    """
+    from .recorder import session_directory
+    from .recording_worker import load_recording, segment_files
+
+    record = load_recording(recording_id, conn)
+    directory = Path(record["dir"]) if record and record["dir"] else \
+        session_directory(recording_id)
+    if not directory or not Path(directory).is_dir():
+        return None
+
+    stored = stored_map(recording_id, conn)
+    latest: Optional[float] = None
+    for seg in segment_files(Path(directory)):
+        gaps = stored.get(seg.path.name, [])
+        span = loudest_span(gaps, seg.duration)
+        if span is None:
+            continue
+        # A segment that is silent to its own end contributes the instant the
+        # audio stopped; one that ends mid-music contributes its end.
+        trailing = any(g.end >= seg.duration - 1.0 for g in gaps)
+        end_offset = span[1] if trailing else seg.duration
+        candidate = seg.start_wall + end_offset
+        if latest is None or candidate > latest:
+            latest = candidate
+    return latest
+
+
 def describe(stretches: list[Silence]) -> list[str]:
     """Human-readable rows, for a CLI or the TUI."""
     out = []

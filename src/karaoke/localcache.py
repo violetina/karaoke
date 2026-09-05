@@ -356,6 +356,96 @@ def iter_note_rows(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     yield from cur.fetchall()
 
 
+def ensure_silence_table(conn: sqlite3.Connection) -> None:
+    """Create the recording silence map in databases predating it."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS recording_silence (
+            recording_id INTEGER NOT NULL,
+            file         TEXT NOT NULL,
+            start_s      REAL NOT NULL,
+            end_s        REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_recording_silence_rec
+            ON recording_silence (recording_id, file, start_s);
+
+        -- A fully audible segment produces no silence rows, so the rows alone
+        -- cannot say whether a file has been scanned. This records the scan
+        -- itself -- and caches the measured duration, which is the expensive
+        -- part: the segment muxer writes no FLAC duration header, so length
+        -- has to be obtained by decoding the file.
+        CREATE TABLE IF NOT EXISTS recording_silence_scans (
+            recording_id INTEGER NOT NULL,
+            file         TEXT NOT NULL,
+            duration_s   REAL,
+            scanned_at   REAL NOT NULL,
+            PRIMARY KEY (recording_id, file)
+        );
+    """)
+    conn.commit()
+
+
+def record_silence(recording_id: int, file: str,
+                   spans: list[tuple[float, float]],
+                   conn: sqlite3.Connection, *,
+                   duration_s: Optional[float] = None) -> int:
+    """Store the silent stretches found in one segment file.
+
+    Replaces any previous map for this file rather than adding to it: the audio
+    does not change, so a re-scan is a correction, not more evidence.
+
+    Storing it is not about the cost of detection -- 36 minutes of audio scans
+    in about a second. It is so the map can be read by anything that is not
+    holding the audio: a TUI row, a query, the alignment scorer, and any of
+    them after the week's retention has deleted the files.
+    """
+    conn.execute(
+        "DELETE FROM recording_silence WHERE recording_id = ? AND file = ?",
+        (recording_id, file),
+    )
+    conn.executemany(
+        "INSERT INTO recording_silence (recording_id, file, start_s, end_s) "
+        "VALUES (?, ?, ?, ?)",
+        [(recording_id, file, s, e) for s, e in spans],
+    )
+    conn.execute(
+        """
+        INSERT INTO recording_silence_scans
+            (recording_id, file, duration_s, scanned_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(recording_id, file) DO UPDATE SET
+            duration_s = excluded.duration_s,
+            scanned_at = excluded.scanned_at
+        """,
+        (recording_id, file, duration_s, time.time()),
+    )
+    conn.commit()
+    return len(spans)
+
+
+def silence_for_recording(recording_id: int,
+                          conn: sqlite3.Connection) -> list:
+    """The stored silence map for a recording, in file and time order."""
+    return conn.execute(
+        """
+        SELECT file, start_s, end_s FROM recording_silence
+        WHERE recording_id = ?
+        ORDER BY file, start_s
+        """,
+        (recording_id,),
+    ).fetchall()
+
+
+def silence_scans(recording_id: int, conn: sqlite3.Connection) -> dict:
+    """Which files have been scanned, mapped to their measured duration.
+
+    A fully audible segment stores no silence rows, so the rows alone cannot
+    answer "has this been scanned"; that is what this table is for.
+    """
+    return {r["file"]: r["duration_s"] for r in conn.execute(
+        "SELECT file, duration_s FROM recording_silence_scans "
+        "WHERE recording_id = ?", (recording_id,))}
+
+
 def ensure_restricted_table(conn: sqlite3.Connection) -> None:
     """Create the age-restricted list in databases predating it."""
     conn.execute("""
@@ -559,6 +649,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_restricted_table(conn)
     ensure_recording_tables(conn)
     ensure_notes_table(conn)
+    ensure_silence_table(conn)
     return conn
 
 
