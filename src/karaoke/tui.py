@@ -1014,14 +1014,14 @@ class KaraokeTui(App):
         """Show the result list and start it playing."""
         self._queue = rows
         self._queue_at = -1
-        panel = self.query_one("#queue", Static)
+        table = self.query_one("#queue", DataTable)
         if not rows:
-            panel.set_class(False, "-on")
-            panel.update("")
+            table.set_class(False, "-on")
+            table.clear()
             if query:
                 self.notify(f"No matches for {query!r}", severity="warning")
             return
-        panel.set_class(True, "-on")
+        table.set_class(True, "-on")
         self._render_queue()
         self.notify(f"{len(rows)} match(es) for {query!r}" if query
                     else f"{len(rows)} queued")

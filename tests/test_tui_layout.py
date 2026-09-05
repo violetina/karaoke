@@ -259,3 +259,61 @@ def test_sidebar_order_puts_workers_at_the_bottom(app):
             # Pinned to the bottom, not floating in the middle.
             assert sidebar.bottom - workers.bottom <= 1
     _run(go())
+
+
+# --- the search queue, against real widgets --------------------------------
+#
+# _set_queue and _render_queue both reach for #queue. When it changed from a
+# Static to a DataTable, only one of them was updated and the other raised
+# WrongType on the first search. Unit tests missed it entirely because they
+# stubbed the render and never touched a widget -- so these drive the real one.
+
+def test_the_queue_widget_is_populated_by_a_search(app):
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            rows = [{"track_id": 1, "artist": "Primus", "title": "Jerry",
+                     "score": 0.5, "fields": ("title",), "url": ""}]
+            # No source, so nothing is launched; the widget path still runs.
+            app._set_queue(rows, "jerry")
+            await pilot.pause()
+            table = app.query_one("#queue")
+            assert table.has_class("-on")
+            assert table.row_count == 1
+    _run(go())
+
+
+def test_an_empty_result_clears_and_hides_the_queue(app):
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._set_queue([{"track_id": 1, "artist": "A", "title": "B",
+                             "score": 0.5, "fields": (), "url": ""}], "x")
+            await pilot.pause()
+            app._set_queue([], "nothing")
+            await pilot.pause()
+            table = app.query_one("#queue")
+            assert not table.has_class("-on")
+            assert table.row_count == 0
+    _run(go())
+
+
+def test_the_search_box_takes_focus_on_slash(app):
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.focused is not None
+            assert app.focused.id == "search-input"
+    _run(go())
+
+
+def test_the_mood_panel_survives_a_render(app):
+    """_update_mood reaches for #mood-square; it must match its widget too."""
+    async def go():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._update_mood("happy")
+            await pilot.pause()
+    _run(go())
