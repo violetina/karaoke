@@ -746,8 +746,8 @@ class KaraokeTui(App):
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
     #mood-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
-    #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
-    #queue.-on { display: block; }
+    #queue, #library { display: none; height: 10; border: round cyan; margin-top: 1; }
+    #queue.-on, #library.-on { display: block; }
     /* In the left column now, with the other per-track facts. Auto height
        because it holds two or three lines depending on what is known, and a
        fixed 6 left a gap under the short case. */
@@ -955,9 +955,6 @@ class KaraokeTui(App):
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
-                # The result list lives under the lyrics rather than in the
-                # overlay: it is what plays next, so it belongs where the
-                # playing track is, not behind a panel you have to open.
                 yield DataTable(id="queue", cursor_type="row")
                 with Horizontal(id="statusbar"):
                     yield Static("Mode: auto", id="mode-label")
@@ -971,10 +968,15 @@ class KaraokeTui(App):
         with Container(id="browse-overlay") as overlay:
             overlay.border_title = "Library"
             overlay.border_subtitle = "H close · ? keys"
-            with Horizontal(id="browse-head"):
-                yield Static("Filter")
-                yield Select(FILTER_OPTIONS, value="working", id="filter-select",
-                             allow_blank=False)
+            with Vertical(id="browse-head"):
+                with Horizontal():
+                    yield Static("Filter")
+                    yield Select(FILTER_OPTIONS, value="working", id="filter-select",
+                                 allow_blank=False)
+                with Horizontal():
+                    yield Static("Mood")
+                    yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
+                                 allow_blank=False)
             yield DataTable(id="library", cursor_type="row")
             yield Static(f"log: {self._log_level}", id="log-label")
             yield Static(f"logs: {LOG_FILE}", id="log-path")
@@ -1073,9 +1075,11 @@ class KaraokeTui(App):
                 except (ValueError, TypeError):
                     bpm_display = "—"
 
+            artist_str = str(song.get("artist") or "")
+            title_str = str(song.get("title") or "")
             table.add_row(
-                str(song.get("artist") or ""),
-                str(song.get("title") or ""),
+                artist_str[:15],
+                title_str[:30],
                 str(song.get("key") or "—"),
                 bpm_display,
                 e_str,
@@ -1211,19 +1215,23 @@ class KaraokeTui(App):
     _BROWSE_OPEN = "-visible"
 
     def _browse_open(self) -> bool:
-        return self.query_one("#browse-overlay").has_class(self._BROWSE_OPEN)
+        try:
+            return self.query_one("#browse-overlay").has_class(self._BROWSE_OPEN)
+        except Exception:
+            return False
 
     def _show_browse(self) -> None:
-        # add_class BEFORE focus: a hidden widget silently refuses focus, so
-        # reversing these two lines leaves the table unfocused and the arrow
-        # keys dead.
-        self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
-        self.query_one("#library", DataTable).focus()
+        try:
+            self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
+            self.query_one("#library", DataTable).focus()
+        except Exception:
+            pass
 
     def _hide_browse(self) -> None:
-        self.query_one("#browse-overlay").remove_class(self._BROWSE_OPEN)
-        # Back to the screen. There is no sensible focusable target in #main,
-        # and inventing one purely to hold focus would be worse.
+        try:
+            self.query_one("#browse-overlay").remove_class(self._BROWSE_OPEN)
+        except Exception:
+            pass
         self.set_focus(None)
 
     def action_toggle_browse(self) -> None:

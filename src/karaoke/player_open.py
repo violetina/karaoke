@@ -339,6 +339,36 @@ def _kiosk_mpris_names(names: "list[str]") -> "set[str]":
     return kiosk
 
 
+def launch_kiosk_browser(url: str = "https://music.youtube.com") -> bool:
+    """Launch Google Chrome in kiosk debugging mode (:9222) if down."""
+    import os
+    import shutil
+    import time
+
+    if _cdp_page_socket() is not None:
+        return True
+
+    chrome = os.environ.get("CHROME", "google-chrome-stable")
+    if not shutil.which(chrome):
+        chrome = "google-chrome"
+        if not shutil.which(chrome):
+            return False
+
+    profile = os.path.expanduser("~/.local/share/karaoke/kiosk-chrome")
+    cmd = [
+        chrome,
+        f"--app={url}",
+        f"--remote-debugging-port={CDP_PORT}",
+        f"--user-data-dir={profile}",
+    ]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.2)
+        return _cdp_page_socket() is not None
+    except Exception:
+        return False
+
+
 def open_song_url(url: str, kind: str | None, *, artist: str = "",
                   title: str = "", prefer_audio: bool = True) -> int | None:
     """Open a song URL and return the spawned process id when applicable.
@@ -411,10 +441,14 @@ def open_song_url(url: str, kind: str | None, *, artist: str = "",
                 url = f"https://music.youtube.com/search?q={quote_plus(query)}"
                 kind = "youtube_music_search"
 
-    # Try to navigate an active kiosk/debugging browser first to avoid tab clutter!
+    # Try to navigate an active kiosk/debugging browser first, or launch it if down!
     if try_chrome_cdp_navigate(url):
         log.info("Navigated active kiosk-mode Chrome via CDP: %s", url)
         return None
+    elif launch_kiosk_browser(url):
+        if try_chrome_cdp_navigate(url):
+            log.info("Launched kiosk-mode Chrome and navigated via CDP: %s", url)
+            return None
 
     OPEN_STDOUT_LOG.parent.mkdir(parents=True, exist_ok=True)
     stdout = OPEN_STDOUT_LOG.open("ab")

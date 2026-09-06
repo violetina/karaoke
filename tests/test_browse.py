@@ -21,6 +21,7 @@ def test_open_song_url_spawns_xdg_open(monkeypatch, tmp_path):
     # Mock try_chrome_cdp_navigate to always return False to isolate test
     import karaoke.player_open
     monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
+    monkeypatch.setattr(karaoke.player_open, "launch_kiosk_browser", lambda *args, **kwargs: False)
 
     pid = browse.open_song_url("https://www.youtube.com/watch?v=bXWHf2HH8jY", "youtube")
 
@@ -42,6 +43,7 @@ def test_open_song_url_prefers_youtube_music_audio_search(monkeypatch, tmp_path)
     monkeypatch.setattr(browse.subprocess, "Popen", fake_popen)
     import karaoke.player_open
     monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
+    monkeypatch.setattr(karaoke.player_open, "launch_kiosk_browser", lambda *args, **kwargs: False)
 
     # 1. Direct watch link -> YouTube Music watch URL (plays immediately)
     browse.open_song_url(
@@ -76,6 +78,7 @@ def test_open_song_url_uses_playerctl_for_spotify(monkeypatch, tmp_path):
     monkeypatch.setattr(browse.subprocess, "Popen", fake_popen)
     import karaoke.player_open
     monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
+    monkeypatch.setattr(karaoke.player_open, "launch_kiosk_browser", lambda *args, **kwargs: False)
 
     pid = browse.open_song_url("spotify:track:123", "spotify")
 
