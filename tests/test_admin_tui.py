@@ -35,3 +35,22 @@ def test_admin_app_scaling_actions(monkeypatch):
     app.action_scale_down()
     assert app._target_workers == 2
     assert calls[1] == ("/api/workers/scale", {"target": 2})
+
+
+def test_admin_pipeline_actions_dispatch(monkeypatch):
+    """The audio-processing controls launch background workers without raising."""
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
+
+    started = []
+    monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
+
+    app.action_run_backfill()
+    app.action_rebuild_vectors()
+    app.action_analyse_recordings()
+
+    # Each control notified the user and queued exactly one background worker.
+    assert len(started) == 3
+    assert all(callable(fn) for fn in started)
+    assert len(notifications) == 3

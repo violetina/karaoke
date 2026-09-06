@@ -61,7 +61,11 @@ go stale. The ones worth knowing:
 ## Operations & Admin Dashboard (`make admin`)
 
 Launch with `make admin` or `python -m karaoke.admin_tui`:
-- **Worker Pool Management**: Real-time controls for `karaoke-postprocess@1..6.service` user units (`[+]` scale up, `[-]` scale down, `[R]` restart pool).
+- **Worker Pool Management**: Real-time controls for `karaoke-postprocess@1..6.service` user units (`[+]` scale up, `[-]` scale down, `[R]` restart pool). Falls back to querying `systemctl --user` directly if the control API is unreachable.
+- **Audio Processing & Vector Ingestion Pipeline**:
+  - `b` — Run audio backfill (`scripts/fill_analysis_and_vector_gaps.py`): fills key/BPM/energy gaps and CLAP genre labels.
+  - `v` — Rebuild OpenSearch vector indices (`tracks`, `tracks-lines`).
+  - `a` — Analyse captured recordings and ingest detected-song vectors.
 - **Error Log Diagnostics**: Real-time exception & traceback viewer for worker and backend troubleshooting.
 - **Folder Scan & Ingestion**: Trigger folder scans or file ingestion directly from the Operations dashboard.
 

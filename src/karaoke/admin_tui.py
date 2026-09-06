@@ -34,6 +34,9 @@ class KaraokeAdminApp(App):
         ("plus", "scale_up", "Worker +1"),
         ("minus", "scale_down", "Worker -1"),
         ("R", "restart_workers", "Restart Workers"),
+        ("b", "run_backfill", "Run Audio Backfill"),
+        ("v", "rebuild_vectors", "Rebuild Vectors"),
+        ("a", "analyse_recordings", "Analyse Recordings"),
         ("s", "scan_folder", "Scan Folder"),
         ("e", "fetch_errors", "Error Logs"),
     ]
@@ -56,7 +59,15 @@ class KaraokeAdminApp(App):
                 yield DataTable(id="worker-table", cursor_type="row")
                 yield Static("Worker Status: Loading...", id="worker-summary")
 
-            # Middle: File Upload / Ingestion Panel
+            # Middle: Audio Processing & Vector Ingestion Controls
+            with Container(id="pipeline-container"):
+                yield Static("[bold cyan]Audio Processing & Vector Ingestion Pipeline[/bold cyan]")
+                with Horizontal(id="pipeline-controls"):
+                    yield Button("Run Audio Backfill (b)", id="btn-backfill", variant="success")
+                    yield Button("Rebuild Vectors (v)", id="btn-rebuild-vectors", variant="primary")
+                    yield Button("Analyse Recordings (a)", id="btn-recordings", variant="warning")
+
+            # File Upload / Ingestion Panel
             with Container(id="ingest-container"):
                 yield Static("[bold cyan]File Ingestion & Folder Scan[/bold cyan]")
                 with Horizontal():
@@ -178,6 +189,55 @@ class KaraokeAdminApp(App):
         else:
             self.notify(f"Folder scan failed for {folder}", severity="error")
 
+    def action_run_backfill(self) -> None:
+        """`b`: Trigger audio gap-fill and zero-shot genre backfill."""
+        self.notify("Started audio gap-fill and classification backfill...")
+        def _bg():
+            try:
+                import subprocess
+                p = Path(__file__).resolve().parent.parent.parent / "scripts" / "fill_analysis_and_vector_gaps.py"
+                if p.is_file():
+                    subprocess.run([sys.executable, str(p)], check=True, timeout=600)
+                    self.call_from_thread(self.notify, "Audio backfill completed successfully!")
+            except Exception as exc:
+                self.call_from_thread(self.notify, f"Backfill failed: {exc}", severity="error")
+        self.run_worker(_bg, thread=True)
+
+    def action_rebuild_vectors(self) -> None:
+        """`v`: Rebuild OpenSearch vector indices."""
+        self.notify("Rebuilding OpenSearch vector indices...")
+        def _bg():
+            try:
+                from . import vector_index, localcache
+                with localcache.connect() as conn:
+                    st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                msg = f"Vector indices updated: {st.indexed} tracks, {st.line_docs} lines"
+                self.call_from_thread(self.notify, msg)
+            except Exception as exc:
+                self.call_from_thread(self.notify, f"Vector rebuild note: {exc}")
+        self.run_worker(_bg, thread=True)
+
+    def action_analyse_recordings(self) -> None:
+        """`a`: Process, decompile, and ingest detected song vectors from recordings."""
+        self.notify("Analysing captured audio recordings and ingesting song vectors...")
+        def _bg():
+            try:
+                from . import recording_worker, localcache, vector_index
+                with localcache.connect() as conn:
+                    rows = conn.execute("SELECT recording_id FROM recordings WHERE status != 'recording' ORDER BY recording_id DESC LIMIT 20").fetchall()
+                    processed = 0
+                    for r in rows:
+                        rid = int(r["recording_id"])
+                        res = recording_worker.analyse(rid)
+                        if res:
+                            processed += 1
+                    if processed:
+                        vector_index.rebuild_from_sqlite(embed=True, include_lines=True, include_notes=True)
+                self.call_from_thread(self.notify, f"Processed {processed} recording(s) and ingested song vectors")
+            except Exception as exc:
+                self.call_from_thread(self.notify, f"Recording analysis note: {exc}")
+        self.run_worker(_bg, thread=True)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn-scale-up":
@@ -186,6 +246,12 @@ class KaraokeAdminApp(App):
             self.action_scale_down()
         elif bid == "btn-restart-workers":
             self.action_restart_workers()
+        elif bid == "btn-backfill":
+            self.action_run_backfill()
+        elif bid == "btn-rebuild-vectors":
+            self.action_rebuild_vectors()
+        elif bid == "btn-recordings":
+            self.action_analyse_recordings()
         elif bid == "btn-scan":
             self.action_scan_folder()
 
