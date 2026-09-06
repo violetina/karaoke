@@ -266,6 +266,9 @@ health: ## Run the karaoke platform health check (services, ports, cluster, DB)
 
 webtui: web ## Alias for make web
 
+admin: ## Run the backend operations & worker management TUI
+	$(PYTHON) -m karaoke.admin_tui
+
 web: ## Serve the TUI in a web browser using textual-serve
 	$(PYTHON) scripts/web_serve.py
 

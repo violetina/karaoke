@@ -756,6 +756,74 @@ def audio_cut(req: AudioCutRequest) -> dict[str, Any]:
     }
 
 
+class ScaleWorkersRequest(BaseModel):
+    target: int = 1  # 0 to 6
+
+
+@app.get("/api/workers/status")
+def get_workers_status() -> dict[str, Any]:
+    """Get status of systemd postprocess workers and error log summary."""
+    import subprocess
+    from . import postprocess_status
+
+    st = postprocess_status.get_status(sample_cpu=False)
+    units = []
+    for i in range(1, 7):
+        uname = f"karaoke-postprocess@{i}.service"
+        cmd = ["systemctl", "--user", "is-active", uname]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            active = res.stdout.strip() == "active"
+        except Exception:
+            active = False
+        units.append({"unit": uname, "worker_id": i, "active": active})
+
+    return {
+        "status": "ok",
+        "workers_active": st.workers,
+        "worker_cpu": st.worker_cpu,
+        "worker_memory_mb": st.worker_rss_mb,
+        "queue_depth": st.queued,
+        "units": units,
+    }
+
+
+@app.post("/api/workers/scale")
+def scale_workers(req: ScaleWorkersRequest) -> dict[str, Any]:
+    """Scale systemd postprocess workers up or down (0 to 6)."""
+    import subprocess
+
+    target = max(0, min(6, req.target))
+    results = []
+    for i in range(1, 7):
+        uname = f"karaoke-postprocess@{i}.service"
+        action = "start" if i <= target else "stop"
+        cmd = ["systemctl", "--user", action, uname]
+        try:
+            subprocess.run(cmd, check=True, timeout=5)
+            results.append({"unit": uname, "action": action, "status": "ok"})
+        except Exception as exc:
+            results.append({"unit": uname, "action": action, "status": f"error: {exc}"})
+
+    return {"status": "ok", "target": target, "results": results}
+
+
+@app.get("/api/logs/errors")
+def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+    """Get the latest error log entries from karaoke.log."""
+    log_file = Path.home() / ".local/share/karaoke/logs/karaoke.log"
+    if not log_file.is_file():
+        return {"status": "ok", "logs": []}
+
+    try:
+        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        errs = [l.rstrip() for l in all_lines if "ERROR" in l or "CRITICAL" in l or "Traceback" in l or "Exception" in l]
+        return {"status": "ok", "count": len(errs), "logs": errs[-lines:]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
+
+
 def main() -> None:
     """Entrypoint for the host-side control API.
 
