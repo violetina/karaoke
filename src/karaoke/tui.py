@@ -968,15 +968,10 @@ class KaraokeTui(App):
         with Container(id="browse-overlay") as overlay:
             overlay.border_title = "Library"
             overlay.border_subtitle = "H close · ? keys"
-            with Vertical(id="browse-head"):
-                with Horizontal():
-                    yield Static("Filter")
-                    yield Select(FILTER_OPTIONS, value="working", id="filter-select",
-                                 allow_blank=False)
-                with Horizontal():
-                    yield Static("Mood")
-                    yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
-                                 allow_blank=False)
+            with Horizontal(id="browse-head"):
+                yield Static("Filter")
+                yield Select(FILTER_OPTIONS, value="working", id="filter-select",
+                             allow_blank=False)
             yield DataTable(id="library", cursor_type="row")
             yield Static(f"log: {self._log_level}", id="log-label")
             yield Static(f"logs: {LOG_FILE}", id="log-path")
