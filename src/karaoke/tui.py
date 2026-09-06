@@ -97,6 +97,8 @@ MOOD_FILTER_OPTIONS = [
 
 SORT_OPTIONS = [
     ("Artist / Title (A-Z)", "artist"),
+    ("🌱 Priority: Least Played", "least_played"),
+    ("⭐ Most Played", "most_played"),
     ("🔥 Energy (high→low)", "energy_desc"),
     ("🌙 Energy (low→high)", "energy_asc"),
     ("🥁 BPM (fast→slow)", "bpm_desc"),
@@ -1018,7 +1020,7 @@ class KaraokeTui(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
-        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Genre/Feel", "Src", "♪")
+        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Genre/Feel", "▶", "Src", "♪")
         self.load_songs()
         self._render_mood_slider()
         self._show_selected_song()
@@ -1149,6 +1151,10 @@ class KaraokeTui(App):
                     return 0.0
             return 0.0
 
+        def _plays_of(song: dict) -> int:
+            v = song.get("play_count")
+            return int(v) if isinstance(v, (int, float)) else 0
+
         if self._sort == "energy_desc":
             filtered.sort(key=lambda s: s["_energy"], reverse=True)
         elif self._sort == "energy_asc":
@@ -1159,6 +1165,10 @@ class KaraokeTui(App):
             filtered.sort(key=_bpm_of)
         elif self._sort == "key":
             filtered.sort(key=lambda s: str(s.get("key") or "~"))
+        elif self._sort == "least_played":
+            filtered.sort(key=lambda s: (_plays_of(s), str(s.get("artist") or "")))
+        elif self._sort == "most_played":
+            filtered.sort(key=_plays_of, reverse=True)
         # "artist" keeps the SQL ORDER BY t.artist, t.title.
 
         for song in filtered:
@@ -1189,6 +1199,7 @@ class KaraokeTui(App):
                 bpm_display,
                 e_str,
                 genre_feel,
+                str(_plays_of(song)),
                 str(song.get("kind") or "—"),
                 "♪" if song.get("synced_lyrics") else (
                     "·" if song.get("plain_lyrics") else " "
@@ -1241,7 +1252,7 @@ class KaraokeTui(App):
         # opens in the browser. Deterministic per track (see browse.py).
         cur.execute(
             """
-            SELECT t.track_id, t.artist, t.title,
+            SELECT t.track_id, t.artist, t.title, t.play_count,
                    COALESCE(s.url, '') AS url,
                    COALESCE(s.kind, '') AS kind,
                    COALESCE(l.source, '') AS lyric_source,
@@ -1289,6 +1300,7 @@ class KaraokeTui(App):
                 "energy": row["energy"],
                 "brightness": row["brightness"],
                 "genre": row["genre"],
+                "play_count": row["play_count"],
                 "lyric_source": row["lyric_source"],
                 "synced_lyrics": row["synced_lyrics"],
                 "plain_lyrics": row["plain_lyrics"],

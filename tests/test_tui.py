@@ -355,6 +355,33 @@ def test_queue_filtering_on_mood_change(monkeypatch):
     assert app._queue[0]["title"] == "Anthem"
 
 
+def test_play_count_migration_and_increment(tmp_path):
+    """play_count column is backfilled from play_events and bumped on play."""
+    from karaoke import localcache
+
+    conn = localcache.connect(tmp_path / "pc.db")
+    # Seed a track and some historical play events.
+    localcache.add_track_source("Flea", "A Plea", conn=conn)
+    for _ in range(3):
+        localcache.log_event("file", "play", artist="Flea", title="A Plea", conn=conn)
+
+    # A fresh connect() re-runs ensure_play_count_column, which backfills.
+    conn.close()
+    conn = localcache.connect(tmp_path / "pc.db")
+    row = conn.execute(
+        "SELECT play_count FROM tracks WHERE artist='Flea' AND title='A Plea'"
+    ).fetchone()
+    assert row["play_count"] == 3
+
+    # A new play event increments the denormalised counter.
+    localcache.log_event("file", "play", artist="Flea", title="A Plea", conn=conn)
+    row = conn.execute(
+        "SELECT play_count FROM tracks WHERE artist='Flea' AND title='A Plea'"
+    ).fetchone()
+    assert row["play_count"] == 4
+    conn.close()
+
+
 # --- A: approve for post-processing ---------------------------------------
 
 def _approver(monkeypatch, tmp_path):

@@ -189,6 +189,29 @@ def ensure_gap_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_play_count_column(conn: sqlite3.Connection) -> None:
+    """Add tracks.play_count and backfill it from play_events (idempotent).
+
+    Play counts drive the "priority: least played" sort so undiscovered tracks
+    surface first. The column is denormalised for cheap sorting; it is kept in
+    step by record_event and seeded here from the historical play_events log.
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(tracks)")}
+    if "play_count" not in have:
+        conn.execute("ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            UPDATE tracks SET play_count = COALESCE((
+                SELECT COUNT(*) FROM play_events p
+                WHERE p.event IN ('play', 'discover')
+                  AND LOWER(p.artist) = LOWER(tracks.artist)
+                  AND LOWER(p.title) = LOWER(tracks.title)
+            ), 0)
+            """
+        )
+        conn.commit()
+
+
 def normalize_gap_metadata(artist: str, title: str) -> Optional[tuple[str, str]]:
     """Normalize player metadata for the gap queue, or None if unusable.
 
@@ -914,6 +937,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)
+    ensure_play_count_column(conn)
     ensure_sync_offset_columns(conn)
     ensure_spotify_lookup_table(conn)
     ensure_restricted_table(conn)
@@ -1361,6 +1385,12 @@ def log_event(
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (time.time(), mode, artist, title, event, source, int(has_synced)),
         )
+        if event in ("play", "discover") and (artist or title):
+            c.execute(
+                "UPDATE tracks SET play_count = play_count + 1"
+                " WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)",
+                (artist, title),
+            )
         c.commit()
     except Exception:
         pass

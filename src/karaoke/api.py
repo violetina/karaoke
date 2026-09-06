@@ -48,6 +48,7 @@ class TrackResponse(BaseModel):
     energy: Optional[float] = None
     brightness: Optional[float] = None
     genre: Optional[str] = None
+    play_count: int = 0
     has_synced_lyrics: bool = False
 
 
@@ -94,7 +95,7 @@ def list_tracks(
         ensure_schema(conn)
         cur = conn.cursor()
         base = """
-            SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
+            SELECT t.track_id, t.artist, t.title, t.album, t.duration, t.play_count, s.url, s.kind,
                    a.detected_key AS key, a.bpm, a.energy, a.brightness, g.genre,
                    EXISTS(
                        SELECT 1 FROM lyrics l
@@ -154,6 +155,7 @@ def list_tracks(
                 "energy": row["energy"],
                 "brightness": row["brightness"],
                 "genre": row["genre"] or "",
+                "play_count": row["play_count"] or 0,
                 "has_synced_lyrics": bool(row["has_synced"]),
             }
             for row in cur.fetchall()
