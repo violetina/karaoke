@@ -25,6 +25,8 @@ class KaraokeBrowser(App):
 
     def __init__(self):
         super().__init__()
+        from .api_client import ApiClient
+        self.api = ApiClient()
         self._song_data = []
 
     def on_mount(self) -> None:
@@ -40,13 +42,23 @@ class KaraokeBrowser(App):
         yield Footer()
 
     def load_songs(self) -> None:
-        """Load songs from the database and populate the table."""
+        """Load songs using ApiClient (HTTP when server up, SQLite fallback)."""
         table = self.query_one(DataTable)
+        tracks = self.api.list_tracks(limit=5000)
+        if tracks:
+            for t in tracks:
+                self._song_data.append({
+                    'artist': t.get('artist', ''),
+                    'title': t.get('title', ''),
+                    'url': t.get('url', ''),
+                    'kind': t.get('kind', ''),
+                })
+                table.add_row(t.get('artist', ''), t.get('title', ''))
+            return
+
+        # Direct DB fallback if API returns empty
         with localcache.connect() as conn:
             cur = conn.cursor()
-            # Prefer a browser-openable source (youtube/http) over spotify so
-            # Enter opens the song in the browser rather than depending on the
-            # Spotify desktop app. Selection is deterministic per track.
             cur.execute(
                 """
                 SELECT t.artist, t.title, s.url, s.kind
@@ -100,27 +112,13 @@ class KaraokeBrowser(App):
             LOG_FILE,
         )
 
-        if not url:
-            query = quote_plus(f"{artist} {title}".strip())
-            if not query:
-                log.warning("action_select_song: No url, artist, or title available to search.")
-                self.notify("No URL or search terms for this row", severity="warning")
-                return
-            url = f"https://www.youtube.com/results?search_query={query}"
-            kind = "youtube_search"
-            log.info("action_select_song: Falling back to youtube search: %s", url)
-
-        try:
-            pid = open_song_url(url, kind)
-            if pid is None:
-                self.notify(f"Opened {artist} - {title}")
-            else:
-                self.notify(f"Opening {artist} - {title} (pid {pid})")
-            log.info("action_select_song: launch requested successfully pid=%s", pid)
-        except Exception as e:
-            log.exception("action_select_song: Failed to launch player for %s", url)
+        res = self.api.play(url=url, kind=kind, artist=artist, title=title)
+        if res.get("status") in ("launched", "ok"):
+            self.notify(f"Opening {artist} - {title}")
+        else:
+            self.notify(f"Play failed for {artist} - {title}", severity="warning")
+            log.warning("action_select_song: Failed to launch player for %s: %s", url, res.get("detail"))
             self.notify(f"Error launching URL; see {LOG_FILE}", severity="error")
-            textual_log(f"Error launching: {e}")
 
 
 def browse_main() -> int:

@@ -174,9 +174,14 @@ def get_track(track_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/stats")
-def get_stats() -> dict[str, Any]:
-    """Return local cache summary statistics."""
-    summary = localcache.summarize()
+def get_stats(
+    limit: int = Query(10, ge=1, le=100),
+    days: Optional[float] = Query(None, description="Only count events in the last N days"),
+) -> dict[str, Any]:
+    """Return local cache summary statistics, with optional top-N and time window."""
+    import time as _time
+    since = _time.time() - days * 86400 if days else None
+    summary = localcache.summarize(limit=limit, since=since)
     return {
         "total_events": summary.total_events,
         "plays": summary.plays,

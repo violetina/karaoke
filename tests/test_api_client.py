@@ -43,3 +43,37 @@ def test_client_list_recordings_fallback(client):
          patch("karaoke.api.list_recordings", return_value={"recordings": [], "count": 0}):
         res = client.list_recordings()
         assert res["count"] == 0
+
+
+def test_client_get_stats_http(client):
+    fake = {"plays": 5, "total_events": 5, "top_tracks": []}
+    with patch("karaoke.api_client.ApiClient._http_get", return_value=fake):
+        res = client.get_stats(limit=5, days=7)
+        assert res["plays"] == 5
+
+
+def test_client_list_tracks_http(client):
+    with patch("karaoke.api_client.ApiClient._http_get",
+               return_value=[{"artist": "A", "title": "B"}]):
+        res = client.list_tracks(limit=10)
+        assert res[0]["artist"] == "A"
+
+
+def test_client_list_tracks_empty_on_failure(client):
+    with patch("karaoke.api_client.ApiClient._http_get", return_value=None):
+        assert client.list_tracks() == []
+
+
+def test_client_record_analyse_fallback_runs_sync(client):
+    with patch("karaoke.api_client.ApiClient._http_post", return_value=None), \
+         patch("karaoke.recording_worker.analyse", return_value=["ok  A - B"]):
+        res = client.record_analyse(7, keep=True)
+        assert res["status"] == "analysed"
+        assert res["lines"] == ["ok  A - B"]
+
+
+def test_client_record_discard_http(client):
+    with patch("karaoke.api_client.ApiClient._http_delete",
+               return_value={"status": "discarded", "freed_bytes": 1000}):
+        res = client.record_discard_audio(3)
+        assert res["freed_bytes"] == 1000

@@ -72,6 +72,9 @@ def test_load_songs_prefers_browser_openable_source(tmp_path, monkeypatch):
     monkeypatch.setattr(browse.localcache, "connect", lambda *a, **k: _real_connect(db))
 
     app = browse.KaraokeBrowser()
+    # Force the SQLite fallback path: this test exercises the source-preference
+    # SQL, not the HTTP client (which may hit a live server on the dev box).
+    monkeypatch.setattr(app.api, "list_tracks", lambda *a, **k: [])
 
     class FakeTable:
         def add_row(self, *args):

@@ -110,6 +110,16 @@ The TUI (`karaoke.tui.KaraokeTui`) routes player controls (play/pause, next,
 previous, seek) and record start/stop through this client; a web UI does the
 same over HTTP with no new backend code.
 
+Also ported onto `ApiClient` (HTTP-first, SQLite/in-process fallback):
+
+- `karaoke.browse.KaraokeBrowser` — track listing (`list_tracks`) and playback (`play`).
+- `karaoke-stats` (`cli.stats_main`) — reads `GET /api/stats?limit=&days=`.
+- `karaoke-recording --analyse/--discard` (`recording_worker.recording_main`) —
+  mutating actions go through `record_analyse` / `record_discard_audio`.
+
+`GET /api/stats` now accepts `limit` (top-N) and `days` (time window) so the CLI
+and a web dashboard read identical numbers.
+
 ## Related
 
 - [Library API](api.md) — read-only tracks, lyrics, stats, recordings inspection

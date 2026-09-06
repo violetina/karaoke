@@ -111,8 +111,8 @@ class ApiClient:
     def get_track(self, track_id: int) -> Optional[dict[str, Any]]:
         return self._http_get(self.lib_url, f"/api/tracks/{track_id}")
 
-    def get_stats(self) -> Optional[dict[str, Any]]:
-        return self._http_get(self.lib_url, "/api/stats")
+    def get_stats(self, limit: int = 10, days: Optional[float] = None) -> Optional[dict[str, Any]]:
+        return self._http_get(self.lib_url, "/api/stats", {"limit": limit, "days": days})
 
     def list_recordings(
         self,
@@ -300,10 +300,14 @@ class ApiClient:
         if res is not None:
             return res
         if self.fallback_local:
-            from .ctrl_api import record_analyse
-            from fastapi import BackgroundTasks
-            bt = BackgroundTasks()
-            return record_analyse(recording_id, background=bt, keep=keep)
+            # No server: run synchronously in-process and return the result lines
+            # (the HTTP endpoint runs this in the background instead).
+            from . import recording_worker
+            try:
+                lines = recording_worker.analyse(recording_id, keep=True if keep else None)
+                return {"status": "analysed", "recording_id": recording_id, "lines": lines}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
         return {"status": "unreachable"}
 
     def record_discard_audio(self, recording_id: int) -> dict[str, Any]:
