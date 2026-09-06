@@ -289,6 +289,7 @@ def analyse_segment(segment: Segment, files: list[SegmentFile],
                 energy=result.energy,
                 brightness=result.brightness,
                 analyzer_version=result.version,
+                source_kind="recording",
                 conn=c,
             )
         finally:

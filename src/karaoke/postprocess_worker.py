@@ -75,6 +75,7 @@ def _run_analysis(track_id: int, audio_path: Path, conn) -> bool:
             energy=result.energy,
             brightness=result.brightness,
             analyzer_version=result.version,
+            source_kind="postprocess",
             conn=conn,
         )
         log.info("postprocess: analyzed track %s (key=%s bpm=%s)",

@@ -71,6 +71,14 @@ def test_client_list_tracks_empty_on_failure(client):
         assert client.list_tracks() == []
 
 
+def test_client_get_track_analysis_history(client):
+    fake = {"track_id": 42, "history": [{"method": "essentia+sample"}], "count": 1}
+    with patch("karaoke.api_client.ApiClient._http_get", return_value=fake):
+        assert client.get_track_analysis_history(42)["count"] == 1
+    with patch("karaoke.api_client.ApiClient._http_get", return_value=None):
+        assert client.get_track_analysis_history(42) == {"track_id": 42, "history": [], "count": 0}
+
+
 def test_client_record_analyse_fallback_runs_sync(client):
     with patch("karaoke.api_client.ApiClient._http_post", return_value=None), \
          patch("karaoke.recording_worker.analyse", return_value=["ok  A - B"]):

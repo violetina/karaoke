@@ -739,6 +739,7 @@ def analyze_main(argv: Optional[list[str]] = None) -> int:
                     energy=result.energy,
                     brightness=result.brightness,
                     analyzer_version=result.version,
+                    source_kind="cli",
                     conn=conn,
                 )
                 print(f"stored analysis for track_id={track_id}", file=sys.stderr)

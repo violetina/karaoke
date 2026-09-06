@@ -116,6 +116,12 @@ class ApiClient:
     def get_track(self, track_id: int) -> Optional[dict[str, Any]]:
         return self._http_get(self.lib_url, f"/api/tracks/{track_id}")
 
+    def get_track_analysis_history(self, track_id: int) -> dict[str, Any]:
+        res = self._http_get(self.lib_url, f"/api/tracks/{track_id}/analysis/history")
+        if res is not None:
+            return res
+        return {"track_id": track_id, "history": [], "count": 0}
+
     def get_stats(self, limit: int = 10, days: Optional[float] = None) -> Optional[dict[str, Any]]:
         return self._http_get(self.lib_url, "/api/stats", {"limit": limit, "days": days})
 

@@ -163,3 +163,15 @@ def test_sample_stream_sends_start_and_complete(ctrl):
     assert "event: complete" in text
     assert '"key": "G Major"' in text
     assert '"bpm": 123.0' in text
+
+
+# -- record mode reuse ---------------------------------------------------
+
+def test_record_start_reuses_active_session(ctrl):
+    with patch("karaoke.recorder.active_sessions", return_value=[42]), \
+         patch("karaoke.recorder.session_source", return_value="alsa_output.monitor"), \
+         patch("karaoke.recorder.session_directory", return_value=MagicMock(__str__=lambda self: "/path/to/rec")):
+        body = ctrl.post("/api/record/start", json={"source": "alsa_output.monitor"}).json()
+        assert body["status"] == "recording"
+        assert body["recording_id"] == 42
+        assert body["reused"] is True

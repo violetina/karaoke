@@ -70,6 +70,22 @@ def test_save_detected_and_read_back(tmp_path):
     got = track_analysis.get_analysis(tid, conn)
     assert got is not None and got.detected_key == Key(9, "minor")
     assert got.energy == 0.72
+    history = track_analysis.get_analysis_history(tid, conn)
+    assert len(history) == 1
+    assert history[0]["detected_key"] == "A minor"
+    assert history[0]["bpm"] == 95.0
+    assert history[0]["method"] == "essentia-edma-vote"
+    assert history[0]["source_kind"] == "essentia-edma-vote"
+
+    track_analysis.save_detected(
+        tid, detected_key=Key(2, "major"), bpm=96.0,
+        method="essentia-edma-vote+sample", source_kind="sample", conn=conn,
+    )
+    history = track_analysis.get_analysis_history(tid, conn)
+    assert len(history) == 2
+    assert history[0]["detected_key"] == "D major"
+    assert history[0]["method"] == "essentia-edma-vote+sample"
+    assert history[0]["source_kind"] == "sample"
 
 
 def test_verify_key_relative_reconciliation(tmp_path):

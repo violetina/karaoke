@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from karaoke import api as api_mod
 from karaoke import ctrl_api as ctrl_mod
 from karaoke import localcache
+from karaoke import track_analysis
+from karaoke.musictheory import Key
 
 # Capture the real connect() before monkeypatching to avoid infinite recursion.
 _real_connect = localcache.connect
@@ -84,6 +86,26 @@ def test_get_track_detail_includes_sources(db, client):
     body = resp.json()
     assert body["title"] == "Creep"
     assert body["sources"][0]["url"] == "https://youtu.be/XFkzRNyygfk"
+
+
+def test_get_track_analysis_history(db, client):
+    db_path, track_id = db
+    conn = _real_connect(db_path)
+    try:
+        track_analysis.save_detected(
+            track_id, detected_key=Key(9, "minor"), bpm=92.0,
+            method="essentia-edma-vote+sample", conn=conn,
+        )
+    finally:
+        conn.close()
+
+    resp = client.get(f"/api/tracks/{track_id}/analysis/history")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["track_id"] == track_id
+    assert body["count"] == 1
+    assert body["history"][0]["detected_key"] == "A minor"
+    assert body["history"][0]["method"] == "essentia-edma-vote+sample"
 
 
 def test_get_track_missing_returns_404(db, client):

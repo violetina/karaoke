@@ -203,6 +203,11 @@ def scan_and_ingest_folder(
                     method=f"{analysis_res.method}+folder_scan",
                     energy=analysis_res.energy,
                     brightness=analysis_res.brightness,
+                    source_kind=(
+                        "recording" if "recordings" in str(path)
+                        else "youtube_cache" if localcache.extract_youtube_id(path.name)
+                        else "local"
+                    ),
                     conn=c,
                 )
 

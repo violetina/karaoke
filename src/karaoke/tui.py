@@ -984,7 +984,12 @@ class KaraokeTui(App):
         # live capture. Close it out so the listing does not lie and its audio
         # becomes analysable.
         try:
-            recorder.reconcile_stale()
+            rec_status = self.api.record_status()
+            active = rec_status.get("recording", [])
+            if active:
+                self._recording_id = active[0]["recording_id"]
+            else:
+                recorder.reconcile_stale()
             self._warn_unanalysed_recordings()
             # Audio is kept after analysis now, so something has to bound it.
             from . import recording_worker
@@ -1694,6 +1699,11 @@ class KaraokeTui(App):
         # leaving it running on exit repeats the orphan above in miniature.
         self._cancel_sample = True
         try:
+            if hasattr(self, "api") and self.api is not None:
+                self.api.record_stop()
+        except Exception:
+            log.debug("stopping recordings via api on exit failed", exc_info=True)
+        try:
             recorder.stop_all()
         except Exception:
             log.debug("stopping recordings on exit failed", exc_info=True)
@@ -1731,10 +1741,6 @@ class KaraokeTui(App):
             self._recording_id = None
             self._record_marks = None
             self._refresh_record_status()
-            # Recording and analysing were separate steps with nothing joining
-            # them, so finished sessions simply accumulated -- four of them,
-            # nearly a gigabyte, before anyone noticed. Stopping now starts the
-            # analysis.
             if recorded:
                 self._analyse_recording(stopped_id)
             return
@@ -1746,7 +1752,10 @@ class KaraokeTui(App):
             return
         self._recording_id = result["recording_id"]
         directory = Path(result.get("dir", "")).name
-        self.notify(f"Recording {self._recording_id} to {directory}")
+        if result.get("reused"):
+            self.notify(f"Reattached to active recording {self._recording_id}")
+        else:
+            self.notify(f"Recording {self._recording_id} to {directory}")
         self._refresh_record_status()
 
     def _analyse_recording(self, recording_id: int) -> None:
@@ -1798,32 +1807,64 @@ class KaraokeTui(App):
 
     def _refresh_record_status(self) -> None:
         """Keep the recording indicator current; also catches a died recorder."""
-        panel = self.query_one("#record-panel", Static)
+        try:
+            panel = self.query_one("#record-panel", Static)
+        except Exception:
+            return
         if self._recording_id is None:
+            rec_status = self.api.record_status()
+            active = rec_status.get("recording", [])
+            if active:
+                self._recording_id = int(active[0]["recording_id"])
+            else:
+                panel.set_class(False, "-on")
+                panel.update("")
+                return
+
+        rec_status = self.api.record_status()
+        active = rec_status.get("recording", [])
+        active_map = {int(item["recording_id"]): item for item in active}
+
+        rec_id = self._recording_id
+        if rec_id is None:
             panel.set_class(False, "-on")
             panel.update("")
             return
-        if not recorder.is_running(self._recording_id):
+
+        if rec_id in active_map:
+            item = active_map[rec_id]
+            self._record_tick += 1
+            panel.set_class(True, "-on")
+            panel.update(record_panel(
+                recording_id=rec_id,
+                elapsed_s=float(item.get("elapsed_s") or 0.0),
+                marks_ok=int(item.get("identified") or 0),
+                marks_total=int(item.get("marks") or 0),
+                size_bytes=int(item.get("audio_bytes") or 0),
+                source=str(item.get("source") or ""),
+                blink=self._record_tick % 2 == 1,
+            ))
+            return
+
+        if not recorder.is_running(rec_id):
             # The capture died on its own (ffmpeg exited, or a cap was hit).
-            self.notify(f"Recording {self._recording_id} ended", severity="warning")
+            self.notify(f"Recording {rec_id} ended", severity="warning")
             self._recording_id = None
             panel.set_class(False, "-on")
             panel.update("")
             return
 
         self._record_tick += 1
-        # The clock and the blink want a fast refresh; the mark count is a
-        # database round trip and does not, so it is sampled every fifth tick.
         if self._record_tick % 5 == 1 or self._record_marks is None:
-            self._record_marks = recorder.mark_count(self._recording_id)
-        directory = recorder.session_directory(self._recording_id)
+            self._record_marks = recorder.mark_count(rec_id)
+        directory = recorder.session_directory(rec_id)
         panel.set_class(True, "-on")
         panel.update(record_panel(
-            recording_id=self._recording_id,
-            elapsed_s=recorder.elapsed(self._recording_id) or 0.0,
+            recording_id=rec_id,
+            elapsed_s=recorder.elapsed(rec_id) or 0.0,
             marks_ok=self._record_marks[0], marks_total=self._record_marks[1],
             size_bytes=recorder.directory_size(directory) if directory else 0,
-            source=recorder.session_source(self._recording_id) or "",
+            source=recorder.session_source(rec_id) or "",
             blink=self._record_tick % 2 == 1,
         ))
 
@@ -2421,8 +2462,11 @@ class KaraokeTui(App):
         a wrong match obviously wrong rather than merely odd, and it is the only
         thing that still works on a terminal without colour.
         """
-        square_panel = self.query_one("#mood-square", Static)
-        label_panel = self.query_one("#mood-label", Static)
+        try:
+            square_panel = self.query_one("#mood-square", Static)
+            label_panel = self.query_one("#mood-label", Static)
+        except Exception:
+            return
         
         if mood != self._mood_shown or self._mood_art is None:
             if mood != self._mood_shown:
@@ -2473,7 +2517,10 @@ class KaraokeTui(App):
             log.debug("mood art dispatch failed", exc_info=True)
 
     def _update_keybpm(self, song: SongMapping | None) -> None:
-        panel = self.query_one("#keybpm", Static)
+        try:
+            panel = self.query_one("#keybpm", Static)
+        except Exception:
+            return
         if song is None:
             panel.update("key: —\nbpm: —")
             return
@@ -2560,9 +2607,12 @@ class KaraokeTui(App):
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)
         cartwheel = visuals.cartwheel_frame(bpm, elapsed)
-        self.query_one("#ascii-visual", Static).update(
-            f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
-        )
+        try:
+            self.query_one("#ascii-visual", Static).update(
+                f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
+            )
+        except Exception:
+            pass
 
     def cover_source(self, url: str = "") -> "os.PathLike | None":
         """Where to get artwork for the current track.

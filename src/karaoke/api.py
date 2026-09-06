@@ -173,6 +173,16 @@ def get_track(track_id: int) -> dict[str, Any]:
         }
 
 
+@app.get("/api/tracks/{track_id}/analysis/history")
+def get_track_analysis_history(track_id: int) -> dict[str, Any]:
+    """Get historical analysis versions (scans, sample events, multi-source checks) for a track."""
+    from . import track_analysis
+
+    with localcache.connect() as conn:
+        history = track_analysis.get_analysis_history(track_id, conn)
+        return {"track_id": track_id, "history": history, "count": len(history)}
+
+
 @app.get("/api/stats")
 def get_stats(
     limit: int = Query(10, ge=1, le=100),

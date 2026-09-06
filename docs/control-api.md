@@ -80,7 +80,8 @@ Pipeline per file (`karaoke.folder_scan.scan_and_ingest_folder`):
 4. **Resolve** YouTube (`youtube.search` + `source_select.select_best_source`)
    and Spotify (`SpotifyClient.search_track`).
 5. **Ingest** into SQLite (`tracks`, `sources`, `lyrics`, `track_analysis`,
-   `track_genre`).
+   `track_analysis_history`, `track_genre`). `sources` accumulates local,
+   YouTube/YT Music, and Spotify rows; it does not replace existing sources.
 
 ## Audio cut
 
@@ -99,6 +100,7 @@ is **400**, a missing ffmpeg is **503**.
 ```
 POST   /api/sample                       key/BPM from a short live excerpt (sync)
 GET    /api/sample/stream                SSE: start/progress/complete/error events
+GET    /api/tracks/{id}/analysis/history analysis versions from samples/scans
 POST   /api/record/start                 begin unattended capture (body: source?, keep_audio?, note?)
 POST   /api/record/stop                  stop one or all captures
 GET    /api/record/status                captures running in this process
@@ -120,6 +122,12 @@ data: {"status":"analysed", "key":"G Major", "bpm":123.0, ...}
 ```
 
 `ApiClient.sample_stream_url(...)` returns the URL for a TUI/web EventSource.
+
+Sample mode stores analysis when the request has a resolvable `artist` and
+`title`: it upserts the current `track_analysis` row and appends an immutable
+`track_analysis_history` entry. Re-running a scan or sample therefore updates the
+canonical key/BPM/energy/brightness but preserves previous versions for comparing
+sample vs full-file, local vs YouTube, or later source-specific runs.
 
 See [Record mode](modes/record.md) for the capture/decompile detail.
 

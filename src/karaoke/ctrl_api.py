@@ -17,6 +17,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 from urllib.parse import quote_plus
 
@@ -29,6 +30,17 @@ from .player_open import open_song_url
 
 CTRL_API_VERSION = "0.5.0"
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from . import recorder
+    try:
+        recorder.reconcile_stale()
+    except Exception:
+        log.debug("reconciling stale recordings on ctrl_api startup failed", exc_info=True)
+    yield
+
+
 app = FastAPI(
     title="Karaoke Control API",
     description=(
@@ -36,6 +48,7 @@ app = FastAPI(
         "and launches media players; not intended for cluster deployment."
     ),
     version=CTRL_API_VERSION,
+    lifespan=lifespan,
 )
 
 
@@ -204,6 +217,20 @@ def stop_play_session(session_id: str) -> dict[str, Any]:
 def record_start(req: RecordRequest) -> dict[str, Any]:
     """Begin recording the playing output and marking what is on it."""
     from . import recorder
+
+    active = recorder.active_sessions()
+    if active:
+        for sid in active:
+            src = recorder.session_source(sid)
+            if not req.source or req.source == src:
+                dir_path = recorder.session_directory(sid)
+                return {
+                    "status": "recording",
+                    "recording_id": sid,
+                    "source": src or "",
+                    "dir": str(dir_path) if dir_path else "",
+                    "reused": True,
+                }
 
     try:
         session = recorder.start(req.source or "", keep_audio=req.keep_audio, note=req.note)
