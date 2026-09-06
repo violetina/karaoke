@@ -84,6 +84,9 @@ MOOD_GLYPHS = {
 FILTER_OPTIONS = [
     ("Working songs (have lyrics)", "working"),
     ("All songs", "all"),
+    ("🔥 High Energy (>75%)", "high_energy"),
+    ("⚡ Groovy / Upbeat (40-75%)", "groovy"),
+    ("🌙 Chill / Mellow (<40%)", "mellow"),
     ("Staging queue", "staging"),
     ("Spotify tracks", "spotify"),
 ]
@@ -969,7 +972,7 @@ class KaraokeTui(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
-        table.add_columns("Artist", "Title", "Src", "♪")
+        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Src", "♪")
         self.load_songs()
         self._show_selected_song()
         self.set_interval(1.5, self._poll_detection)
@@ -1018,14 +1021,54 @@ class KaraokeTui(App):
                 self._load_spotify(conn)
             else:
                 self._load_tracks(conn, only_working=self._filter == "working")
+
+        filtered = []
         for song in self._song_data:
+            energy_val = song.get("energy")
+            bpm_val = song.get("bpm")
+            energy: float = 0.5
+            if isinstance(energy_val, (int, float, str)):
+                try:
+                    energy = float(energy_val)
+                except (ValueError, TypeError):
+                    energy = 0.5
+            elif isinstance(bpm_val, (int, float, str)):
+                try:
+                    bpm_f = float(bpm_val)
+                    energy = min(1.0, max(0.2, (bpm_f - 60.0) / 100.0))
+                except (ValueError, TypeError):
+                    energy = 0.5
+
+            if self._filter == "high_energy" and energy < 0.75:
+                continue
+            if self._filter == "groovy" and not (0.40 <= energy <= 0.75):
+                continue
+            if self._filter == "mellow" and energy > 0.40:
+                continue
+
+            filtered.append(song)
+            e_bar = "🔥" if energy >= 0.75 else "⚡" if energy >= 0.40 else "🌙"
+            e_str = f"{e_bar} {int(energy * 100)}%"
+
+            bpm_display = "—"
+            if isinstance(bpm_val, (int, float, str)):
+                try:
+                    bpm_display = f"{float(bpm_val):.0f}"
+                except (ValueError, TypeError):
+                    bpm_display = "—"
+
             table.add_row(
                 str(song.get("artist") or ""),
                 str(song.get("title") or ""),
+                str(song.get("key") or "—"),
+                bpm_display,
+                e_str,
                 str(song.get("kind") or "—"),
                 "♪" if song.get("synced_lyrics") else (
-                    "·" if song.get("plain_lyrics") else " "),
+                    "·" if song.get("plain_lyrics") else " "
+                ),
             )
+        self._song_data = filtered
 
     def _load_spotify(self, conn) -> None:
         """Tracks that have a Spotify source, joined to that source.
@@ -1077,7 +1120,8 @@ class KaraokeTui(App):
                    COALESCE(s.kind, '') AS kind,
                    COALESCE(l.source, '') AS lyric_source,
                    COALESCE(l.synced_lyrics, '') AS synced_lyrics,
-                   COALESCE(l.plain_lyrics, '') AS plain_lyrics
+                   COALESCE(l.plain_lyrics, '') AS plain_lyrics,
+                   a.detected_key AS key, a.bpm, a.energy
             FROM tracks t
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
@@ -1095,6 +1139,8 @@ class KaraokeTui(App):
             )
             LEFT JOIN lyrics l
               ON t.track_id = l.track_id AND l.kind = 'approved'
+            LEFT JOIN track_analysis a
+              ON a.track_id = t.track_id
             GROUP BY t.track_id
             ORDER BY t.artist, t.title
             """
@@ -1109,6 +1155,9 @@ class KaraokeTui(App):
                 "title": row["title"],
                 "url": row["url"],
                 "kind": row["kind"],
+                "key": row["key"],
+                "bpm": row["bpm"],
+                "energy": row["energy"],
                 "lyric_source": row["lyric_source"],
                 "synced_lyrics": row["synced_lyrics"],
                 "plain_lyrics": row["plain_lyrics"],
