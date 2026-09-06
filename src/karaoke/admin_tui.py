@@ -47,16 +47,30 @@ class KaraokeAdminApp(App):
         self.api = ApiClient()
         self._target_workers = 1
         self._bg_busy = False
+        self._bg_lock = None
 
     def _acquire_bg_lock(self) -> bool:
+        # In-process guard first (fast path), then a cross-process lockfile so a
+        # concurrent run from another karaoke process (CLI, second TUI, cron) is
+        # also refused rather than double-writing indices.
         if getattr(self, "_bg_busy", False):
             self.notify("Another task is currently running. Please wait...", severity="warning")
             return False
+        from .lockfile import ProcessLock
+        lock = ProcessLock("admin_pipeline")
+        if not lock.acquire():
+            self.notify("A pipeline task is running in another process. Please wait...", severity="warning")
+            return False
+        self._bg_lock = lock
         self._bg_busy = True
         return True
 
     def _release_bg_lock(self) -> None:
         self._bg_busy = False
+        lock = getattr(self, "_bg_lock", None)
+        if lock is not None:
+            lock.release()
+            self._bg_lock = None
 
     def compose(self) -> ComposeResult:
         yield Header()

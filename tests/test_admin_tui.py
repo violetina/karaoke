@@ -40,6 +40,8 @@ def test_admin_app_scaling_actions(monkeypatch):
 def test_admin_pipeline_actions_dispatch(monkeypatch):
     """The audio-processing controls launch background workers without raising."""
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    app._bg_busy = False
+    app._bg_lock = None
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
 
@@ -47,10 +49,11 @@ def test_admin_pipeline_actions_dispatch(monkeypatch):
     monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
 
     app.action_run_backfill()
-    app._bg_busy = False
+    app._release_bg_lock()
     app.action_rebuild_vectors()
-    app._bg_busy = False
+    app._release_bg_lock()
     app.action_analyse_recordings()
+    app._release_bg_lock()
 
     # Each control notified the user and queued exactly one background worker.
     assert len(started) == 3
@@ -61,6 +64,8 @@ def test_admin_pipeline_actions_dispatch(monkeypatch):
 def test_admin_whisper_align_dispatch(monkeypatch):
     """Whisper alignment control dispatches background worker when inputs are given."""
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    app._bg_busy = False
+    app._bg_lock = None
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
 
@@ -78,28 +83,35 @@ def test_admin_whisper_align_dispatch(monkeypatch):
 
     monkeypatch.setattr(app, "query_one", fake_query, raising=False)
 
-    app.action_align_whisper()
-    assert len(started) == 1
-    assert callable(started[0])
-    assert "Aligning lyrics for '62'" in notifications[0]
+    try:
+        app.action_align_whisper()
+        assert len(started) == 1
+        assert callable(started[0])
+        assert "Aligning lyrics for '62'" in notifications[0]
+    finally:
+        app._release_bg_lock()
 
 
 def test_admin_single_operation_guard(monkeypatch):
     """A second audio task is refused while one is already running."""
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app._bg_busy = False
+    app._bg_lock = None
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append((msg, k)), raising=False)
 
     started = []
     monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
 
-    # First rebuild acquires the lock and dispatches a worker.
-    app.action_rebuild_vectors()
-    assert len(started) == 1
-    assert app._bg_busy is True
+    try:
+        # First rebuild acquires the lock and dispatches a worker.
+        app.action_rebuild_vectors()
+        assert len(started) == 1
+        assert app._bg_busy is True
 
-    # Second rebuild is refused (lock held) — no new worker, a warning fires.
-    app.action_rebuild_vectors()
-    assert len(started) == 1
-    assert any(k.get("severity") == "warning" for _, k in notifications)
+        # Second rebuild is refused (lock held) — no new worker, a warning fires.
+        app.action_rebuild_vectors()
+        assert len(started) == 1
+        assert any(k.get("severity") == "warning" for _, k in notifications)
+    finally:
+        app._release_bg_lock()

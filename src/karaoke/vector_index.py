@@ -7,13 +7,10 @@ semantic search and future training features.
 from __future__ import annotations
 
 import argparse
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
-
-_REBUILD_LOCK = threading.Lock()
 
 from . import localcache
 from .config import settings
@@ -277,9 +274,11 @@ def rebuild_from_sqlite(
     os_client: Any = None,
 ) -> VectorIndexStats:
     """Index SQLite tracks into OpenSearch; safe to re-run."""
-    if not _REBUILD_LOCK.acquire(blocking=False):
+    from .lockfile import ProcessLock
+    lock = ProcessLock("vector_rebuild")
+    if not lock.acquire():
         from .logger import log
-        log.info("vector_index: rebuild already in progress; skipping concurrent run.")
+        log.info("vector_index: rebuild lock held by another process; skipping concurrent run.")
         return VectorIndexStats()
 
     try:
@@ -342,7 +341,7 @@ def rebuild_from_sqlite(
                 c.indices.refresh(index=f"{settings.index_name}-notes")
         return stats
     finally:
-        _REBUILD_LOCK.release()
+        lock.release()
 
 
 def vector_index_main(argv: Optional[list[str]] = None) -> int:

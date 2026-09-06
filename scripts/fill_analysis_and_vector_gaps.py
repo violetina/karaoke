@@ -16,11 +16,23 @@ os.environ["TQDM_DISABLE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from karaoke import localcache, autoclassify, track_analysis, vector_index, analyze
+from karaoke.lockfile import ProcessLock
 from karaoke.logger import log
 
 
 def main():
     print("=== KARAOKE PLATFORM GAP-FILL & VECTOR SAMPLER ===")
+    lock = ProcessLock("gap_fill")
+    if not lock.acquire():
+        print("Gap-fill pipeline is already running in another process. Exiting.")
+        return
+    try:
+        _run()
+    finally:
+        lock.release()
+
+
+def _run():
     with localcache.connect() as conn:
         cur = conn.cursor()
 
