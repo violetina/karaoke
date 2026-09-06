@@ -45,6 +45,7 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
 
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
+from .api_client import ApiClient
 from .browse import open_song_url
 from .player_open import (browser_playback, close_cdp, track_finished,
                           track_idle)
@@ -855,6 +856,11 @@ class KaraokeTui(App):
 
     def __init__(self, *, log_level: str = "err") -> None:
         super().__init__()
+        # All player control, playback, sampling and recording actions route
+        # through the API client so the TUI drives the exact same backend a
+        # future web UI will. It falls back to in-process calls when no API
+        # server is running, so single-process `karaoke-tui` still works.
+        self.api = ApiClient()
         self._song_data: list[SongRow] = []
         self._filter = "working"
         self._mode_override: str | None = None
@@ -1711,7 +1717,7 @@ class KaraokeTui(App):
         if self._recording_id is not None:
             recorded, total = recorder.mark_count(self._recording_id)
             stopped_id = self._recording_id
-            recorder.stop(stopped_id)
+            self.api.record_stop(stopped_id)
             self.notify(f"Recording {stopped_id} stopped "
                         f"({recorded}/{total} tracks identified)")
             self._recording_id = None
@@ -1724,17 +1730,15 @@ class KaraokeTui(App):
             if recorded:
                 self._analyse_recording(stopped_id)
             return
-        try:
-            session = recorder.start()
-        except recorder.RecorderError as exc:
-            self.notify(f"Cannot record: {exc}", severity="error")
+        result = self.api.record_start()
+        if result.get("status") != "recording":
+            detail = result.get("detail", "unknown error")
+            severity = "error"
+            self.notify(f"Cannot record: {detail}", severity=severity)
             return
-        except Exception as exc:
-            log.exception("failed to start recording")
-            self.notify(f"Record failed: {exc}", severity="error")
-            return
-        self._recording_id = session.recording_id
-        self.notify(f"Recording {session.recording_id} to {session.directory.name}")
+        self._recording_id = result["recording_id"]
+        directory = Path(result.get("dir", "")).name
+        self.notify(f"Recording {self._recording_id} to {directory}")
         self._refresh_record_status()
 
     def _analyse_recording(self, recording_id: int) -> None:
@@ -2119,25 +2123,25 @@ class KaraokeTui(App):
 
     def action_play_pause(self) -> None:
         if self._det.is_active:
-            ok = playerctl.play_pause(self._control_player())
+            ok = self.api.player_play_pause(self._control_player())
             if not ok:
                 self.notify("control failed", severity="warning")
 
     def action_next_track(self) -> None:
         if self._det.is_active:
-            playerctl.next_track(self._control_player())
+            self.api.player_next(self._control_player())
 
     def action_previous_track(self) -> None:
         if self._det.is_active:
-            playerctl.previous_track(self._control_player())
+            self.api.player_previous(self._control_player())
 
     def action_seek_back(self) -> None:
         if self._det.is_active:
-            playerctl.seek(-5, self._control_player())
+            self.api.player_seek(-5, self._control_player())
 
     def action_seek_fwd(self) -> None:
         if self._det.is_active:
-            playerctl.seek(5, self._control_player())
+            self.api.player_seek(5, self._control_player())
 
     # -- detection + live sync -------------------------------------------
     def _effective_detection(self) -> detect.Detection:

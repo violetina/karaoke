@@ -328,8 +328,12 @@ def test_the_tui_stops_recordings_on_exit():
 
 def _record_app(monkeypatch, *, recording_id=7, marks=(5, 6)):
     from karaoke.tui import KaraokeTui
+    from karaoke.api_client import ApiClient
 
     app = KaraokeTui.__new__(KaraokeTui)
+    # No API server in tests; the client falls back to in-process recorder calls,
+    # which are monkeypatched below.
+    app.api = ApiClient()
     app._recording_id = recording_id
     app._record_marks = None
     app._record_tick = 0

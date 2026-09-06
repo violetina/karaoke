@@ -87,6 +87,29 @@ DELETE /api/recordings/{id}/audio        drop audio, keep markers
 
 See [Record mode](modes/record.md) for the capture/decompile detail.
 
+## Client library (`karaoke.api_client.ApiClient`)
+
+`ApiClient` is the single Python entry point both the TUI and a future web UI
+use. Every method maps to one endpoint above, and falls back to the in-process
+function when no server is reachable — so `karaoke-tui` works standalone, yet the
+*same code path* drives the HTTP API the moment `karaoke-api` / `karaoke-ctrl-api`
+are running.
+
+```python
+from karaoke.api_client import ApiClient
+api = ApiClient()                      # honours KARAOKE_API_* / KARAOKE_CTRL_* env
+api.list_players()                     # -> {"players": [...], "playing": [...], "active": ...}
+api.player_play_pause("spotify")       # -> True
+api.play(artist="Portishead", title="Glory Box")
+api.sample(artist="A", title="B")
+api.scan_folder("~/Music", dry_run=True)
+api.record_start(note="evening")
+```
+
+The TUI (`karaoke.tui.KaraokeTui`) routes player controls (play/pause, next,
+previous, seek) and record start/stop through this client; a web UI does the
+same over HTTP with no new backend code.
+
 ## Related
 
 - [Library API](api.md) — read-only tracks, lyrics, stats, recordings inspection
