@@ -395,3 +395,9 @@ def test_untrusted_words_are_dropped_from_the_stream():
     toks, starts, _ = la._whisper_tokens(words, lyric_tokens=_LYRIC_TOKENS)
     assert toks == ["no"]
     assert starts == [13.0]
+
+
+def test_line_weight_respects_commas_and_breaks():
+    w_plain = la.line_weight("where mister when you are gone")
+    w_comma = la.line_weight("where, mister, when you are gone")
+    assert w_comma > w_plain

@@ -226,13 +226,20 @@ def line_weight(line: str) -> float:
     Syllables would be better than words, and words are better than nothing:
     what matters is that "I been wondering where you are" is given more of a
     gap than "what's it for". Counting characters rather than words keeps a
-    line of long words from being rushed.
+    line of long words from being rushed. Commas and punctuation add pause weight
+    for natural breathing breaks.
     """
     text = (line or "").strip()
     if not text:
         return 0.0
-    # A floor, so a one-word line still occupies a share of the gap.
-    return max(1.0, len(_WORD.findall(text.lower())) + len(text) / 12.0)
+    # Add pause weight for commas, dashes, semicolons, and periods.
+    pause_bonus = (
+        text.count(",") * 0.4
+        + text.count("—") * 0.6
+        + text.count(";") * 0.5
+        + text.count(".") * 0.7
+    )
+    return max(1.0, len(_WORD.findall(text.lower())) + len(text) / 12.0 + pause_bonus)
 
 
 def _interpolate(times: list[Optional[float]], total: Optional[float],
