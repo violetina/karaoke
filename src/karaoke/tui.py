@@ -2635,8 +2635,15 @@ class KaraokeTui(App):
             return
         # Radio mode has no MPRIS player to ask; the playhead is dead-reckoned
         # from where songrec last heard us.
-        pos = self.mic_elapsed() if self._det.mode == "radio" else \
-            playerctl.position(self._control_player())
+        pos = None
+        if self._det.mode == "radio":
+            pos = self.mic_elapsed()
+        else:
+            b_state = browser_playback()
+            if b_state and b_state.get("present") and b_state.get("position") is not None:
+                pos = float(b_state["position"])
+            else:
+                pos = playerctl.position(self._control_player())
         if pos is None:
             return
         # Pull the highlight back by the sync offset: browser MPRIS position runs

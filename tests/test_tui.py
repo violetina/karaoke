@@ -832,7 +832,7 @@ def test_load_spotify_returns_only_spotify_sourced_rows(tmp_path):
 
 def _ticking_app(monkeypatch, *, lines):
     """A KaraokeTui wired just enough to run _tick_lyrics."""
-    from karaoke import detect, playerctl
+    from karaoke import detect, playerctl, tui
     from karaoke.player import LyricTimeline
     from karaoke.tui import KaraokeTui
 
@@ -845,6 +845,7 @@ def _ticking_app(monkeypatch, *, lines):
     app._sync_mood = "neutral"
     monkeypatch.setattr(app, "_control_player", lambda: "spotify", raising=False)
     monkeypatch.setattr(playerctl, "position", lambda p="": 42.0)
+    monkeypatch.setattr(tui, "browser_playback", lambda: None)
     rendered = []
     monkeypatch.setattr(app, "_render_visuals",
                         lambda song, preview, elapsed: rendered.append(elapsed),
