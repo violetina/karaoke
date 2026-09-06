@@ -393,26 +393,23 @@ def open_song_url(url: str, kind: str | None, *, artist: str = "",
     # are often out of sync with the album/audio track.
     is_youtube = kind in ("youtube", "youtube_music", "youtube_search", "youtube_music_search") or "youtube.com" in url.lower() or "youtu.be" in url.lower()
     if is_youtube:
-        from urllib.parse import quote_plus
-        search_query = f"{artist} {title}".strip()
-        if prefer_audio and search_query:
+        from .localcache import extract_youtube_id
+        vid = extract_youtube_id(url)
+        if vid:
+            # Direct watch link in YouTube Music plays immediately!
+            url = f"https://music.youtube.com/watch?v={vid}"
+            kind = "youtube_music"
+        elif prefer_audio and f"{artist} {title}".strip():
+            from urllib.parse import quote_plus
+            search_query = f"{artist} {title}".strip()
             url = f"https://music.youtube.com/search?q={quote_plus(search_query)}"
             kind = "youtube_music_search"
-        else:
-            from .localcache import extract_youtube_id
-            vid = extract_youtube_id(url)
-            if vid:
-                url = f"https://music.youtube.com/watch?v={vid}"
-                kind = "youtube_music"
-            elif "/results?search_query=" in url:
-                # A search URL has no video id to convert, but its query does carry
-                # over — so the no-URL fallback lands in the same player as
-                # everything else instead of dropping the user into plain YouTube.
-                from urllib.parse import parse_qs, urlparse
-                query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
-                if query:
-                    url = f"https://music.youtube.com/search?q={quote_plus(query)}"
-                    kind = "youtube_music_search"
+        elif "/results?search_query=" in url:
+            from urllib.parse import parse_qs, urlparse, quote_plus
+            query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
+            if query:
+                url = f"https://music.youtube.com/search?q={quote_plus(query)}"
+                kind = "youtube_music_search"
 
     # Try to navigate an active kiosk/debugging browser first to avoid tab clutter!
     if try_chrome_cdp_navigate(url):

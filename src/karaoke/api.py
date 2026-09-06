@@ -85,6 +85,8 @@ def list_tracks(
 ) -> list[dict[str, Any]]:
     """List tracks in the local library with optional search filtering."""
     with localcache.connect() as conn:
+        from .track_analysis import ensure_schema
+        ensure_schema(conn)
         cur = conn.cursor()
         base = """
             SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,

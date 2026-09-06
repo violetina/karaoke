@@ -43,11 +43,22 @@ def test_open_song_url_prefers_youtube_music_audio_search(monkeypatch, tmp_path)
     import karaoke.player_open
     monkeypatch.setattr(karaoke.player_open, "try_chrome_cdp_navigate", lambda *args, **kwargs: False)
 
+    # 1. Direct watch link -> YouTube Music watch URL (plays immediately)
     browse.open_song_url(
         "https://www.youtube.com/watch?v=bXWHf2HH8jY", "youtube",
         artist="The Slits", title="I Heard It Through The Grapevine")
 
     assert calls[0][0] == [
+        "xdg-open",
+        "https://music.youtube.com/watch?v=bXWHf2HH8jY",
+    ]
+
+    # 2. No direct URL -> YouTube Music search query
+    browse.open_song_url(
+        "", "youtube_search",
+        artist="The Slits", title="I Heard It Through The Grapevine")
+
+    assert calls[1][0] == [
         "xdg-open",
         "https://music.youtube.com/search?q=The+Slits+I+Heard+It+Through+The+Grapevine",
     ]
