@@ -767,8 +767,8 @@ class KaraokeTui(App):
         border: heavy white; margin-bottom: 1;
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
+    #mood-slider { height: 1; color: $accent; margin-bottom: 1; }
     #mood-select { margin-bottom: 1; }
-    #mood-slider { height: 1; color: $accent; }
     #sort-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
