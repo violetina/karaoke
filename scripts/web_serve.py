@@ -72,9 +72,14 @@ def main() -> int:
 
     print("\nStarting Web TUI server (textual-serve)...")
     python_bin = sys.executable
-    cmd = [python_bin, "-m", "textual", "serve", f"{python_bin} -m karaoke.tui"]
+    port = int(os.environ.get("PORT", "8001"))
+    host = os.environ.get("HOST", "0.0.0.0")
     try:
-        os.execvp(cmd[0], cmd)
+        from textual_serve.server import Server
+        server = Server(f"{python_bin} -m karaoke.tui", title="Karaoke TUI", port=port, host=host)
+        print(f"  [✓] Web TUI listening at http://{host}:{port}")
+        server.serve()
+        return 0
     except Exception as exc:
         print(f"Error starting textual-serve: {exc}", file=sys.stderr)
         return 1
