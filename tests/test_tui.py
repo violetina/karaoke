@@ -290,6 +290,40 @@ def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
     assert overlay.has_class("-visible")
 
 
+def test_playlist_queue_controls(monkeypatch):
+    """Test enqueueing, shuffling, and clearing queue in KaraokeTui."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._queue = []
+    app._queue_at = -1
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
+    monkeypatch.setattr(app, "_selected_song", lambda: {"artist": "Artist 1", "title": "Song 1", "url": "http://a", "kind": "youtube"}, raising=False)
+    monkeypatch.setattr(app, "_render_queue", lambda: None, raising=False)
+
+    class FakeTable:
+        def set_class(self, *a, **k): pass
+        def clear(self): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable(), raising=False)
+
+    app.action_enqueue_selected()
+    assert len(app._queue) == 1
+    assert app._queue[0]["title"] == "Song 1"
+
+    monkeypatch.setattr(app, "_selected_song", lambda: {"artist": "Artist 2", "title": "Song 2", "url": "http://b", "kind": "youtube"}, raising=False)
+    app.action_enqueue_selected()
+    assert len(app._queue) == 2
+
+    app.action_shuffle_queue()
+    assert len(app._queue) == 2
+
+    app.action_clear_queue()
+    assert len(app._queue) == 0
+    assert app._queue_at == -1
+
+
 # --- A: approve for post-processing ---------------------------------------
 
 def _approver(monkeypatch, tmp_path):

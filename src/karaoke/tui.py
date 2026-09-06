@@ -857,6 +857,9 @@ class KaraokeTui(App):
         Binding("ctrl+c", "cancel_sample", "Stop sampling", show=False,
                 priority=True),
         ("H", "toggle_browse", "Browse"),
+        ("a", "enqueue_selected", "Enqueue track"),
+        ("C", "clear_queue", "Clear queue"),
+        ("U", "shuffle_queue", "Shuffle queue"),
         ("minus", "mood_down", "Mood-"),
         ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
@@ -1786,6 +1789,54 @@ class KaraokeTui(App):
                 return
             index += 1
         self.notify("End of queue")
+
+    def action_enqueue_selected(self) -> None:
+        """`a`: Add the currently selected track to the end of the queue."""
+        song = self._selected_song()
+        if song is None:
+            self.notify("No song selected to enqueue", severity="warning")
+            return
+        row = {
+            "track_id": song.get("track_id"),
+            "artist": str(song.get("artist") or ""),
+            "title": str(song.get("title") or ""),
+            "url": str(song.get("url") or ""),
+            "kind": str(song.get("kind") or ""),
+        }
+        if not self._queue:
+            self._set_queue([row])
+            return
+        self._queue.append(row)
+        try:
+            self.query_one("#queue", DataTable).set_class(True, "-on")
+        except Exception:
+            pass
+        self._render_queue()
+        self.notify(f"Enqueued {row['artist']} - {row['title']} (queue: {len(self._queue)})")
+
+    def action_shuffle_queue(self) -> None:
+        """`U`: Shuffle upcoming items in the queue."""
+        import random
+        if not self._queue or self._queue_at >= len(self._queue) - 1:
+            self.notify("No upcoming queue items to shuffle", severity="warning")
+            return
+        upcoming = self._queue[self._queue_at + 1:]
+        random.shuffle(upcoming)
+        self._queue = self._queue[:self._queue_at + 1] + upcoming
+        self._render_queue()
+        self.notify(f"Shuffled {len(upcoming)} upcoming queue items")
+
+    def action_clear_queue(self) -> None:
+        """`C`: Clear the current queue."""
+        self._queue = []
+        self._queue_at = -1
+        try:
+            table = self.query_one("#queue", DataTable)
+            table.set_class(False, "-on")
+            table.clear()
+        except Exception:
+            pass
+        self.notify("Queue cleared")
 
     def action_sample_key(self) -> None:
         """`k`: detect key/BPM by recording what is playing.
