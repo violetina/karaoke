@@ -40,12 +40,30 @@ go stale. The ones worth knowing:
 | key | does |
 |---|---|
 | `H` | library overlay; picking a song closes it |
+| `-` `/` `+` | adjust mood energy slider floor (real-time filtering) |
+| `a` | enqueue highlighted track to end of active queue |
+| `U` | shuffle upcoming queue items |
+| `C` | clear active queue |
 | `F` | focus mode — hides everything but the lyrics |
 | `R` | mic/radio mode (songrec) |
 | `A` | queue the playing track for post-processing |
 | `T` | stats — library, pipeline, listening, keys, tempo |
 | `?` | key reference |
 | `,` `.` | nudge lyric sync ∓0.1s, `S` saves it for that track |
+
+## Library, Mood Slider & Playlist Controls
+
+- **Interactive Mood Slider (`-` / `+` / `m`)**: Sidebar slider `energy ≥ 30% [███░░░░░░░] -/+` dynamically sets the energy floor and filters both the library list and search results in real time.
+- **Sort Selector**: Sort tracks by `Artist / Title (A-Z)`, `Energy (high→low)`, `Energy (low→high)`, `BPM (fast→slow)`, `BPM (slow→fast)`, or `Key`.
+- **Genre & Feeling Column**: Displays CLAP zero-shot genre label + acoustic feeling glyph (`Genre/Feel` e.g. `hip hop 🌙`, `rock 🔥`, `pop ⚡`). Feeling is derived from energy (arousal) and brightness (valence proxy): 🔥/☀/⚡/🌗/♡/🌙.
+- **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear queue (`C`), Play-once auto-advance (`o`).
+
+## Operations & Admin Dashboard (`make admin`)
+
+Launch with `make admin` or `python -m karaoke.admin_tui`:
+- **Worker Pool Management**: Real-time controls for `karaoke-postprocess@1..6.service` user units (`[+]` scale up, `[-]` scale down, `[R]` restart pool).
+- **Error Log Diagnostics**: Real-time exception & traceback viewer for worker and backend troubleshooting.
+- **Folder Scan & Ingestion**: Trigger folder scans or file ingestion directly from the Operations dashboard.
 
 ## Making the lyrics bigger
 

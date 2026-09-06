@@ -7,15 +7,22 @@ worth knowing before trusting a similarity result.
 `docs/vector-search-plan.md` is the older *plan* and describes proposed indexes
 rather than what runs; read this page for the current state.
 
-## The state, measured
+## Current Index Stats
 
-| index | field | dims | docs | of 783 tracks | fed by |
+| index | field | dims | docs | library coverage | fed by |
 |---|---|---|---|---|---|
-| `tracks` | `lyrics_vector` | 384 | 678 | 87% | `karaoke-vector-index --rebuild` |
-| `tracks-lines` | `line_vector` | 384 | 6984 | — (per line) | `--rebuild --lines` |
-| `karaoke-audio` | `audio_vector` | **62** | 274 | 35% | record-mode analysis, `vectorize_cached.py` |
-| `karaoke-clap` | `clap_vector` | **512** | 120 | 15% | `clap_index.py` |
-| `tracks-notes` | `note_vector` | 384 | **index missing** | 0% | `--rebuild --notes`, never run |
+| `tracks` | `lyrics_vector` | 384 | **868** | **100%** | `karaoke.vector_index --rebuild` |
+| `tracks-lines` | `line_vector` | 384 | **28,602** | **100% (per line)** | `--rebuild --lines` |
+| `karaoke-audio` | `audio_vector` | 62 | 276 | spectral audio feature vectors | `recordings`, `vectorize_cached.py` |
+| `karaoke-clap` | `clap_vector` | 512 | 128 | CLAP zero-shot audio vectors | `autoclassify.py`, `clap_index.py` |
+
+## Gap-Fill & Vector Sampler Pipeline
+
+Run `python scripts/fill_analysis_and_vector_gaps.py`:
+1. Identifies all tracks lacking Key/BPM/Energy analysis or CLAP genre labels.
+2. Generates `~/.local/share/karaoke/playlist_gap_fill.json`.
+3. Runs zero-shot CLAP classification & audio feature extraction.
+4. Updates OpenSearch vector indices (`tracks`, `tracks-lines`).
 
 SQLite remains the source of truth; all of these are derived, and all but one
 are rebuildable.

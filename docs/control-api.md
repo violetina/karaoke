@@ -19,15 +19,30 @@ DELETE /api/play/sessions/{id}      pause playback and mark the session stopped
 ```
 
 `POST /api/play` accepts `url`, `kind`, `artist`, `title`, and `prefer_audio`
-(default `true`). When YouTube artist/title are known, it opens
-`music.youtube.com/search?q=artist+title` instead of a direct watch URL. This
-makes browse/list mode default to the YouTube Music **audio** result; direct
-watch links can land on video mode, whose video is often out of sync with the
-album track.
+(default `true`). When YouTube artist/title are known, direct watch URLs (`music.youtube.com/watch?v=VID`) are preserved for immediate playback, while missing URLs use search queries (`music.youtube.com/search?q=artist+title`).
 
 The response includes a `session_id` (`play_...`), `pid` if a process was
 spawned, the resolved inputs, and timestamps. This is the web-UI handle for
 later status/stop actions.
+
+## Chrome CDP window control
+
+```
+GET  /api/players/window          get active Chrome kiosk window ID, bounds & state
+POST /api/players/window         set window state ("fullscreen", "normal", "minimized", "focus") or geometry
+```
+
+`POST /api/players/window` controls the dedicated Chrome kiosk window directly over CDP (`:9222`), allowing the web UI or TUI to focus the window or toggle fullscreen playback.
+
+## Post-processing workers & operations
+
+```
+GET  /api/workers/status          active systemd units, worker CPU%, RAM, queue depth
+POST /api/workers/scale           scale worker pool up/down (body: {"target": 0..6})
+GET  /api/logs/errors             recent exception & error log lines
+```
+
+`POST /api/workers/scale` manages `karaoke-postprocess@1..6.service` user units dynamically via `systemctl --user`.
 
 ## Player controls (MPRIS)
 
