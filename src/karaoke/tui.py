@@ -84,11 +84,15 @@ MOOD_GLYPHS = {
 FILTER_OPTIONS = [
     ("Working songs (have lyrics)", "working"),
     ("All songs", "all"),
+    ("Staging queue", "staging"),
+    ("Spotify tracks", "spotify"),
+]
+
+MOOD_FILTER_OPTIONS = [
+    ("All Moods (0% - 100%)", "all"),
     ("🔥 High Energy (>75%)", "high_energy"),
     ("⚡ Groovy / Upbeat (40-75%)", "groovy"),
     ("🌙 Chill / Mellow (<40%)", "mellow"),
-    ("Staging queue", "staging"),
-    ("Spotify tracks", "spotify"),
 ]
 
 # Manual mode override cycle. None == auto-detect.
@@ -740,6 +744,7 @@ class KaraokeTui(App):
         border: heavy white; margin-bottom: 1;
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
+    #mood-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
@@ -810,9 +815,9 @@ class KaraokeTui(App):
     Screen.-focus #now-playing { display: none; }
     Screen.-focus #statusbar { display: none; }
     Screen.-focus Header { display: none; }
-    #browse-head { height: 3; }
-    #browse-head > Static { width: 8; content-align: left middle; }
-    #filter-select { width: 34; }
+    #browse-head { height: auto; margin-bottom: 1; }
+    #browse-head Static { width: 8; content-align: left middle; }
+    #filter-select, #mood-select { width: 34; }
     #library { height: 1fr; }
     #log-label, #log-path { color: $text-muted; height: 1; }
     """
@@ -912,6 +917,7 @@ class KaraokeTui(App):
         self._play_once = True     # queue decides the next track
         self._last_finished_url = ""
         self._idle_since = 0.0     # when the player last held nothing
+        self._mood_filter = "all"
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -935,6 +941,10 @@ class KaraokeTui(App):
                 # about escape has no affordance to discover.
                 yield Input(placeholder="search  (/ · esc to leave)",
                             id="search-input")
+                # Mood filter sits directly under search so it narrows both the
+                # library list and the search results by energy level.
+                yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
+                             allow_blank=False)
                 # Key and tempo sit with the rest of the facts about this
                 # track rather than in the visuals column, which is for the
                 # things that move.
@@ -1009,12 +1019,18 @@ class KaraokeTui(App):
             self._filter = str(event.value)
             self.load_songs()
             self._show_selected_song()
+        elif event.select.id == "mood-select":
+            self._mood_filter = str(event.value)
+            self.load_songs()
+            self._show_selected_song()
 
     def load_songs(self) -> None:
         table = self.query_one("#library", DataTable)
         table.clear()
         self._song_data.clear()
         with localcache.connect() as conn:
+            from .track_analysis import ensure_schema
+            ensure_schema(conn)
             if self._filter == "staging":
                 self._load_staging(conn)
             elif self._filter == "spotify":
@@ -1039,11 +1055,11 @@ class KaraokeTui(App):
                 except (ValueError, TypeError):
                     energy = 0.5
 
-            if self._filter == "high_energy" and energy < 0.75:
+            if self._mood_filter == "high_energy" and energy < 0.75:
                 continue
-            if self._filter == "groovy" and not (0.40 <= energy <= 0.75):
+            if self._mood_filter == "groovy" and not (0.40 <= energy <= 0.75):
                 continue
-            if self._filter == "mellow" and energy > 0.40:
+            if self._mood_filter == "mellow" and energy > 0.40:
                 continue
 
             filtered.append(song)
@@ -1181,8 +1197,15 @@ class KaraokeTui(App):
     def on_data_table_row_highlighted(self, _e: DataTable.RowHighlighted) -> None:
         self._show_selected_song()
 
-    def on_data_table_row_selected(self, _e: DataTable.RowSelected) -> None:
-        self.action_select()
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # One handler for both tables: the queue plays its row directly, the
+        # library overlay opens the selected song. (Two methods of the same
+        # name would silently shadow each other.)
+        table_id = getattr(event.data_table, "id", "")
+        if table_id == "queue":
+            self.play_queue_index(event.cursor_row)
+        else:
+            self.action_select()
 
     # -- browse overlay ---------------------------------------------------
     _BROWSE_OPEN = "-visible"
@@ -1450,6 +1473,43 @@ class KaraokeTui(App):
         """`/`: jump to the search box."""
         self.query_one("#search-input", Input).focus()
 
+    def _apply_mood_filter(self, rows: list, conn) -> list:
+        """Filter search-result rows by the current mood/energy band."""
+        if self._mood_filter == "all" or not rows:
+            return rows
+        ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
+        if not ids:
+            return rows
+        placeholders = ",".join("?" * len(ids))
+        energies: dict = {}
+        try:
+            cur = conn.execute(
+                f"SELECT track_id, energy, bpm FROM track_analysis "
+                f"WHERE track_id IN ({placeholders})",
+                ids,
+            )
+            for row in cur.fetchall():
+                e = row["energy"]
+                if e is None and row["bpm"] is not None:
+                    e = min(1.0, max(0.2, (float(row["bpm"]) - 60.0) / 100.0))
+                energies[row["track_id"]] = e
+        except Exception:
+            return rows
+
+        kept = []
+        for r in rows:
+            e = energies.get(r.get("track_id"))
+            if e is None:
+                e = 0.5
+            if self._mood_filter == "high_energy" and e < 0.75:
+                continue
+            if self._mood_filter == "groovy" and not (0.40 <= e <= 0.75):
+                continue
+            if self._mood_filter == "mellow" and e > 0.40:
+                continue
+            kept.append(r)
+        return kept
+
     def on_input_submitted(self, event) -> None:
         """Enter in the search box: build a list and start playing it."""
         if event.input.id != "search-input":
@@ -1479,6 +1539,7 @@ class KaraokeTui(App):
                          "fields": h.fields,
                          "url": librarysearch.playable_url(h.track_id, conn) or ""}
                         for h in hits]
+                rows = self._apply_mood_filter(rows, conn)
         except Exception as exc:
             log.debug("search failed", exc_info=True)
             self.call_from_thread(self.notify, f"Search failed: {exc}",
@@ -1518,12 +1579,6 @@ class KaraokeTui(App):
                           row["artist"][:18], row["title"][:28], note)
         table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
                               f"{'  (play-once)' if self._play_once else ''}")
-
-    def on_data_table_row_selected(self, event) -> None:
-        """Click or Enter on a queue row plays it."""
-        if event.data_table.id != "queue":
-            return
-        self.play_queue_index(event.cursor_row)
 
     def action_toggle_play_once(self) -> None:
         """`o`: play the queue through once, or let the player carry on.
