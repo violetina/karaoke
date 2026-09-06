@@ -69,6 +69,7 @@ nav:
   - Makefile targets: makefile-targets.md
   - Flows: flows.md
   - The TUI: tui.md
+  - Web TUI: web-tui.md
   - TUI visuals: tui-visuals.md
   - Modes:
       - Overview: modes/index.md
