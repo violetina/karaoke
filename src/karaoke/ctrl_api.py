@@ -14,17 +14,20 @@ import html
 import json
 import os
 import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote_plus
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .logger import log
 from .player_open import open_song_url
 
-CTRL_API_VERSION = "0.4.0"
+CTRL_API_VERSION = "0.5.0"
 
 app = FastAPI(
     title="Karaoke Control API",
@@ -41,6 +44,14 @@ class PlayRequest(BaseModel):
     kind: Optional[str] = None
     artist: Optional[str] = None
     title: Optional[str] = None
+    prefer_audio: bool = True
+
+
+_PLAY_SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+def _play_session_view(session: dict[str, Any]) -> dict[str, Any]:
+    return dict(session)
 
 
 class RecordRequest(BaseModel):
@@ -111,7 +122,7 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/play")
 def play_track(req: PlayRequest) -> dict[str, Any]:
-    """Open/play a song URL, or fall back to a YouTube search for artist/title."""
+    """Open/play a song URL and return a durable-ish session handle."""
     url = req.url
     kind = req.kind
     artist = req.artist or ""
@@ -123,23 +134,63 @@ def play_track(req: PlayRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=400, detail="No URL or artist/title provided"
             )
-        url = f"https://www.youtube.com/results?search_query={query}"
-        kind = "youtube_search"
+        url = f"https://music.youtube.com/search?q={query}"
+        kind = "youtube_music_search"
 
     try:
-        pid = open_song_url(url, kind)
+        pid = open_song_url(
+            url, kind, artist=artist, title=title, prefer_audio=req.prefer_audio)
     except Exception as exc:
         log.exception("Control API play error for %s", url)
         raise HTTPException(status_code=500, detail=f"Failed to launch player: {exc}")
 
-    return {
+    session_id = f"play_{uuid.uuid4().hex[:12]}"
+    session = {
+        "session_id": session_id,
         "status": "launched",
         "url": url,
         "kind": kind,
         "pid": pid,
         "artist": artist,
         "title": title,
+        "prefer_audio": req.prefer_audio,
+        "launched_at": time.time(),
     }
+    _PLAY_SESSIONS[session_id] = session
+    return _play_session_view(session)
+
+
+@app.get("/api/play/sessions")
+def list_play_sessions() -> dict[str, Any]:
+    sessions = sorted(_PLAY_SESSIONS.values(),
+                      key=lambda s: s.get("launched_at", 0), reverse=True)
+    return {"sessions": [_play_session_view(s) for s in sessions],
+            "count": len(sessions)}
+
+
+@app.get("/api/play/sessions/{session_id}")
+def get_play_session(session_id: str) -> dict[str, Any]:
+    session = _PLAY_SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Play session not found")
+    return _play_session_view(session)
+
+
+@app.delete("/api/play/sessions/{session_id}")
+def stop_play_session(session_id: str) -> dict[str, Any]:
+    session = _PLAY_SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Play session not found")
+    # The dedicated player is usually browser/MPRIS-controlled rather than a
+    # child process we should kill. Pause it and mark the logical session stopped.
+    try:
+        from . import playerctl
+        playerctl.pause()
+    except Exception:
+        log.debug("failed to pause player for session %s", session_id, exc_info=True)
+    session["status"] = "stopped"
+    session["stopped_at"] = time.time()
+    return _play_session_view(session)
 
 
 # -- record mode ----------------------------------------------------------
@@ -343,6 +394,22 @@ def record_track_page(recording_id: int, index: int):
         album_js=json.dumps(album)))
 
 
+def _sample_payload(result: Any, artist: str, title: str, seconds: float) -> dict[str, Any]:
+    return {
+        "status": "analysed",
+        "artist": artist,
+        "title": title,
+        "seconds": seconds,
+        "key": result.key.name if result.key else None,
+        "bpm": result.bpm,
+        "stored": bool(artist and title),
+    }
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
 @app.post("/api/sample")
 def sample_now(req: SampleRequest) -> dict[str, Any]:
     """Detect key/BPM by recording a short excerpt of what is playing.
@@ -365,15 +432,75 @@ def sample_now(req: SampleRequest) -> dict[str, Any]:
         log.exception("Control API sample failed")
         raise HTTPException(status_code=500, detail=f"Sample failed: {exc}")
 
-    return {
-        "status": "analysed",
-        "artist": req.artist or "",
-        "title": req.title or "",
-        "seconds": seconds,
-        "key": result.key.name if result.key else None,
-        "bpm": result.bpm,
-        "stored": bool(req.artist and req.title),
-    }
+    return _sample_payload(result, req.artist or "", req.title or "", seconds)
+
+
+@app.get("/api/sample/stream")
+def sample_stream(
+    artist: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
+    seconds: Optional[float] = Query(None),
+):
+    """Stream live sample progress and result as Server-Sent Events.
+
+    This keeps the TUI/web UI off direct callbacks while still reporting the
+    real-time capture phase. Event names: start, progress, complete, error.
+    """
+    import queue
+    import threading
+
+    from . import sample_audio
+
+    sec = float(seconds or sample_audio.DEFAULT_SECONDS)
+    art = artist or ""
+    tit = title or ""
+    events: "queue.Queue[tuple[str, dict[str, Any]] | None]" = queue.Queue()
+
+    def worker() -> None:
+        started = time.monotonic()
+        last_emit = 0.0
+
+        def progress() -> bool:
+            nonlocal last_emit
+            elapsed = max(0.0, time.monotonic() - started)
+            if elapsed - last_emit >= 1.0 or elapsed >= sec:
+                last_emit = elapsed
+                events.put(("progress", {
+                    "status": "capturing",
+                    "elapsed_s": round(min(elapsed, sec), 2),
+                    "percent": round(min(elapsed / sec, 1.0) * 100, 1),
+                    "seconds": sec,
+                }))
+            return True
+
+        try:
+            result = sample_audio.sample_and_analyse(
+                art, tit, sec, should_continue=progress)
+            events.put(("complete", _sample_payload(result, art, tit, sec)))
+        except sample_audio.CaptureError as exc:
+            events.put(("error", {"status": "error", "detail": str(exc)}))
+        except sample_audio.AnalysisUnavailable as exc:
+            events.put(("error", {"status": "unavailable", "detail": str(exc)}))
+        except Exception as exc:
+            log.exception("Control API streaming sample failed")
+            events.put(("error", {"status": "failed", "detail": str(exc)}))
+        finally:
+            events.put(None)
+
+    def body():
+        events.put(("start", {
+            "status": "started", "artist": art, "title": tit, "seconds": sec,
+        }))
+        thread = threading.Thread(target=worker, name="sample-stream", daemon=True)
+        thread.start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            event, payload = item
+            yield _sse(event, payload)
+
+    return StreamingResponse(body(), media_type="text/event-stream")
 
 
 # -- player controls (MPRIS via playerctl) --------------------------------

@@ -16,10 +16,17 @@ def test_client_fallback_play(client):
 
 
 def test_client_http_play(client):
-    with patch("karaoke.api_client.ApiClient._http_post", return_value={"status": "launched", "url": "http://x"}):
+    seen = {}
+    def fake_post(base, path, body=None):
+        seen.update(body or {})
+        return {"status": "launched", "url": "http://x", "session_id": "play_1"}
+
+    with patch("karaoke.api_client.ApiClient._http_post", side_effect=fake_post):
         res = client.play(artist="Portishead", title="Glory Box")
         assert res["status"] == "launched"
         assert res["url"] == "http://x"
+        assert res["session_id"] == "play_1"
+        assert seen["prefer_audio"] is True
 
 
 def test_client_player_controls(client):
@@ -77,3 +84,17 @@ def test_client_record_discard_http(client):
                return_value={"status": "discarded", "freed_bytes": 1000}):
         res = client.record_discard_audio(3)
         assert res["freed_bytes"] == 1000
+
+
+def test_client_play_sessions_http(client):
+    with patch("karaoke.api_client.ApiClient._http_get",
+               return_value={"sessions": [{"session_id": "play_1"}], "count": 1}):
+        assert client.list_play_sessions()["count"] == 1
+    with patch("karaoke.api_client.ApiClient._http_delete",
+               return_value={"session_id": "play_1", "status": "stopped"}):
+        assert client.stop_play_session("play_1")["status"] == "stopped"
+
+
+def test_client_sample_stream_url(client):
+    url = client.sample_stream_url(artist="A B", title="C", seconds=20)
+    assert url == "http://127.0.0.1:8765/api/sample/stream?artist=A+B&title=C&seconds=20"

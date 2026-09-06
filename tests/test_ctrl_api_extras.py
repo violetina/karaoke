@@ -15,6 +15,36 @@ def ctrl():
     return TestClient(app)
 
 
+# -- play sessions --------------------------------------------------------
+
+def test_play_returns_session_and_prefers_audio(ctrl):
+    from karaoke import ctrl_api
+    ctrl_api._PLAY_SESSIONS.clear()
+    with patch("karaoke.ctrl_api.open_song_url", return_value=4242) as opened:
+        body = ctrl.post("/api/play", json={
+            "url": "https://www.youtube.com/watch?v=bXWHf2HH8jY",
+            "kind": "youtube",
+            "artist": "The Slits",
+            "title": "I Heard It Through The Grapevine",
+        }).json()
+    assert body["status"] == "launched"
+    assert body["session_id"].startswith("play_")
+    opened.assert_called_once()
+    assert opened.call_args.kwargs["prefer_audio"] is True
+    assert opened.call_args.kwargs["artist"] == "The Slits"
+
+    listing = ctrl.get("/api/play/sessions").json()
+    assert listing["count"] == 1
+    assert listing["sessions"][0]["session_id"] == body["session_id"]
+
+    one = ctrl.get(f"/api/play/sessions/{body['session_id']}").json()
+    assert one["pid"] == 4242
+
+    with patch("karaoke.playerctl.pause", return_value=True):
+        stopped = ctrl.delete(f"/api/play/sessions/{body['session_id']}").json()
+    assert stopped["status"] == "stopped"
+
+
 # -- player listing & current --------------------------------------------
 
 def test_players_list(ctrl):
@@ -118,3 +148,18 @@ def test_audio_cut_success(ctrl, tmp_path):
         assert body["status"] == "ok"
         assert body["output_path"] == str(out)
         assert body["bytes"] > 0
+
+
+# -- sample stream --------------------------------------------------------
+
+def test_sample_stream_sends_start_and_complete(ctrl):
+    key = MagicMock(name="G Major")
+    key.name = "G Major"
+    result = MagicMock(key=key, bpm=123.0)
+    with patch("karaoke.sample_audio.MIN_SECONDS", 0.01), \
+         patch("karaoke.sample_audio.sample_and_analyse", return_value=result):
+        text = ctrl.get("/api/sample/stream?artist=A&title=B&seconds=0.01").text
+    assert "event: start" in text
+    assert "event: complete" in text
+    assert '"key": "G Major"' in text
+    assert '"bpm": 123.0' in text

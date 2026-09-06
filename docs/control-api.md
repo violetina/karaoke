@@ -1,4 +1,4 @@
-# Control API: players, folder scan, audio cut
+# Control API: players, play sessions, streaming sample, folder scan, audio cut
 
 The host-side **control API** (`karaoke.ctrl_api`, default `http://localhost:8765`)
 exposes everything that needs the desktop session — MPRIS players (`playerctl`),
@@ -8,6 +8,26 @@ over HTTP, so a future web UI drives the same backend with no new server code.
 
 Start it with `make ctrl-api` (or the `karaoke-ctrl-api` systemd unit). It binds
 loopback only, since it spawns local processes.
+
+## Playback sessions
+
+```
+POST   /api/play                    open a stream/search and return session_id
+GET    /api/play/sessions           list recent logical play sessions
+GET    /api/play/sessions/{id}      inspect one logical play session
+DELETE /api/play/sessions/{id}      pause playback and mark the session stopped
+```
+
+`POST /api/play` accepts `url`, `kind`, `artist`, `title`, and `prefer_audio`
+(default `true`). When YouTube artist/title are known, it opens
+`music.youtube.com/search?q=artist+title` instead of a direct watch URL. This
+makes browse/list mode default to the YouTube Music **audio** result; direct
+watch links can land on video mode, whose video is often out of sync with the
+album track.
+
+The response includes a `session_id` (`play_...`), `pid` if a process was
+spawned, the resolved inputs, and timestamps. This is the web-UI handle for
+later status/stop actions.
 
 ## Player controls (MPRIS)
 
@@ -74,16 +94,32 @@ Cuts `[start_s, start_s+duration_s)` out of a file with ffmpeg (stereo, 44.1kHz)
 and returns the `output_path`. Omit `output_path` for a temp file. Missing input
 is **400**, a missing ffmpeg is **503**.
 
-## Sample & record (existing)
+## Sample stream & record
 
 ```
 POST   /api/sample                       key/BPM from a short live excerpt (sync)
+GET    /api/sample/stream                SSE: start/progress/complete/error events
 POST   /api/record/start                 begin unattended capture (body: source?, keep_audio?, note?)
 POST   /api/record/stop                  stop one or all captures
 GET    /api/record/status                captures running in this process
 POST   /api/recordings/{id}/analyse      decompile a recording into the DB
 DELETE /api/recordings/{id}/audio        drop audio, keep markers
 ```
+
+`GET /api/sample/stream?artist=A&title=B&seconds=45` streams Server-Sent Events:
+
+```
+event: start
+data: {"status":"started", ...}
+
+event: progress
+data: {"status":"capturing", "elapsed_s": 12.0, "percent": 26.7}
+
+event: complete
+data: {"status":"analysed", "key":"G Major", "bpm":123.0, ...}
+```
+
+`ApiClient.sample_stream_url(...)` returns the URL for a TUI/web EventSource.
 
 See [Record mode](modes/record.md) for the capture/decompile detail.
 

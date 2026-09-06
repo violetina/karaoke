@@ -307,11 +307,17 @@ def _kiosk_mpris_names(names: "list[str]") -> "set[str]":
     return kiosk
 
 
-def open_song_url(url: str, kind: str | None) -> int | None:
+def open_song_url(url: str, kind: str | None, *, artist: str = "",
+                  title: str = "", prefer_audio: bool = True) -> int | None:
     """Open a song URL and return the spawned process id when applicable.
 
     YouTube/browser URLs are opened asynchronously so the TUI remains responsive.
     stdout/stderr are captured to log files so xdg-open failures are debuggable.
+
+    ``prefer_audio`` deliberately opens YouTube/YT Music through a Music search
+    when artist/title are known. A bare ``music.youtube.com/watch?v=...`` can
+    land on the video side for official videos, which is often out of sync with
+    the album audio; search lets YouTube Music resolve the canonical audio track.
     """
     # Pause any other active players first so audio does not overlap!
     try:
@@ -349,22 +355,32 @@ def open_song_url(url: str, kind: str | None) -> int | None:
             url = f"https://open.spotify.com/track/{track_id}"
         kind = "spotify_web"
 
-    # Automatically upgrade standard YouTube links to YouTube Music links for superior audio
-    if kind == "youtube" or "youtube.com" in url.lower() or "youtu.be" in url.lower():
-        from .localcache import extract_youtube_id
-        vid = extract_youtube_id(url)
-        if vid:
-            url = f"https://music.youtube.com/watch?v={vid}"
-            kind = "youtube_music"
-        elif "/results?search_query=" in url:
-            # A search URL has no video id to convert, but its query does carry
-            # over — so the no-URL fallback lands in the same player as
-            # everything else instead of dropping the user into plain YouTube.
-            from urllib.parse import parse_qs, quote_plus, urlparse
-            query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
-            if query:
-                url = f"https://music.youtube.com/search?q={quote_plus(query)}"
-                kind = "youtube_music_search"
+    # Automatically upgrade standard YouTube links to YouTube Music audio. When
+    # the caller knows artist/title, prefer a Music search rather than a direct
+    # watch URL: direct watch links can land on the video side, and those clips
+    # are often out of sync with the album/audio track.
+    is_youtube = kind in ("youtube", "youtube_music", "youtube_search", "youtube_music_search") or "youtube.com" in url.lower() or "youtu.be" in url.lower()
+    if is_youtube:
+        from urllib.parse import quote_plus
+        search_query = f"{artist} {title}".strip()
+        if prefer_audio and search_query:
+            url = f"https://music.youtube.com/search?q={quote_plus(search_query)}"
+            kind = "youtube_music_search"
+        else:
+            from .localcache import extract_youtube_id
+            vid = extract_youtube_id(url)
+            if vid:
+                url = f"https://music.youtube.com/watch?v={vid}"
+                kind = "youtube_music"
+            elif "/results?search_query=" in url:
+                # A search URL has no video id to convert, but its query does carry
+                # over — so the no-URL fallback lands in the same player as
+                # everything else instead of dropping the user into plain YouTube.
+                from urllib.parse import parse_qs, urlparse
+                query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
+                if query:
+                    url = f"https://music.youtube.com/search?q={quote_plus(query)}"
+                    kind = "youtube_music_search"
 
     # Try to navigate an active kiosk/debugging browser first to avoid tab clutter!
     if try_chrome_cdp_navigate(url):

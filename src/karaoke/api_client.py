@@ -35,6 +35,11 @@ def _ctrl_api_url() -> str:
     return f"http://{host}:{port}"
 
 
+def _clean_params(params: dict[str, Any]) -> dict[str, str]:
+    return {k: str(v).lower() if isinstance(v, bool) else str(v)
+            for k, v in params.items() if v is not None}
+
+
 class ApiClient:
     """HTTP client wrapping the Karaoke Library API and Control API endpoints."""
 
@@ -172,18 +177,43 @@ class ApiClient:
     def ctrl_health(self) -> Optional[dict[str, Any]]:
         return self._http_get(self.ctrl_url, "/api/health")
 
-    def play(self, url: Optional[str] = None, kind: Optional[str] = None, artist: Optional[str] = None, title: Optional[str] = None) -> dict[str, Any]:
-        body = {"url": url, "kind": kind, "artist": artist, "title": title}
+    def play(
+        self,
+        url: Optional[str] = None,
+        kind: Optional[str] = None,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        prefer_audio: bool = True,
+    ) -> dict[str, Any]:
+        body = {"url": url, "kind": kind, "artist": artist, "title": title,
+                "prefer_audio": prefer_audio}
         res = self._http_post(self.ctrl_url, "/api/play", body)
         if res is not None:
             return res
         if self.fallback_local:
             from .ctrl_api import play_track, PlayRequest
             try:
-                return play_track(PlayRequest(url=url, kind=kind, artist=artist, title=title))
+                return play_track(PlayRequest(
+                    url=url, kind=kind, artist=artist, title=title,
+                    prefer_audio=prefer_audio))
             except Exception as e:
                 return {"status": "error", "detail": str(e)}
         return {"status": "unreachable"}
+
+    def list_play_sessions(self) -> dict[str, Any]:
+        res = self._http_get(self.ctrl_url, "/api/play/sessions")
+        if res is not None:
+            return res
+        return {"sessions": [], "count": 0}
+
+    def get_play_session(self, session_id: str) -> Optional[dict[str, Any]]:
+        return self._http_get(self.ctrl_url, f"/api/play/sessions/{session_id}")
+
+    def stop_play_session(self, session_id: str) -> dict[str, Any]:
+        res = self._http_delete(self.ctrl_url, f"/api/play/sessions/{session_id}")
+        if res is not None:
+            return res
+        return {"status": "unreachable", "session_id": session_id}
 
     def list_players(self) -> dict[str, Any]:
         res = self._http_get(self.ctrl_url, "/api/players")
@@ -331,6 +361,15 @@ class ApiClient:
             except Exception as e:
                 return {"status": "error", "detail": str(e)}
         return {"status": "unreachable"}
+
+    def sample_stream_url(self, artist: Optional[str] = None,
+                          title: Optional[str] = None,
+                          seconds: Optional[float] = None) -> str:
+        """Return the SSE URL a TUI/web client can consume for live sample progress."""
+        params = _clean_params({"artist": artist, "title": title, "seconds": seconds})
+        from urllib.parse import urlencode
+        query = urlencode(params)
+        return f"{self.ctrl_url}/api/sample/stream" + (f"?{query}" if query else "")
 
     def scan_folder(
         self,

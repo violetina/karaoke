@@ -1530,7 +1530,12 @@ class KaraokeTui(App):
             self._render_queue()
             return False
         try:
-            open_song_url(url, "youtube" if "youtu" in url else "")
+            open_song_url(
+                url, "youtube" if "youtu" in url else "",
+                artist=str(row.get("artist") or ""),
+                title=str(row.get("title") or ""),
+                prefer_audio=True,
+            )
         except Exception as exc:
             log.exception("queue play failed")
             self.notify(f"Play failed: {exc}", severity="error")
@@ -2078,7 +2083,8 @@ class KaraokeTui(App):
             url = f"https://www.youtube.com/results?search_query={query}"
             kind = "youtube_search"
         try:
-            pid = open_song_url(url, kind)
+            pid = open_song_url(
+                url, kind, artist=artist, title=title, prefer_audio=True)
         except Exception as exc:
             log.exception("KaraokeTui failed to open %s", url)
             self.notify(f"Open failed; see {LOG_FILE}", severity="error")

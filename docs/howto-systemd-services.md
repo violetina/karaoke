@@ -13,7 +13,8 @@ stack every 5 minutes.
 | `karaoke-api.service` | FastAPI library backend (read-only tracks/lyrics/stats) | 8000 |
 | `karaoke-ctrl-api.service` | Host-side playback control API (opens browser/Spotify) | 8765 |
 | `karaoke-mq-forward.service` | `kubectl port-forward` for in-cluster RabbitMQ | 5672 / 15672 |
-| `karaoke-postprocess.service` | Post-processing worker (key/BPM + word-timing) | — |
+| `karaoke-postprocess@1..6.service` | Six competing post-processing workers (key/BPM + word-timing) | — |
+| `karaoke-postprocess.slice` | Shared CPU/memory cap for all worker instances | — |
 | `karaoke-healthcheck.service` | One-shot health probe (run by the timer) | — |
 | `karaoke-healthcheck.timer` | Fires the health check every 5 min | — |
 | `karaoke.target` | Umbrella — start/stop all of the above at once | — |
@@ -37,13 +38,35 @@ make systemd-uninstall # stop + remove the units
 platform comes back after a reboot/login. (For it to run without you being
 logged in, enable lingering once: `loginctl enable-linger $USER`.)
 
+## Post-processing runners
+
+`karaoke.target` starts `karaoke-postprocess@1.service` through
+`karaoke-postprocess@6.service`. Every instance consumes the same RabbitMQ queue
+with `prefetch_count=1`, so RabbitMQ hands one track to each free worker; there
+is no app-level coordination to maintain.
+
+The workers share `karaoke-postprocess.slice`, currently capped at `CPUQuota=600%`
+with low CPU/IO weight. That makes worker count a throughput knob without letting
+background analysis starve browser playback. The worker process now also
+reconnects to RabbitMQ with bounded backoff if the port-forward/broker drops, so
+systemd does not have to restart it for routine AMQP blips.
+
+Useful controls:
+
+```bash
+systemctl --user start karaoke-postprocess@{1..6}
+systemctl --user stop 'karaoke-postprocess@*'
+systemctl --user status karaoke-postprocess.slice
+```
+
 ## Logs (journald)
 
 Every service logs to the journal under its `SyslogIdentifier`:
 
 ```bash
 journalctl --user -u karaoke-api -f                 # follow the library API
-journalctl --user -u karaoke-postprocess -f         # follow the worker
+journalctl --user -u 'karaoke-postprocess@*' -f     # follow every worker
+journalctl --user -u karaoke-postprocess@3 -f       # follow one worker instance
 journalctl --user -u karaoke-healthcheck -n 20      # recent health reports
 journalctl --user -u 'karaoke-*' --since '10 min ago'  # everything, last 10 min
 ```

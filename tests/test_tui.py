@@ -260,7 +260,7 @@ def test_open_selected_hides_overlay_on_success(monkeypatch):
     monkeypatch.setattr(app, "_selected_song",
                         lambda: {"url": "https://youtu.be/x", "kind": "youtube",
                                  "artist": "A", "title": "B"}, raising=False)
-    monkeypatch.setattr(tui, "open_song_url", lambda url, kind: 123)
+    monkeypatch.setattr(tui, "open_song_url", lambda url, kind, **kwargs: 123)
     monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
 
     app._open_selected()

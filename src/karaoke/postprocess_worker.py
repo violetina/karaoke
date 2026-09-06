@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
 import pika
+from pika.exceptions import AMQPError
 
 from . import localcache, track_analysis
 from .config import settings
@@ -341,17 +343,20 @@ def handle_message(ch, method, body) -> None:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
-def main() -> int:
-    """Run the blocking RabbitMQ consumer loop."""
-    host = os.environ.get("RABBITMQ_HOST", "localhost")
-    user = os.environ.get("RABBITMQ_USER", "guest")
-    password = os.environ.get("RABBITMQ_PASS", "guest")
-
+def _connection_parameters(host: str, user: str, password: str) -> pika.ConnectionParameters:
+    """RabbitMQ connection tuned for long CPU/Whisper jobs."""
     credentials = pika.PlainCredentials(user, password)
-    parameters = pika.ConnectionParameters(
-        host=host, credentials=credentials,
-        heartbeat=600, blocked_connection_timeout=300,
+    return pika.ConnectionParameters(
+        host=host,
+        credentials=credentials,
+        heartbeat=600,
+        blocked_connection_timeout=300,
+        connection_attempts=3,
+        retry_delay=2,
     )
+
+
+def _consume_once(parameters: pika.ConnectionParameters) -> None:
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
@@ -361,13 +366,38 @@ def main() -> int:
         handle_message(ch, method, body)
 
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=_callback)
-    log.info("postprocess worker listening on %s@%s queue=%s", user, host, QUEUE_NAME)
-    print(f"Post-processing worker listening on queue '{QUEUE_NAME}' (host={host}). Ctrl-C to stop.")
     try:
         channel.start_consuming()
-    except KeyboardInterrupt:
-        channel.stop_consuming()
-    connection.close()
+    finally:
+        if connection.is_open:
+            connection.close()
+
+
+def main() -> int:
+    """Run the blocking RabbitMQ consumer loop, reconnecting on broker loss."""
+    host = os.environ.get("RABBITMQ_HOST", "localhost")
+    user = os.environ.get("RABBITMQ_USER", "guest")
+    password = os.environ.get("RABBITMQ_PASS", "guest")
+    parameters = _connection_parameters(host, user, password)
+
+    print(f"Post-processing worker listening on queue '{QUEUE_NAME}' (host={host}). Ctrl-C to stop.")
+    delay = 2.0
+    while True:
+        try:
+            log.info("postprocess worker connecting to %s@%s queue=%s", user, host, QUEUE_NAME)
+            _consume_once(parameters)
+            delay = 2.0
+        except KeyboardInterrupt:
+            log.info("postprocess worker interrupted")
+            break
+        except AMQPError as exc:
+            log.warning("postprocess worker RabbitMQ error; reconnecting in %.1fs: %s", delay, exc)
+            time.sleep(delay)
+            delay = min(60.0, delay * 1.7)
+        except Exception as exc:
+            log.exception("postprocess worker crashed; reconnecting in %.1fs", delay)
+            time.sleep(delay)
+            delay = min(60.0, delay * 1.7)
     return 0
 
 

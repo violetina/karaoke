@@ -105,3 +105,26 @@ def test_handle_message_drops_malformed_body():
     ch, method = MagicMock(), _delivery()
     w.handle_message(ch, method, b'not json')
     ch.basic_ack.assert_called_once_with(delivery_tag=42)
+
+
+def test_connection_parameters_enable_retries_and_prefetch():
+    params = w._connection_parameters("localhost", "guest", "guest")
+    assert params.heartbeat == 600
+    assert params.blocked_connection_timeout == 300
+    assert params.connection_attempts == 3
+
+
+def test_main_reconnects_after_rabbitmq_error(monkeypatch):
+    calls = []
+    def fake_consume(params):
+        calls.append(params)
+        if len(calls) == 1:
+            raise w.AMQPError("broker gone")
+        raise KeyboardInterrupt
+
+    monkeypatch.setenv("RABBITMQ_HOST", "localhost")
+    monkeypatch.setattr(w, "_consume_once", fake_consume)
+    monkeypatch.setattr(w.time, "sleep", lambda seconds: None)
+
+    assert w.main() == 0
+    assert len(calls) == 2

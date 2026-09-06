@@ -22,10 +22,14 @@ reset, just refill it from SQLite.
 # One-time / whenever the cluster is fresh
 kubectl --context kind-karaoke apply -k deploy/k8s   # deploy the RabbitMQ broker
 
-# Each working session
+# Each working session (manual)
 make mq-port-forward         # terminal A: expose broker to host (localhost:5672)
-make postprocess-worker      # terminal B: run the consumer (leave it running)
+make postprocess-worker      # terminal B: run one consumer
 make postprocess-enqueue-all # terminal C (optional): queue every track that needs work
+
+# Preferred long-running setup
+make systemd-install
+make systemd-up              # starts mq-forward + karaoke-postprocess@1..6
 ```
 
 The TUI also **auto-enqueues** whatever song you play, so in normal use you only need
@@ -112,7 +116,11 @@ Leave this running. Management UI: http://localhost:15672 (guest/guest).
 make postprocess-worker
 ```
 It prints `Post-processing worker listening on queue 'karaoke-postprocess' …` and then
-processes tasks as they arrive. Keep it running while you use the app.
+processes tasks as they arrive. Keep it running while you use the app. For real
+use, prefer `make systemd-up`: it starts six `karaoke-postprocess@N` workers as
+RabbitMQ competing consumers with `prefetch_count=1`, all capped by
+`karaoke-postprocess.slice` so analysis does not starve playback. Workers
+reconnect automatically if the broker/port-forward drops.
 
 ### 4. Fill the queue
 Either **play songs in the TUI** (auto-enqueues anything missing assets), or backfill
