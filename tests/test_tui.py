@@ -324,6 +324,37 @@ def test_playlist_queue_controls(monkeypatch):
     assert app._queue_at == -1
 
 
+def test_queue_filtering_on_mood_change(monkeypatch):
+    """Test that changing mood filter or energy level filters the active queue."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._mood_filter = "all"
+    app._mood_level = 0.0
+    app._unfiltered_queue = [
+        {"track_id": 1, "artist": "Soft", "title": "Quiet", "energy": 0.2},
+        {"track_id": 2, "artist": "Loud", "title": "Anthem", "energy": 0.9},
+    ]
+    app._queue = list(app._unfiltered_queue)
+    app._queue_at = -1
+
+    monkeypatch.setattr(app, "_render_mood_slider", lambda: None, raising=False)
+    monkeypatch.setattr(app, "load_songs", lambda: None, raising=False)
+    monkeypatch.setattr(app, "_show_selected_song", lambda: None, raising=False)
+    monkeypatch.setattr(app, "_render_queue", lambda: None, raising=False)
+
+    class FakeTable:
+        def set_class(self, *a, **k): pass
+        def clear(self): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable(), raising=False)
+
+    app._mood_level = 0.75
+    app._filter_and_set_queue()
+    assert len(app._queue) == 1
+    assert app._queue[0]["title"] == "Anthem"
+
+
 # --- A: approve for post-processing ---------------------------------------
 
 def _approver(monkeypatch, tmp_path):

@@ -1054,16 +1054,19 @@ class KaraokeTui(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "filter-select":
             self._filter = str(event.value)
-            self.load_songs()
-            self._show_selected_song()
+            self._apply_mood_change()
         elif event.select.id == "mood-select":
             self._mood_filter = str(event.value)
-            self.load_songs()
-            self._show_selected_song()
+            if self._mood_filter == "high_energy":
+                self._mood_level = 0.75
+            elif self._mood_filter == "groovy":
+                self._mood_level = 0.40
+            elif self._mood_filter in ("mellow", "all"):
+                self._mood_level = 0.0
+            self._apply_mood_change()
         elif event.select.id == "sort-select":
             self._sort = str(event.value)
-            self.load_songs()
-            self._show_selected_song()
+            self._apply_mood_change()
 
     def _render_mood_slider(self) -> None:
         """Draw the energy-floor slider bar in the sidebar."""
@@ -1078,13 +1081,19 @@ class KaraokeTui(App):
 
     def action_mood_down(self) -> None:
         self._mood_level = max(0.0, round(self._mood_level - 0.1, 2))
-        self._render_mood_slider()
-        self.load_songs()
+        self._apply_mood_change()
 
     def action_mood_up(self) -> None:
         self._mood_level = min(1.0, round(self._mood_level + 0.1, 2))
+        self._apply_mood_change()
+
+    def _apply_mood_change(self) -> None:
+        """Apply mood/energy filtering to both the library table and the active queue."""
         self._render_mood_slider()
         self.load_songs()
+        self._show_selected_song()
+        if hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
+            self._filter_and_set_queue()
 
 
     def load_songs(self) -> None:
@@ -1609,7 +1618,9 @@ class KaraokeTui(App):
 
         kept = []
         for r in rows:
-            e = energies.get(r.get("track_id"))
+            e = r.get("energy")
+            if e is None:
+                e = energies.get(r.get("track_id"))
             if e is None:
                 e = 0.5
             if e < self._mood_level:
@@ -1662,8 +1673,18 @@ class KaraokeTui(App):
 
     def _set_queue(self, rows: list, query: str = "") -> None:
         """Show the result list and start it playing."""
+        self._unfiltered_queue = list(rows)
+        self._filter_and_set_queue(query=query, start_playing=True)
+
+    def _filter_and_set_queue(self, query: str = "", start_playing: bool = False) -> None:
+        rows = list(getattr(self, "_unfiltered_queue", []))
+        if rows:
+            try:
+                with localcache.connect() as conn:
+                    rows = self._apply_mood_filter(rows, conn)
+            except Exception:
+                pass
         self._queue = rows
-        self._queue_at = -1
         table = self.query_one("#queue", DataTable)
         try:
             lib_table = self.query_one("#library", DataTable)
@@ -1682,9 +1703,10 @@ class KaraokeTui(App):
         if lib_table:
             lib_table.set_class(True, "-off")
         self._render_queue()
-        self.notify(f"{len(rows)} match(es) for {query!r}" if query
-                    else f"{len(rows)} queued")
-        self.play_queue_index(0)
+        if query:
+            self.notify(f"{len(rows)} match(es) for {query!r}")
+        if start_playing and rows:
+            self.play_queue_index(0)
 
     def _render_queue(self) -> None:
         """Draw the list, marking what is playing."""
