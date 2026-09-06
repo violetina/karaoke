@@ -159,6 +159,71 @@ def test_sample_returns_the_analysis(ctrl, monkeypatch):
     assert body["stored"] is True
 
 
+def test_listing_filters_and_options(api, db):
+    # Add extra recordings for filter testing
+    c = localcache.connect(db)
+    c.executescript("""
+        INSERT INTO recordings (recording_id, started_at, ended_at, source, dir, status, keep_audio, note)
+        VALUES (2, 3000.0, 4000.0, 'alsa_output.pci', '/tmp/rec2', 'discarded', 1, 'Late night session');
+        INSERT INTO recordings (recording_id, started_at, ended_at, source, dir, status, keep_audio, note)
+        VALUES (3, 5000.0, 6000.0, 'x.monitor', '/tmp/rec3', 'analysed', 0, 'Radio stream');
+    """)
+    c.commit()
+    c.close()
+
+    # Filter by status
+    res = api.get("/api/recordings?status=complete").json()
+    assert res["count"] == 1 and res["recordings"][0]["recording_id"] == 1
+
+    res_multi = api.get("/api/recordings?status=complete,analysed").json()
+    assert res_multi["count"] == 2
+
+    # Filter by source
+    res_src = api.get("/api/recordings?source=alsa").json()
+    assert res_src["count"] == 1 and res_src["recordings"][0]["recording_id"] == 2
+
+    # Filter by keep_audio
+    res_keep = api.get("/api/recordings?keep_audio=true").json()
+    assert res_keep["count"] == 1 and res_keep["recordings"][0]["recording_id"] == 2
+
+    # Filter by time range
+    res_since = api.get("/api/recordings?since=4000").json()
+    assert res_since["count"] == 1 and res_since["recordings"][0]["recording_id"] == 3
+
+    # Filter by query q
+    res_q = api.get("/api/recordings?q=Late+night").json()
+    assert res_q["count"] == 1 and res_q["recordings"][0]["recording_id"] == 2
+
+    # Filter by has_marks / identified_only
+    res_marks = api.get("/api/recordings?has_marks=true").json()
+    assert res_marks["count"] == 1 and res_marks["recordings"][0]["recording_id"] == 1
+
+    # Pagination
+    res_page = api.get("/api/recordings?limit=2&offset=1").json()
+    assert res_page["count"] == 2
+
+
+def test_get_recording_options(api, db):
+    # Query with confident_only / min_marks options
+    res_conf = api.get("/api/recordings/1?confident_only=true").json()
+    assert len(res_conf["tracks"]) == 1
+
+    res_marks = api.get("/api/recordings/1?min_marks=5").json()
+    assert len(res_marks["tracks"]) == 0
+
+
+def test_patch_recording_metadata(api, db):
+    res = api.patch("/api/recordings/1", json={"note": "Updated note", "keep_audio": True}).json()
+    assert res["recording_id"] == 1
+    assert res["note"] == "Updated note"
+    assert res["keep_audio"] is True
+
+    # Verify GET reflects update
+    rec = api.get("/api/recordings/1").json()
+    assert rec["note"] == "Updated note"
+    assert rec["keep_audio"] is True
+
+
 def test_sample_without_a_track_is_not_stored(ctrl, monkeypatch):
     from karaoke import sample_audio
 

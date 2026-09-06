@@ -1,0 +1,180 @@
+"""Folder Ingestion & Audio Enrichment Engine.
+
+Scans local directories, extracts tags + Shazam/songrec fingerprints, calculates
+Key/BPM/CLAP vectors, resolves YouTube & Spotify links, and ingests into SQLite + OpenSearch.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Optional
+
+from . import (
+    analyze, clap_vector, genre, localcache,
+    lyrics, source_select, tags, youtube
+)
+from .identify import identify_file_fingerprint
+from .logger import log
+
+
+def scan_and_ingest_folder(
+    music_dir: str | Path,
+    *,
+    use_fingerprint: bool = True,
+    classify_audio: bool = True,
+    resolve_streaming: bool = True,
+    dry_run: bool = False,
+    limit: Optional[int] = None,
+    conn: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Scan a directory of audio files, enrich with fingerprinting, audio analysis,
+    Spotify/YouTube links, and ingest into SQLite + OpenSearch.
+    """
+    root = Path(music_dir).expanduser()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Directory not found: {root}")
+
+    audio_files = [p for p in sorted(root.rglob("*")) if p.is_file() and tags.is_audio(p)]
+    if limit:
+        audio_files = audio_files[:limit]
+
+    own_conn = conn is None
+    c = conn or (None if dry_run else localcache.connect())
+
+    stats: dict[str, Any] = {
+        "seen": len(audio_files),
+        "processed": 0,
+        "fingerprinted": 0,
+        "sourced": 0,
+        "classified": 0,
+        "errors": 0,
+        "items": [],
+    }
+
+    labels = genre.label_vectors() if (classify_audio and clap_vector.available()) else {}
+
+    for path in audio_files:
+        try:
+            # 1. Tags & Fingerprint
+            t = tags.extract_tags(path)
+            artist, title, album = t.artist, t.title, t.album
+            duration = t.duration
+
+            if use_fingerprint and (not artist or not title or artist.lower() in ("unknown", "track")):
+                fp = identify_file_fingerprint(path)
+                if fp and fp.artist and fp.title:
+                    artist, title = fp.artist, fp.title
+                    album = fp.album or album
+                    stats["fingerprinted"] += 1
+
+            if not artist or not title:
+                log.warning("Skipping %s: missing artist/title after tags & fingerprint", path.name)
+                stats["errors"] += 1
+                continue
+
+            # 2. Audio Analysis (Key/BPM/Energy/Brightness)
+            analysis_res = None
+            if classify_audio:
+                analysis_res = analyze.analyze_audio(str(path))
+                if analysis_res and (analysis_res.key or analysis_res.bpm):
+                    stats["classified"] += 1
+
+            # 3. CLAP Vector & Zero-Shot Genre
+            clap_vec = None
+            genre_verdict = None
+            if classify_audio and clap_vector.available():
+                clap_vec = clap_vector.embed_audio(str(path))
+                if clap_vec and labels:
+                    genre_verdict = genre.classify(clap_vec, labels)
+
+            # 4. Streaming platform resolution (Spotify & YT Music)
+            yt_url = None
+            spotify_uri = None
+            if resolve_streaming:
+                try:
+                    yt_candidates = youtube.search(f"{artist} {title}", limit=5)
+                    best_yt = source_select.select_best_source(
+                        yt_candidates, artist, title, reference_duration=duration)
+                    if best_yt:
+                        yt_url = best_yt.get("url")
+                except Exception:
+                    pass
+
+                try:
+                    from .spotify_client import SpotifyClient
+                    spotify_uri = SpotifyClient().search_track(artist, title)
+                except Exception:
+                    pass
+
+                if yt_url or spotify_uri:
+                    stats["sourced"] += 1
+
+            item_summary = {
+                "path": str(path),
+                "artist": artist,
+                "title": title,
+                "album": album,
+                "duration": duration,
+                "key": getattr(getattr(analysis_res, "key", None), "name", None),
+                "bpm": getattr(analysis_res, "bpm", None),
+                "genre": getattr(genre_verdict, "genre", None),
+                "yt_url": yt_url,
+                "spotify_uri": spotify_uri,
+            }
+            stats["items"].append(item_summary)
+
+            if dry_run:
+                stats["processed"] += 1
+                continue
+
+            # 5. SQLite Ingestion
+            assert c is not None
+            ly = lyrics.fetch_lrclib(artist, title, album, duration)
+            # Register the local file as the primary source and get the track id.
+            track_id = localcache.add_track_source(
+                artist, title, album=album, duration=duration,
+                url=str(path), kind="local", conn=c)
+
+            # Attach lyrics (LRCLIB) to that track, or log a gap for backfill.
+            localcache.add_track_and_lyrics(
+                artist, title, ly, album=album, duration=duration, conn=c)
+
+            # Additional streaming sources.
+            if yt_url:
+                localcache.add_track_source(
+                    artist, title, album=album, duration=duration,
+                    url=yt_url, kind="youtube", conn=c)
+            if spotify_uri:
+                localcache.add_track_source(
+                    artist, title, album=album, duration=duration,
+                    url=spotify_uri, kind="spotify", conn=c)
+
+            # Save Analysis
+            if analysis_res and (analysis_res.key or analysis_res.bpm):
+                from .track_analysis import save_detected
+                save_detected(
+                    track_id,
+                    detected_key=analysis_res.key,
+                    key_confidence=analysis_res.key_confidence,
+                    key_agreement=analysis_res.key_agreement,
+                    bpm=analysis_res.bpm,
+                    method=f"{analysis_res.method}+folder_scan",
+                    energy=analysis_res.energy,
+                    brightness=analysis_res.brightness,
+                    conn=c,
+                )
+
+            # Save Genre
+            if genre_verdict:
+                localcache.record_genre(track_id, genre_verdict, c)
+
+            stats["processed"] += 1
+
+        except Exception as exc:
+            log.exception("Error processing %s", path)
+            stats["errors"] += 1
+
+    if own_conn and c:
+        c.close()
+
+    return stats

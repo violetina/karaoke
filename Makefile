@@ -36,7 +36,7 @@ K8S_NAMESPACE ?= karaoke
         install-audio analyze api ctrl-api \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
-        index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
+        index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run folder-scan \
         mq-port-forward postprocess-worker postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
@@ -231,6 +231,9 @@ k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 
 index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
+
+folder-scan: ## Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
+	$(PYTHON) -c "import sys; from karaoke.cli import folder_scan_main; args=['$(DIR)']+(['--limit','$(LIMIT)'] if '$(LIMIT)' else [])+(['--dry-run'] if '$(DRY_RUN)' else []); raise SystemExit(folder_scan_main(args))"
 
 db-cleanup: ## Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 	$(PYTHON) scripts/db_cleanup.py

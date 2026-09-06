@@ -13,6 +13,8 @@ from __future__ import annotations
 import html
 import json
 import os
+import shutil
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote_plus
 
@@ -22,7 +24,7 @@ from pydantic import BaseModel
 from .logger import log
 from .player_open import open_song_url
 
-CTRL_API_VERSION = "0.3.0"
+CTRL_API_VERSION = "0.4.0"
 
 app = FastAPI(
     title="Karaoke Control API",
@@ -46,6 +48,7 @@ class RecordRequest(BaseModel):
 
     source: Optional[str] = None       # PipeWire source; default is the playing sink
     keep_audio: bool = False           # audio is a means to metadata, not a library
+    note: Optional[str] = None         # optional note / description for the recording session
 
 
 class StopRequest(BaseModel):
@@ -58,6 +61,39 @@ class SampleRequest(BaseModel):
     artist: Optional[str] = None
     title: Optional[str] = None
     seconds: Optional[float] = None
+
+
+class PlayerControlRequest(BaseModel):
+    """Target a specific MPRIS player, or let playerctl choose when omitted."""
+
+    player: Optional[str] = None
+
+
+class SeekRequest(BaseModel):
+    """Seek the (targeted) player by a relative offset in seconds."""
+
+    offset_s: float
+    player: Optional[str] = None
+
+
+class FolderScanRequest(BaseModel):
+    """Scan a local music folder and ingest it into the library."""
+
+    dir: str
+    use_fingerprint: bool = True
+    classify_audio: bool = True
+    resolve_streaming: bool = True
+    dry_run: bool = False
+    limit: Optional[int] = None
+
+
+class AudioCutRequest(BaseModel):
+    """Cut a slice out of an audio file with ffmpeg."""
+
+    file_path: str
+    start_s: float = 0.0
+    duration_s: float
+    output_path: Optional[str] = None
 
 
 @app.get("/health")
@@ -119,7 +155,7 @@ def record_start(req: RecordRequest) -> dict[str, Any]:
     from . import recorder
 
     try:
-        session = recorder.start(req.source or "", keep_audio=req.keep_audio)
+        session = recorder.start(req.source or "", keep_audio=req.keep_audio, note=req.note)
     except recorder.RecorderError as exc:
         # Nothing playing, or no ffmpeg: the caller's problem to fix, not a bug.
         raise HTTPException(status_code=409, detail=str(exc))
@@ -337,6 +373,191 @@ def sample_now(req: SampleRequest) -> dict[str, Any]:
         "key": result.key.name if result.key else None,
         "bpm": result.bpm,
         "stored": bool(req.artist and req.title),
+    }
+
+
+# -- player controls (MPRIS via playerctl) --------------------------------
+#
+# These live here rather than in karaoke.api because playerctl talks to the
+# desktop session's MPRIS bus, which does not exist in a container. Everything
+# the TUI does to a player is exposed so a future web UI can do the same.
+
+
+@app.get("/api/players")
+def players_list() -> dict[str, Any]:
+    """Every MPRIS player, which are playing, and which one is active."""
+    from . import playerctl
+
+    names = playerctl.list_players()
+    playing = playerctl.playing_players()
+    return {
+        "players": names,
+        "playing": playing,
+        "active": playerctl.playing_player(),
+        "count": len(names),
+    }
+
+
+@app.get("/api/players/current")
+def player_current(player: str = "") -> dict[str, Any]:
+    """Current track metadata + playback state for a player (or the active one)."""
+    from . import playerctl
+
+    target = player or playerctl.playing_player()
+    meta = playerctl.current_metadata(target)
+    return {
+        "player": target,
+        "status": playerctl.status(target),
+        "position_s": playerctl.position(target),
+        "art_url": playerctl.art_url(target),
+        "metadata": None if meta is None else {
+            "artist": meta.artist,
+            "title": meta.title,
+            "album": meta.album,
+            "url": meta.url,
+            "player": meta.player,
+            "mpris_name": meta.mpris_name,
+            "duration": meta.duration,
+        },
+    }
+
+
+def _player_action(name: str, fn, req: PlayerControlRequest) -> dict[str, Any]:
+    ok = fn((req.player or ""))
+    if not ok:
+        raise HTTPException(status_code=409,
+                            detail=f"No player could handle '{name}'")
+    return {"status": "ok", "action": name, "player": req.player or ""}
+
+
+@app.post("/api/players/play-pause")
+def player_play_pause(req: PlayerControlRequest) -> dict[str, Any]:
+    """Toggle play/pause on the (targeted) player."""
+    from . import playerctl
+    return _player_action("play-pause", playerctl.play_pause, req)
+
+
+@app.post("/api/players/pause")
+def player_pause(req: PlayerControlRequest) -> dict[str, Any]:
+    """Pause the (targeted) player (never resumes)."""
+    from . import playerctl
+    return _player_action("pause", playerctl.pause, req)
+
+
+@app.post("/api/players/next")
+def player_next(req: PlayerControlRequest) -> dict[str, Any]:
+    """Skip to the next track."""
+    from . import playerctl
+    return _player_action("next", playerctl.next_track, req)
+
+
+@app.post("/api/players/previous")
+def player_previous(req: PlayerControlRequest) -> dict[str, Any]:
+    """Skip to the previous track."""
+    from . import playerctl
+    return _player_action("previous", playerctl.previous_track, req)
+
+
+@app.post("/api/players/seek")
+def player_seek(req: SeekRequest) -> dict[str, Any]:
+    """Seek the (targeted) player by a relative offset in seconds."""
+    from . import playerctl
+
+    if not playerctl.seek(req.offset_s, req.player or ""):
+        raise HTTPException(status_code=409,
+                            detail="No player could handle 'seek'")
+    return {"status": "ok", "action": "seek", "offset_s": req.offset_s,
+            "player": req.player or ""}
+
+
+# -- library ingestion (folder scan, audio cut) ---------------------------
+#
+# Folder scanning needs ffmpeg + songrec + the analysis stack, and audio cut
+# needs ffmpeg, none of which belong in the slim library container.
+
+
+@app.post("/api/scan/folder")
+def scan_folder(req: FolderScanRequest, background: BackgroundTasks) -> dict[str, Any]:
+    """Scan a music folder: tags, fingerprint, classify, source, and ingest.
+
+    A dry run returns the enrichment preview synchronously. A real ingest can
+    run long over a big library, so it is dispatched to the background and the
+    caller polls the library API for the new tracks.
+    """
+    from . import folder_scan
+
+    root = Path(req.dir).expanduser()
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory not found: {root}")
+
+    if req.dry_run:
+        stats = folder_scan.scan_and_ingest_folder(
+            root,
+            use_fingerprint=req.use_fingerprint,
+            classify_audio=req.classify_audio,
+            resolve_streaming=req.resolve_streaming,
+            dry_run=True,
+            limit=req.limit,
+        )
+        return {"status": "preview", **stats}
+
+    background.add_task(
+        folder_scan.scan_and_ingest_folder,
+        root,
+        use_fingerprint=req.use_fingerprint,
+        classify_audio=req.classify_audio,
+        resolve_streaming=req.resolve_streaming,
+        dry_run=False,
+        limit=req.limit,
+    )
+    return {"status": "accepted", "dir": str(root)}
+
+
+@app.post("/api/audio/cut")
+def audio_cut(req: AudioCutRequest) -> dict[str, Any]:
+    """Cut a slice out of an audio file with ffmpeg. Returns the output path."""
+    import subprocess
+    import tempfile
+
+    src = Path(req.file_path).expanduser()
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail=f"File not found: {src}")
+    if req.duration_s <= 0:
+        raise HTTPException(status_code=400, detail="duration_s must be positive")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=503, detail="ffmpeg is not installed")
+
+    if req.output_path:
+        out = Path(req.output_path).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        fd, tmp = tempfile.mkstemp(suffix=src.suffix or ".wav", prefix="karaoke-cut-")
+        os.close(fd)
+        out = Path(tmp)
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(src), "-ss", f"{req.start_s:.3f}", "-t", f"{req.duration_s:.3f}",
+        "-ac", "2", "-ar", "44100", str(out),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, check=True,
+                       timeout=max(120.0, req.duration_s * 4))
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"ffmpeg failed: {exc.stderr.decode(errors='ignore')[:200]}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cut failed: {exc}")
+
+    if not out.is_file() or out.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="Cut produced no output")
+
+    return {
+        "status": "ok",
+        "output_path": str(out),
+        "start_s": req.start_s,
+        "duration_s": req.duration_s,
+        "bytes": out.stat().st_size,
     }
 
 

@@ -552,6 +552,56 @@ def backfill_main(argv: Optional[list[str]] = None) -> int:
     from .backfill import backfill_main as _backfill_main
     return _backfill_main(argv)
 
+
+def folder_scan_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-folder-scan` CLI.
+
+    Scans a music folder, fingerprints with Shazam/songrec, classifies audio
+    (key/BPM/CLAP/genre), resolves YouTube/Spotify links, and ingests into the
+    library. The heavy lifting lives in :mod:`karaoke.folder_scan`, which is the
+    same code the control API's ``/api/scan/folder`` calls.
+    """
+    import argparse
+    from pathlib import Path
+
+    from .folder_scan import scan_and_ingest_folder
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-folder-scan",
+        description="Scan a music folder, fingerprint, classify, resolve "
+                    "YT/Spotify, and ingest into the library",
+    )
+    ap.add_argument("dir", type=Path, help="Folder containing music files")
+    ap.add_argument("--no-fingerprint", action="store_true",
+                    help="disable songrec Shazam fingerprinting")
+    ap.add_argument("--no-classify", action="store_true",
+                    help="disable key/BPM/CLAP/genre classification")
+    ap.add_argument("--no-streaming", action="store_true",
+                    help="disable YouTube/Spotify link resolution")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="preview enrichment without writing to the library")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="process at most N files")
+    args = ap.parse_args(argv)
+
+    stats = scan_and_ingest_folder(
+        args.dir,
+        use_fingerprint=not args.no_fingerprint,
+        classify_audio=not args.no_classify,
+        resolve_streaming=not args.no_streaming,
+        dry_run=args.dry_run,
+        limit=args.limit,
+    )
+    if args.dry_run:
+        for item in stats["items"]:
+            print(f"  {item['artist']} - {item['title']}  "
+                  f"[key={item['key']} bpm={item['bpm']} genre={item['genre']}]")
+    print(f"\nseen={stats['seen']} processed={stats['processed']} "
+          f"fingerprinted={stats['fingerprinted']} classified={stats['classified']} "
+          f"sourced={stats['sourced']} errors={stats['errors']}")
+    return 0
+
+
 def browse_main(argv: Optional[list[str]] = None) -> int:
     """Run the `karaoke-browse` TUI."""
     from .browse import browse_main as _browse_main

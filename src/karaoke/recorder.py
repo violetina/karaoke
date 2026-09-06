@@ -136,6 +136,7 @@ def _ffmpeg_cmd(source: str, directory: Path) -> list[str]:
 
 
 def start(source: str = "", *, keep_audio: bool = False,
+          note: Optional[str] = None,
           conn: Optional[object] = None) -> Session:
     """Begin recording the playing output and marking what is on it."""
     from .sample_audio import monitor_source
@@ -154,9 +155,9 @@ def start(source: str = "", *, keep_audio: bool = False,
                                                      time.localtime(started))
         directory.mkdir(parents=True, exist_ok=True)
         cur = c.execute(
-            "INSERT INTO recordings (started_at, source, dir, status, keep_audio)"
-            " VALUES (?, ?, ?, 'recording', ?)",
-            (started, src, str(directory), 1 if keep_audio else 0),
+            "INSERT INTO recordings (started_at, source, dir, status, keep_audio, note)"
+            " VALUES (?, ?, ?, 'recording', ?, ?)",
+            (started, src, str(directory), 1 if keep_audio else 0, note),
         )
         c.commit()
         recording_id = int(cur.lastrowid)

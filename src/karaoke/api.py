@@ -46,6 +46,11 @@ class TrackResponse(BaseModel):
     has_synced_lyrics: bool = False
 
 
+class UpdateRecordingRequest(BaseModel):
+    note: Optional[str] = None
+    keep_audio: Optional[bool] = None
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -188,8 +193,19 @@ def get_stats() -> dict[str, Any]:
 
 
 @app.get("/api/recordings")
-def list_recordings() -> dict[str, Any]:
-    """Record-mode sessions, newest first.
+def list_recordings(
+    status: Optional[str] = Query(None, description="Filter by status (e.g. recording, complete, analysed, discarded). Comma-separated allowed."),
+    source: Optional[str] = Query(None, description="Filter by audio source substring"),
+    has_marks: Optional[bool] = Query(None, description="Filter to recordings with (true) or without (false) marks"),
+    identified_only: Optional[bool] = Query(None, description="Filter to recordings with at least 1 identified track"),
+    keep_audio: Optional[bool] = Query(None, description="Filter by keep_audio flag"),
+    since: Optional[float] = Query(None, description="Filter recordings started at or after Unix timestamp"),
+    until: Optional[float] = Query(None, description="Filter recordings started at or before Unix timestamp"),
+    q: Optional[str] = Query(None, description="Search query matching note or source"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Record-mode sessions with filtering, search and pagination, newest first.
 
     Read-only over SQLite like the rest of this service. Starting and stopping
     a capture needs PipeWire and a desktop audio session, so that lives in the
@@ -198,15 +214,70 @@ def list_recordings() -> dict[str, Any]:
     from . import recorder
 
     with localcache.connect() as conn:
-        rows = conn.execute(
-            "SELECT r.recording_id, r.started_at, r.ended_at, r.status,"
-            "       r.source, r.dir, r.keep_audio, r.note,"
-            "       (SELECT count(*) FROM recording_marks m"
-            "         WHERE m.recording_id = r.recording_id) AS marks,"
-            "       (SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m"
-            "         WHERE m.recording_id = r.recording_id) AS identified"
-            " FROM recordings r ORDER BY r.recording_id DESC"
-        ).fetchall()
+        clauses = []
+        params: list[Any] = []
+
+        if status:
+            statuses = [s.strip() for s in status.split(",") if s.strip()]
+            if len(statuses) == 1:
+                clauses.append("r.status = ?")
+                params.append(statuses[0])
+            elif len(statuses) > 1:
+                placeholders = ",".join(["?"] * len(statuses))
+                clauses.append(f"r.status IN ({placeholders})")
+                params.extend(statuses)
+
+        if source:
+            clauses.append("r.source LIKE ?")
+            params.append(f"%{source.strip()}%")
+
+        if keep_audio is not None:
+            clauses.append("r.keep_audio = ?")
+            params.append(1 if keep_audio else 0)
+
+        if since is not None:
+            clauses.append("r.started_at >= ?")
+            params.append(since)
+
+        if until is not None:
+            clauses.append("r.started_at <= ?")
+            params.append(until)
+
+        if q:
+            pattern = f"%{q.strip()}%"
+            clauses.append("(r.note LIKE ? OR r.source LIKE ?)")
+            params.extend([pattern, pattern])
+
+        having_clauses = []
+        if has_marks is True:
+            having_clauses.append("marks > 0")
+        elif has_marks is False:
+            having_clauses.append("marks = 0")
+
+        if identified_only is True:
+            having_clauses.append("identified > 0")
+        elif identified_only is False:
+            having_clauses.append("identified = 0")
+
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        having_sql = (" HAVING " + " AND ".join(having_clauses)) if having_clauses else ""
+
+        sql = f"""
+            SELECT r.recording_id, r.started_at, r.ended_at, r.status,
+                   r.source, r.dir, r.keep_audio, r.note,
+                   (SELECT count(*) FROM recording_marks m
+                     WHERE m.recording_id = r.recording_id) AS marks,
+                   (SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m
+                     WHERE m.recording_id = r.recording_id) AS identified
+             FROM recordings r
+             {where_sql}
+             GROUP BY r.recording_id
+             {having_sql}
+             ORDER BY r.recording_id DESC
+             LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
 
     out = []
     for row in rows:
@@ -233,7 +304,11 @@ def list_recordings() -> dict[str, Any]:
 
 
 @app.get("/api/recordings/{recording_id}")
-def get_recording(recording_id: int) -> dict[str, Any]:
+def get_recording(
+    recording_id: int,
+    confident_only: bool = Query(False, description="Include only confident identified tracks"),
+    min_marks: Optional[int] = Query(None, ge=1, description="Minimum mark count for track"),
+) -> dict[str, Any]:
     """One session with the track list its markers resolve to.
 
     The segments are derived on read rather than stored: they are a function of
@@ -252,6 +327,11 @@ def get_recording(recording_id: int) -> dict[str, Any]:
 
     tracks = []
     for segment in segments(marks):
+        confident = is_confident(segment)
+        if confident_only and not confident:
+            continue
+        if min_marks is not None and segment.marks < min_marks:
+            continue
         window = recording_worker.clamp(segment, span) if span else None
         tracks.append({
             "artist": segment.artist,
@@ -264,7 +344,7 @@ def get_recording(recording_id: int) -> dict[str, Any]:
             # boundary is corroborated; high means the track was changed,
             # repeated or seeked, and it is gated out of analysis.
             "spread_s": None if segment.spread == float("inf") else segment.spread,
-            "confident": is_confident(segment),
+            "confident": confident,
             "audio_available": window is not None,
         })
 
@@ -275,12 +355,54 @@ def get_recording(recording_id: int) -> dict[str, Any]:
         "started_at": record["started_at"],
         "ended_at": record["ended_at"],
         "source": record["source"],
+        "keep_audio": bool(record["keep_audio"]),
+        "note": record["note"],
         "marks": total,
         "identified": ok,
         "segment_files": len(files),
         "captured_s": (span[1] - span[0]) if span else 0.0,
         "running": recorder.is_running(recording_id),
         "tracks": tracks,
+    }
+
+
+@app.patch("/api/recordings/{recording_id}")
+def update_recording(recording_id: int, req: UpdateRecordingRequest) -> dict[str, Any]:
+    """Update metadata (note, keep_audio) for a recording session."""
+    from . import recording_worker
+
+    record = recording_worker.load_recording(recording_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    updates = []
+    params: list[Any] = []
+    if req.note is not None:
+        updates.append("note = ?")
+        params.append(req.note)
+    if req.keep_audio is not None:
+        updates.append("keep_audio = ?")
+        params.append(1 if req.keep_audio else 0)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided to update")
+
+    params.append(recording_id)
+    with localcache.connect() as conn:
+        conn.execute(
+            f"UPDATE recordings SET {', '.join(updates)} WHERE recording_id = ?",
+            params,
+        )
+        conn.commit()
+
+    updated = recording_worker.load_recording(recording_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return {
+        "recording_id": recording_id,
+        "note": updated["note"],
+        "keep_audio": bool(updated["keep_audio"]),
+        "status": updated["status"],
     }
 
 
