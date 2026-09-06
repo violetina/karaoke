@@ -2040,8 +2040,22 @@ class KaraokeTui(App):
         stored as a marker, so the session can be cut back into tracks and
         analysed afterwards.
         """
+        if self._recording_id is None:
+            try:
+                st = self.api.record_status()
+                sessions = st.get("sessions", []) if isinstance(st, dict) else []
+                for s in sessions:
+                    if s.get("recording_id"):
+                        self._recording_id = int(s["recording_id"])
+                        break
+            except Exception:
+                pass
+
         if self._recording_id is not None:
-            recorded, total = recorder.mark_count(self._recording_id)
+            try:
+                recorded, total = recorder.mark_count(self._recording_id)
+            except Exception:
+                recorded, total = 0, 0
             stopped_id = self._recording_id
             self.api.record_stop(stopped_id)
             self.notify(f"Recording {stopped_id} stopped "
