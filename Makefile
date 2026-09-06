@@ -264,6 +264,8 @@ vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without wr
 health: ## Run the karaoke platform health check (services, ports, cluster, DB)
 	$(PYTHON) scripts/healthcheck.py
 
+webtui: web ## Alias for make web
+
 web: ## Serve the TUI in a web browser using textual-serve
 	$(PYTHON) scripts/web_serve.py
 

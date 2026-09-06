@@ -120,6 +120,16 @@ class AudioCutRequest(BaseModel):
     output_path: Optional[str] = None
 
 
+class WindowRequest(BaseModel):
+    """Control Chrome CDP window state or bounds."""
+
+    state: Optional[str] = None  # "normal", "minimized", "maximized", "fullscreen", "focus"
+    left: Optional[int] = None
+    top: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -328,6 +338,37 @@ def record_discard(recording_id: int) -> dict[str, Any]:
     freed = recording_worker.discard_audio(recording_id)
     return {"status": "discarded", "recording_id": recording_id,
             "freed_bytes": freed}
+
+
+@app.get("/api/players/window")
+def get_player_window() -> dict[str, Any]:
+    """Get the current Chrome kiosk window bounds and state over CDP."""
+    from . import player_open
+    info = player_open.get_window_bounds()
+    if not info:
+        raise HTTPException(status_code=503, detail="Chrome CDP window is not active (:9222 down)")
+    return info
+
+
+@app.post("/api/players/window")
+def set_player_window(req: WindowRequest) -> dict[str, Any]:
+    """Control Chrome kiosk window state (fullscreen, normal, focus, etc.) or geometry."""
+    from . import player_open
+
+    if req.state == "focus":
+        ok = player_open.bring_to_front()
+        return {"status": "ok" if ok else "failed", "focused": ok}
+
+    ok = player_open.set_window_bounds(
+        state=req.state,
+        left=req.left,
+        top=req.top,
+        width=req.width,
+        height=req.height,
+    )
+    if not ok:
+        raise HTTPException(status_code=503, detail="Failed to update Chrome window state/bounds")
+    return {"status": "ok", "state": req.state}
 
 
 # Deliberately plain. This page exists to hold one <audio> element and to

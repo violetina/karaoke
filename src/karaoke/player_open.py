@@ -263,18 +263,7 @@ def track_finished(state: "dict | None", *, tail: float = 1.5) -> bool:
 
 
 def track_idle(state: "dict | None") -> bool:
-    """Whether the element holds nothing that could ever play.
-
-    YouTube Music keeps a ``<video>`` on every page, including artist and
-    search pages, so navigating off a watch URL leaves an element that is
-    present but empty. That state never satisfies :func:`track_finished` --
-    it has no duration and will never set ``ended`` -- so a queue waiting for
-    the track to end waits forever. ``readyState`` is what separates the two:
-    a live stream also reports no duration, but it has data.
-
-    Idle is not the same as finished: a watch URL reads as idle for a moment
-    while it loads. Callers must see it hold before acting on it.
-    """
+    """Whether the element holds nothing that could ever play."""
     if not state or not state.get("present"):
         return False
     if state.get("ended"):
@@ -284,6 +273,49 @@ def track_idle(state: "dict | None") -> bool:
     except (TypeError, ValueError):
         return False
     return ready == 0  # HAVE_NOTHING: no source loaded at all
+
+
+def get_window_bounds() -> "dict | None":
+    """Get the Chrome browser window ID and geometry/state over CDP."""
+    reply = _cdp_send("Browser.getWindowForTarget", {})
+    if reply and "result" in reply:
+        return reply["result"]
+    return None
+
+
+def set_window_bounds(
+    *,
+    state: "str | None" = None,
+    left: "int | None" = None,
+    top: "int | None" = None,
+    width: "int | None" = None,
+    height: "int | None" = None,
+) -> bool:
+    """Set Chrome browser window state ('normal', 'minimized', 'maximized', 'fullscreen') or bounds."""
+    info = get_window_bounds()
+    if not info or "windowId" not in info:
+        return False
+    window_id = info["windowId"]
+    bounds = {}
+    if state:
+        bounds["windowState"] = state
+    if left is not None:
+        bounds["left"] = left
+    if top is not None:
+        bounds["top"] = top
+    if width is not None:
+        bounds["width"] = width
+    if height is not None:
+        bounds["height"] = height
+
+    reply = _cdp_send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+    return reply is not None
+
+
+def bring_to_front() -> bool:
+    """Bring the active Chrome page tab to front."""
+    reply = _cdp_send("Page.bringToFront", {})
+    return reply is not None
 
 
 def _kiosk_mpris_names(names: "list[str]") -> "set[str]":

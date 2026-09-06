@@ -296,6 +296,34 @@ class ApiClient:
             return seek(offset_s, player or "")
         return False
 
+    def get_player_window(self) -> Optional[dict[str, Any]]:
+        res = self._http_get(self.ctrl_url, "/api/players/window")
+        if res is not None:
+            return res
+        if self.fallback_local:
+            from . import player_open
+            return player_open.get_window_bounds()
+        return None
+
+    def set_player_window(
+        self,
+        state: Optional[str] = None,
+        left: Optional[int] = None,
+        top: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> bool:
+        body = {"state": state, "left": left, "top": top, "width": width, "height": height}
+        res = self._http_post(self.ctrl_url, "/api/players/window", body)
+        if res is not None and res.get("status") in ("ok", "launched"):
+            return True
+        if self.fallback_local:
+            from . import player_open
+            if state == "focus":
+                return player_open.bring_to_front()
+            return player_open.set_window_bounds(state=state, left=left, top=top, width=width, height=height)
+        return False
+
     def record_start(self, source: Optional[str] = None, keep_audio: bool = False, note: Optional[str] = None) -> dict[str, Any]:
         body = {"source": source, "keep_audio": keep_audio, "note": note}
         res = self._http_post(self.ctrl_url, "/api/record/start", body)
