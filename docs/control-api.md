@@ -131,6 +131,11 @@ function when no server is reachable — so `karaoke-tui` works standalone, yet 
 *same code path* drives the HTTP API the moment `karaoke-api` / `karaoke-ctrl-api`
 are running.
 
+An end-to-end integration test suite (`tests/test_e2e_recordings_api.py`) and a
+live CLI runner (`scripts/e2e_test_recordings_api.py`) verify the entire lifecycle
+(listing, detail inspection, metadata PATCHing, live capture start/stop,
+decompiling analysis, audio serving, and discarding) over HTTP.
+
 ```python
 from karaoke.api_client import ApiClient
 api = ApiClient()                      # honours KARAOKE_API_* / KARAOKE_CTRL_* env
