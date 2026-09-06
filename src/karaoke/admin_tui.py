@@ -83,27 +83,55 @@ class KaraokeAdminApp(App):
     def refresh_workers(self) -> None:
         try:
             res = self.api._http_get(self.api.ctrl_url, "/api/workers/status")
-            if not res:
-                return
-            table = self.query_one("#worker-table", DataTable)
-            table.clear()
-            units = res.get("units", [])
-            active_count = 0
-            for u in units:
-                uname = u.get("unit", "")
-                st = "[bold green]ACTIVE[/bold green]" if u.get("active") else "[dim]inactive[/dim]"
-                if u.get("active"):
-                    active_count += 1
-                table.add_row(uname, st, str(u.get("worker_id", "")))
+            if not res or res.get("status") != "ok":
+                res = self._direct_worker_status()
+        except Exception:
+            res = self._direct_worker_status()
 
-            self._target_workers = active_count or 1
-            cpu = res.get("worker_cpu") or 0.0
-            ram = res.get("worker_memory_mb") or 0.0
-            q_len = res.get("queue_depth") or 0
-            summary = f"[bold green]Active Workers:[/bold green] {active_count}/6 | [bold yellow]CPU:[/bold yellow] {cpu:.1f}% | [bold yellow]RAM:[/bold yellow] {ram:.1f} MB | [bold cyan]Queue Depth:[/bold cyan] {q_len} jobs"
-            self.query_one("#worker-summary", Static).update(summary)
-        except Exception as exc:
-            log.debug("refresh_workers failed", exc_info=True)
+        if not res:
+            return
+
+        table = self.query_one("#worker-table", DataTable)
+        table.clear()
+        units = res.get("units", [])
+        active_count = 0
+        for u in units:
+            uname = u.get("unit", "")
+            is_act = bool(u.get("active"))
+            st = "[bold green]ACTIVE[/bold green]" if is_act else "[dim]inactive[/dim]"
+            if is_act:
+                active_count += 1
+            table.add_row(uname, st, str(u.get("worker_id", "")))
+
+        self._target_workers = active_count or 1
+        cpu = res.get("worker_cpu") or 0.0
+        ram = res.get("worker_memory_mb") or 0.0
+        q_len = res.get("queue_depth") or 0
+        summary = f"[bold green]Active Workers:[/bold green] {active_count}/6 | [bold yellow]RAM:[/bold yellow] {ram:.1f} MB | [bold cyan]Queue Depth:[/bold cyan] {q_len} jobs"
+        self.query_one("#worker-summary", Static).update(summary)
+
+    def _direct_worker_status(self) -> dict[str, Any]:
+        """Direct systemd fallback when ctrl_api HTTP is unreachable."""
+        units = []
+        active_count = 0
+        for i in range(1, 7):
+            uname = f"karaoke-postprocess@{i}.service"
+            try:
+                r = subprocess.run(["systemctl", "--user", "is-active", uname], capture_output=True, text=True, timeout=2)
+                act = r.stdout.strip() == "active"
+            except Exception:
+                act = False
+            if act:
+                active_count += 1
+            units.append({"unit": uname, "worker_id": i, "active": act})
+        return {
+            "status": "ok",
+            "workers_active": active_count,
+            "worker_cpu": 0.0,
+            "worker_memory_mb": 0.0,
+            "queue_depth": 0,
+            "units": units,
+        }
 
     def refresh_errors(self) -> None:
         try:
@@ -130,7 +158,10 @@ class KaraokeAdminApp(App):
         res = self.api._http_post(self.api.ctrl_url, "/api/workers/scale", {"target": target})
         if res and res.get("status") == "ok":
             self.notify(f"Worker pool target set to {target}")
-            self.refresh_workers()
+            try:
+                self.refresh_workers()
+            except Exception:
+                pass
         else:
             self.notify("Failed to update worker scaling", severity="error")
 
