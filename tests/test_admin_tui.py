@@ -47,7 +47,9 @@ def test_admin_pipeline_actions_dispatch(monkeypatch):
     monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
 
     app.action_run_backfill()
+    app._bg_busy = False
     app.action_rebuild_vectors()
+    app._bg_busy = False
     app.action_analyse_recordings()
 
     # Each control notified the user and queued exactly one background worker.
@@ -80,3 +82,24 @@ def test_admin_whisper_align_dispatch(monkeypatch):
     assert len(started) == 1
     assert callable(started[0])
     assert "Aligning lyrics for '62'" in notifications[0]
+
+
+def test_admin_single_operation_guard(monkeypatch):
+    """A second audio task is refused while one is already running."""
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    app._bg_busy = False
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append((msg, k)), raising=False)
+
+    started = []
+    monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
+
+    # First rebuild acquires the lock and dispatches a worker.
+    app.action_rebuild_vectors()
+    assert len(started) == 1
+    assert app._bg_busy is True
+
+    # Second rebuild is refused (lock held) — no new worker, a warning fires.
+    app.action_rebuild_vectors()
+    assert len(started) == 1
+    assert any(k.get("severity") == "warning" for _, k in notifications)

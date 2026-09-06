@@ -46,6 +46,17 @@ class KaraokeAdminApp(App):
         super().__init__()
         self.api = ApiClient()
         self._target_workers = 1
+        self._bg_busy = False
+
+    def _acquire_bg_lock(self) -> bool:
+        if getattr(self, "_bg_busy", False):
+            self.notify("Another task is currently running. Please wait...", severity="warning")
+            return False
+        self._bg_busy = True
+        return True
+
+    def _release_bg_lock(self) -> None:
+        self._bg_busy = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -200,6 +211,8 @@ class KaraokeAdminApp(App):
 
     def action_run_backfill(self) -> None:
         """`b`: Trigger audio gap-fill and zero-shot genre backfill."""
+        if not self._acquire_bg_lock():
+            return
         self.notify("Started audio gap-fill and classification backfill...")
         def _bg():
             try:
@@ -210,10 +223,14 @@ class KaraokeAdminApp(App):
                     self.call_from_thread(self.notify, "Audio backfill completed successfully!")
             except Exception as exc:
                 self.call_from_thread(self.notify, f"Backfill failed: {exc}", severity="error")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
 
     def action_rebuild_vectors(self) -> None:
         """`v`: Rebuild OpenSearch vector indices."""
+        if not self._acquire_bg_lock():
+            return
         self.notify("Rebuilding OpenSearch vector indices...")
         def _bg():
             try:
@@ -224,10 +241,14 @@ class KaraokeAdminApp(App):
                 self.call_from_thread(self.notify, msg)
             except Exception as exc:
                 self.call_from_thread(self.notify, f"Vector rebuild note: {exc}")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
 
     def action_analyse_recordings(self) -> None:
         """`a`: Process, decompile, and ingest detected song vectors from recordings."""
+        if not self._acquire_bg_lock():
+            return
         self.notify("Analysing captured audio recordings and ingesting song vectors...")
         def _bg():
             try:
@@ -245,6 +266,8 @@ class KaraokeAdminApp(App):
                 self.call_from_thread(self.notify, f"Processed {processed} recording(s) and ingested song vectors")
             except Exception as exc:
                 self.call_from_thread(self.notify, f"Recording analysis note: {exc}")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
 
     def action_align_whisper(self) -> None:
@@ -254,6 +277,8 @@ class KaraokeAdminApp(App):
         if not track_input or not text_input:
             self.notify("Provide track identifier and lyrics text/file path", severity="warning")
             return
+        if not self._acquire_bg_lock():
+            return
         self.notify(f"Aligning lyrics for '{track_input}' with Whisper...")
         def _bg():
             try:
@@ -261,6 +286,8 @@ class KaraokeAdminApp(App):
                 self.call_from_thread(self.notify, res)
             except Exception as exc:
                 self.call_from_thread(self.notify, f"Alignment failed: {exc}", severity="error")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
