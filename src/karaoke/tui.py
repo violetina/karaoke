@@ -746,8 +746,10 @@ class KaraokeTui(App):
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
     #mood-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
-    #queue, #library { display: none; height: 10; border: round cyan; margin-top: 1; }
-    #queue.-on, #library.-on { display: block; }
+    #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
+    #queue.-on { display: block; }
+    #library { display: block; height: 10; border: round cyan; margin-top: 1; }
+    #library.-off { display: none; }
     /* In the left column now, with the other per-track facts. Auto height
        because it holds two or three lines depending on what is known, and a
        fixed 6 left a gap under the short case. */
@@ -1555,13 +1557,22 @@ class KaraokeTui(App):
         self._queue = rows
         self._queue_at = -1
         table = self.query_one("#queue", DataTable)
+        try:
+            lib_table = self.query_one("#library", DataTable)
+        except Exception:
+            lib_table = None
+
         if not rows:
             table.set_class(False, "-on")
+            if lib_table:
+                lib_table.set_class(False, "-off")
             table.clear()
             if query:
                 self.notify(f"No matches for {query!r}", severity="warning")
             return
         table.set_class(True, "-on")
+        if lib_table:
+            lib_table.set_class(True, "-off")
         self._render_queue()
         self.notify(f"{len(rows)} match(es) for {query!r}" if query
                     else f"{len(rows)} queued")
