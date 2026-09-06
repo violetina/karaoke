@@ -2178,6 +2178,9 @@ class KaraokeTui(App):
                 self.notify("control failed", severity="warning")
 
     def action_next_track(self) -> None:
+        if self._queue and self._queue_at >= 0:
+            self.action_queue_next()
+            return
         if self._det.is_active:
             self.api.player_next(self._control_player())
 
