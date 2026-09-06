@@ -54,3 +54,29 @@ def test_admin_pipeline_actions_dispatch(monkeypatch):
     assert len(started) == 3
     assert all(callable(fn) for fn in started)
     assert len(notifications) == 3
+
+
+def test_admin_whisper_align_dispatch(monkeypatch):
+    """Whisper alignment control dispatches background worker when inputs are given."""
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
+
+    started = []
+    monkeypatch.setattr(app, "run_worker", lambda fn, **k: started.append(fn), raising=False)
+
+    class FakeInput:
+        def __init__(self, val):
+            self.value = val
+
+    def fake_query(selector, *a, **k):
+        if selector == "#align-track-input":
+            return FakeInput("62")
+        return FakeInput("Some lyrics text")
+
+    monkeypatch.setattr(app, "query_one", fake_query, raising=False)
+
+    app.action_align_whisper()
+    assert len(started) == 1
+    assert callable(started[0])
+    assert "Aligning lyrics for '62'" in notifications[0]
