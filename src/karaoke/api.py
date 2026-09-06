@@ -96,7 +96,20 @@ def list_tracks(
                        WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
                    ) AS has_synced
             FROM tracks t
-            LEFT JOIN sources s ON t.track_id = s.track_id
+            LEFT JOIN sources s ON s.source_id = (
+                SELECT s2.source_id FROM sources s2
+                WHERE s2.track_id = t.track_id
+                ORDER BY
+                    CASE
+                        WHEN s2.kind = 'youtube_music' THEN 0
+                        WHEN s2.kind = 'youtube' THEN 1
+                        WHEN s2.url LIKE 'http%' THEN 2
+                        WHEN s2.kind = 'spotify' THEN 3
+                        ELSE 4
+                    END,
+                    s2.source_id
+                LIMIT 1
+            )
             LEFT JOIN track_analysis a ON a.track_id = t.track_id
         """
         if q:
