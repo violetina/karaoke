@@ -4,8 +4,8 @@ VENV ?= .venv
 PYTHON := PYTHONPATH=src $(VENV)/bin/python
 MKDOCS := $(VENV)/bin/mkdocs
 # mkdocs defaults to :8000, which karaoke-api already listens on (systemd --user),
-# so serving the docs there fails to bind. Override with DOCS_ADDR if 8001 clashes too.
-DOCS_ADDR ?= 127.0.0.1:8001
+# so serving the docs there fails to bind. Default to 127.0.0.1:8085 (free port).
+DOCS_ADDR ?= 127.0.0.1:8085
 AUDIO_VENV ?= .venv-audio
 AUDIO_PY := $(AUDIO_VENV)/bin/python
 

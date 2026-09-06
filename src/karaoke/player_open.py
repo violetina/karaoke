@@ -201,10 +201,29 @@ def close_cdp() -> None:
     _CHANNEL.close()
 
 
+_BYPASS_BEFOREUNLOAD_JS = """(() => {
+  try {
+    window.onbeforeunload = null;
+    window.onpagehide = null;
+  } catch (e) {}
+})()"""
+
+
 def try_chrome_cdp_navigate(url: str) -> bool:
-    """Navigate the existing kiosk window to a URL. True on success."""
+    """Navigate the existing kiosk window to a URL, bypassing beforeunload prompts."""
+    _cdp_send("Runtime.evaluate", {"expression": _BYPASS_BEFOREUNLOAD_JS})
+    _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+
     reply = _cdp_send("Page.navigate", {"url": url})
-    return reply is not None
+    if reply is not None:
+        _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+        return True
+
+    reply_js = _cdp_send(
+        "Runtime.evaluate",
+        {"expression": f"window.onbeforeunload = null; window.location.href = '{url}';"}
+    )
+    return reply_js is not None
 
 
 # Reads the page's own <video> element. MPRIS reports a position but not
