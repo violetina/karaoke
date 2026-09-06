@@ -2711,10 +2711,13 @@ class KaraokeTui(App):
         self._render_visuals(self._current_song_row(), "", elapsed)
 
     def _render_synced(self, elapsed: float) -> None:
+        try:
+            lyrics_widget = self.query_one("#lyrics", Static)
+        except Exception:
+            return
         tl = self._timeline
         active = tl.active_index(elapsed)
         mood = mood_of(tl.lines[active][1]) if active >= 0 else "neutral"
-        lyrics_widget = self.query_one("#lyrics", Static)
         # Fill the panel. _render_body defaults to 8 lines total, which left
         # most of a full-height pane empty. Weighted towards what is coming up,
         # and the active line is kept off the very top and bottom edges.
