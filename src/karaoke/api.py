@@ -43,6 +43,11 @@ class TrackResponse(BaseModel):
     duration: Optional[float] = None
     url: Optional[str] = None
     kind: Optional[str] = None
+    key: Optional[str] = None
+    bpm: Optional[float] = None
+    energy: Optional[float] = None
+    brightness: Optional[float] = None
+    genre: Optional[str] = None
     has_synced_lyrics: bool = False
 
 
@@ -90,7 +95,7 @@ def list_tracks(
         cur = conn.cursor()
         base = """
             SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
-                   a.detected_key AS key, a.bpm, a.energy, a.brightness,
+                   a.detected_key AS key, a.bpm, a.energy, a.brightness, g.genre,
                    EXISTS(
                        SELECT 1 FROM lyrics l
                        WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
@@ -111,6 +116,7 @@ def list_tracks(
                 LIMIT 1
             )
             LEFT JOIN track_analysis a ON a.track_id = t.track_id
+            LEFT JOIN track_genre g ON g.track_id = t.track_id
         """
         if q:
             pattern = f"%{q.strip()}%"
@@ -147,6 +153,7 @@ def list_tracks(
                 "bpm": row["bpm"],
                 "energy": row["energy"],
                 "brightness": row["brightness"],
+                "genre": row["genre"] or "",
                 "has_synced_lyrics": bool(row["has_synced"]),
             }
             for row in cur.fetchall()

@@ -95,6 +95,29 @@ MOOD_FILTER_OPTIONS = [
     ("🌙 Chill / Mellow (<40%)", "mellow"),
 ]
 
+SORT_OPTIONS = [
+    ("Artist / Title (A-Z)", "artist"),
+    ("🔥 Energy (high→low)", "energy_desc"),
+    ("🌙 Energy (low→high)", "energy_asc"),
+    ("🥁 BPM (fast→slow)", "bpm_desc"),
+    ("🎹 BPM (slow→fast)", "bpm_asc"),
+    ("🎵 Key", "key"),
+]
+
+
+def feeling_glyph(energy: float, brightness: float | None = None) -> str:
+    """A rough 'overall feeling' read from energy (arousal) and brightness
+    (valence proxy): bright+loud reads happy/energetic, dark+loud reads
+    aggressive, bright+soft reads tender, dark+soft reads melancholy. It's a
+    cheap heuristic, not sentiment analysis, but it separates the kinds of
+    tracks at a glance."""
+    b = 0.5 if brightness is None else brightness
+    if energy >= 0.66:
+        return "🔥" if b < 0.5 else "☀"
+    if energy >= 0.4:
+        return "⚡" if b >= 0.5 else "🌗"
+    return "♡" if b >= 0.5 else "🌙"
+
 # Manual mode override cycle. None == auto-detect.
 MODE_CYCLE = [None, "browse", "scan"]
 
@@ -745,6 +768,8 @@ class KaraokeTui(App):
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
     #mood-select { margin-bottom: 1; }
+    #mood-slider { height: 1; color: $accent; }
+    #sort-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
@@ -819,7 +844,7 @@ class KaraokeTui(App):
     Screen.-focus Header { display: none; }
     #browse-head { height: auto; margin-bottom: 1; }
     #browse-head Static { width: 8; content-align: left middle; }
-    #filter-select, #mood-select { width: 34; }
+    #filter-select, #mood-select, #sort-select { width: 34; }
     #library { height: 1fr; }
     #log-label, #log-path { color: $text-muted; height: 1; }
     """
@@ -832,6 +857,8 @@ class KaraokeTui(App):
         Binding("ctrl+c", "cancel_sample", "Stop sampling", show=False,
                 priority=True),
         ("H", "toggle_browse", "Browse"),
+        ("minus", "mood_down", "Mood-"),
+        ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
         ("slash", "focus_search", "Search"),
@@ -920,6 +947,8 @@ class KaraokeTui(App):
         self._last_finished_url = ""
         self._idle_since = 0.0     # when the player last held nothing
         self._mood_filter = "all"
+        self._mood_level = 0.0  # slider floor: show tracks with energy >= this
+        self._sort = "artist"
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -943,9 +972,14 @@ class KaraokeTui(App):
                 # about escape has no affordance to discover.
                 yield Input(placeholder="search  (/ · esc to leave)",
                             id="search-input")
-                # Mood filter sits directly under search so it narrows both the
-                # library list and the search results by energy level.
+                # Mood slider + presets sit directly under search so they
+                # narrow both the library list and the search results. The
+                # slider ([ / ] adjust) is the fine control; the select is
+                # quick presets.
+                yield Static("", id="mood-slider")
                 yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
+                             allow_blank=False)
+                yield Select(SORT_OPTIONS, value="artist", id="sort-select",
                              allow_blank=False)
                 # Key and tempo sit with the rest of the facts about this
                 # track rather than in the visuals column, which is for the
@@ -981,8 +1015,9 @@ class KaraokeTui(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
-        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Src", "♪")
+        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Genre/Feel", "Src", "♪")
         self.load_songs()
+        self._render_mood_slider()
         self._show_selected_song()
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
@@ -1022,6 +1057,32 @@ class KaraokeTui(App):
             self._mood_filter = str(event.value)
             self.load_songs()
             self._show_selected_song()
+        elif event.select.id == "sort-select":
+            self._sort = str(event.value)
+            self.load_songs()
+            self._show_selected_song()
+
+    def _render_mood_slider(self) -> None:
+        """Draw the energy-floor slider bar in the sidebar."""
+        try:
+            widget = self.query_one("#mood-slider", Static)
+        except Exception:
+            return
+        pct = int(self._mood_level * 100)
+        filled = int(round(pct / 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        widget.update(f"energy ≥ {pct:>3}% [{bar}]  -/+")
+
+    def action_mood_down(self) -> None:
+        self._mood_level = max(0.0, round(self._mood_level - 0.1, 2))
+        self._render_mood_slider()
+        self.load_songs()
+
+    def action_mood_up(self) -> None:
+        self._mood_level = min(1.0, round(self._mood_level + 0.1, 2))
+        self._render_mood_slider()
+        self.load_songs()
+
 
     def load_songs(self) -> None:
         table = self.query_one("#library", DataTable)
@@ -1037,31 +1098,60 @@ class KaraokeTui(App):
             else:
                 self._load_tracks(conn, only_working=self._filter == "working")
 
-        filtered = []
-        for song in self._song_data:
+        # Compute an energy value per song once, then filter, sort, render.
+        def _energy_of(song: dict) -> float:
             energy_val = song.get("energy")
             bpm_val = song.get("bpm")
-            energy: float = 0.5
             if isinstance(energy_val, (int, float, str)):
                 try:
-                    energy = float(energy_val)
+                    return float(energy_val)
                 except (ValueError, TypeError):
-                    energy = 0.5
-            elif isinstance(bpm_val, (int, float, str)):
+                    pass
+            if isinstance(bpm_val, (int, float, str)):
                 try:
-                    bpm_f = float(bpm_val)
-                    energy = min(1.0, max(0.2, (bpm_f - 60.0) / 100.0))
+                    return min(1.0, max(0.2, (float(bpm_val) - 60.0) / 100.0))
                 except (ValueError, TypeError):
-                    energy = 0.5
+                    pass
+            return 0.5
 
+        filtered = []
+        for song in self._song_data:
+            energy = _energy_of(song)
+            song["_energy"] = energy
+            if energy < self._mood_level:
+                continue
             if self._mood_filter == "high_energy" and energy < 0.75:
                 continue
             if self._mood_filter == "groovy" and not (0.40 <= energy <= 0.75):
                 continue
             if self._mood_filter == "mellow" and energy > 0.40:
                 continue
-
             filtered.append(song)
+
+        def _bpm_of(song: dict) -> float:
+            v = song.get("bpm")
+            if isinstance(v, (int, float, str)):
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return 0.0
+            return 0.0
+
+        if self._sort == "energy_desc":
+            filtered.sort(key=lambda s: s["_energy"], reverse=True)
+        elif self._sort == "energy_asc":
+            filtered.sort(key=lambda s: s["_energy"])
+        elif self._sort == "bpm_desc":
+            filtered.sort(key=_bpm_of, reverse=True)
+        elif self._sort == "bpm_asc":
+            filtered.sort(key=_bpm_of)
+        elif self._sort == "key":
+            filtered.sort(key=lambda s: str(s.get("key") or "~"))
+        # "artist" keeps the SQL ORDER BY t.artist, t.title.
+
+        for song in filtered:
+            energy = song["_energy"]
+            bpm_val = song.get("bpm")
             e_bar = "🔥" if energy >= 0.75 else "⚡" if energy >= 0.40 else "🌙"
             e_str = f"{e_bar} {int(energy * 100)}%"
 
@@ -1072,6 +1162,12 @@ class KaraokeTui(App):
                 except (ValueError, TypeError):
                     bpm_display = "—"
 
+            bright = song.get("brightness")
+            bright_f = float(bright) if isinstance(bright, (int, float)) else None
+            genre = str(song.get("genre") or "").strip()
+            feel = feeling_glyph(energy, bright_f)
+            genre_feel = f"{genre[:10]} {feel}" if genre else feel
+
             artist_str = str(song.get("artist") or "")
             title_str = str(song.get("title") or "")
             table.add_row(
@@ -1080,6 +1176,7 @@ class KaraokeTui(App):
                 str(song.get("key") or "—"),
                 bpm_display,
                 e_str,
+                genre_feel,
                 str(song.get("kind") or "—"),
                 "♪" if song.get("synced_lyrics") else (
                     "·" if song.get("plain_lyrics") else " "
@@ -1138,7 +1235,8 @@ class KaraokeTui(App):
                    COALESCE(l.source, '') AS lyric_source,
                    COALESCE(l.synced_lyrics, '') AS synced_lyrics,
                    COALESCE(l.plain_lyrics, '') AS plain_lyrics,
-                   a.detected_key AS key, a.bpm, a.energy
+                   a.detected_key AS key, a.bpm, a.energy, a.brightness,
+                   g.genre AS genre
             FROM tracks t
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
@@ -1158,6 +1256,8 @@ class KaraokeTui(App):
               ON t.track_id = l.track_id AND l.kind = 'approved'
             LEFT JOIN track_analysis a
               ON a.track_id = t.track_id
+            LEFT JOIN track_genre g
+              ON g.track_id = t.track_id
             GROUP BY t.track_id
             ORDER BY t.artist, t.title
             """
@@ -1175,6 +1275,8 @@ class KaraokeTui(App):
                 "key": row["key"],
                 "bpm": row["bpm"],
                 "energy": row["energy"],
+                "brightness": row["brightness"],
+                "genre": row["genre"],
                 "lyric_source": row["lyric_source"],
                 "synced_lyrics": row["synced_lyrics"],
                 "plain_lyrics": row["plain_lyrics"],
@@ -1479,8 +1581,9 @@ class KaraokeTui(App):
         self.query_one("#search-input", Input).focus()
 
     def _apply_mood_filter(self, rows: list, conn) -> list:
-        """Filter search-result rows by the current mood/energy band."""
-        if self._mood_filter == "all" or not rows:
+        """Filter search-result rows by the current mood/energy band and the
+        slider floor (self._mood_level)."""
+        if (self._mood_filter == "all" and self._mood_level <= 0.0) or not rows:
             return rows
         ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
         if not ids:
@@ -1506,6 +1609,8 @@ class KaraokeTui(App):
             e = energies.get(r.get("track_id"))
             if e is None:
                 e = 0.5
+            if e < self._mood_level:
+                continue
             if self._mood_filter == "high_energy" and e < 0.75:
                 continue
             if self._mood_filter == "groovy" and not (0.40 <= e <= 0.75):
