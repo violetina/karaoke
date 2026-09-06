@@ -731,6 +731,7 @@ class KaraokeTui(App):
     #statusbar { height: 1; }
     #mode-label { width: 1fr; }
     #worker-load { width: auto; text-align: right; }
+    #mood-label { height: auto; text-align: center; }
     #mood-square {
         height: 8; content-align: center middle; text-style: bold;
         border: heavy white; margin-bottom: 1;
@@ -899,6 +900,7 @@ class KaraokeTui(App):
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
+        self._mood_pixels = None   # raw pixels for animation
         self._mood_art = None      # rendered picture for the current mood
         self._mood_source = ""     # 'cover' or 'generated'
         self._mood_shown = ""      # mood the picture was rendered for
@@ -948,6 +950,7 @@ class KaraokeTui(App):
                     yield Static("Mode: auto", id="mode-label")
                     yield Static("worker-load: —", id="worker-load")
             with Vertical(id="visuals"):
+                yield Static("", id="mood-label")
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("sentiment / rhythm", id="ascii-visual")
         # Floats on its own layer above #workspace, so revealing it costs the
@@ -2418,23 +2421,25 @@ class KaraokeTui(App):
         a wrong match obviously wrong rather than merely odd, and it is the only
         thing that still works on a terminal without colour.
         """
-        panel = self.query_one("#mood-square", Static)
+        square_panel = self.query_one("#mood-square", Static)
+        label_panel = self.query_one("#mood-label", Static)
+        
         if mood != self._mood_shown or self._mood_art is None:
-            # A new mood needs a new picture; rendering happens off the UI
-            # thread, so fall back to the glyph block until it arrives.
             if mood != self._mood_shown:
                 self._mood_shown = mood
                 self._refresh_mood_art(mood)
+                
+        import pyfiglet
+        from rich.text import Text
+        fig_str = pyfiglet.figlet_format(mood.upper(), font="mini").rstrip()
+        label_panel.update(Text(fig_str, style="bold cyan"))
+                
         if self._mood_art is None:
-            panel.update(
-                f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
-            )
+            # Fall back to glyphs until rendering finishes
+            square_panel.update(MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral']))
             return
-        # The mood is the label; where the picture came from is not something
-        # to read on every track, and "cover" sat next to the art competing
-        # with it for attention. Kept in _mood_source for the log.
-        label = Text(mood.upper(), style="bold")
-        panel.update(Text("\n").join([label, self._mood_art]))
+
+        square_panel.update(self._mood_art)
 
     def _refresh_mood_art(self, mood: str) -> None:
         """Render a picture for this mood in a worker thread.
@@ -2455,6 +2460,7 @@ class KaraokeTui(App):
                 pixels, source = moodframe.image_for(mood, analysis, cols, rows)
                 if not pixels:
                     return
+                self._mood_pixels = pixels
                 self._mood_art = coverart.to_text(pixels)
                 self._mood_source = source
                 self.call_from_thread(self._update_mood, mood)
@@ -2531,6 +2537,25 @@ class KaraokeTui(App):
         self._update_keybpm(song)
         analysis = self._lookup_analysis(song) if song else None
         bpm = analysis.bpm if analysis else None
+
+        if getattr(self, "_mood_pixels", None):
+            try:
+                from rich.text import Text
+                from . import coverart
+                import pyfiglet
+                
+                animated_pixels = visuals.animate_mood_pixels(self._mood_pixels, elapsed, bpm)
+                animated_text = coverart.to_text(animated_pixels)
+                
+                # Generate ASCII art text, strip trailing newlines
+                fig_str = pyfiglet.figlet_format(self._mood_shown.upper(), font="mini").rstrip()
+                label = Text(fig_str, style="bold cyan")
+                
+                self.query_one("#mood-label", Static).update(label)
+                self.query_one("#mood-square", Static).update(animated_text)
+            except Exception as e:
+                import logging
+                logging.getLogger("karaoke").error(f"Error animating mood square: {e}", exc_info=True)
         arc = visuals.sentiment_arc(profile)
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)

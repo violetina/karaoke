@@ -302,3 +302,39 @@ def cartwheel_frame(bpm: float | None, elapsed: float, max_width: int = 24) -> s
     else:
         lines = [""] + lines
     return "\n".join(lines)
+
+
+def animate_mood_pixels(pixels: list[list[tuple[int, int, int]]], elapsed: float, bpm: float | None):
+    if not pixels or not bpm or bpm <= 0:
+        return pixels
+
+    beat_duration = 60.0 / bpm
+    if beat_duration <= 0:
+        beat_duration = 0.5
+    beats = elapsed / beat_duration
+    within_beat = beats % 1.0
+
+    intensity = max(0.0, 1.0 - (within_beat * 1.5)) # Fade out over 2/3 of a beat
+    import math
+    
+    cols = len(pixels[0])
+    animated = []
+    for row in pixels:
+        new_row = []
+        for x, (r, g, b) in enumerate(row):
+            progress = x / float(cols)
+            if progress < 0.33:
+                boost = intensity * (0.4 + 0.6 * math.sin(elapsed * 2.1))
+            elif progress < 0.66:
+                boost = intensity * (0.4 + 0.6 * math.sin(elapsed * 3.7 + 1.0))
+            else:
+                boost = intensity * (0.4 + 0.6 * math.sin(elapsed * 5.3 + 2.0))
+            
+            nr = int(r + (255 - r) * boost)
+            ng = int(g + (255 - g) * boost)
+            nb = int(b + (255 - b) * boost)
+            
+            new_row.append((min(255, nr), min(255, ng), min(255, nb)))
+        animated.append(new_row)
+    return animated
+

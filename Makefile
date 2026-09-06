@@ -264,6 +264,9 @@ vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without wr
 health: ## Run the karaoke platform health check (services, ports, cluster, DB)
 	$(PYTHON) scripts/healthcheck.py
 
+web: ## Serve the TUI in a web browser using textual-serve
+	$(PYTHON) scripts/web_serve.py
+
 systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
 	mkdir -p $(HOME)/.config/systemd/user
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-api.service $(HOME)/.config/systemd/user/

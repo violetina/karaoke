@@ -1040,7 +1040,7 @@ def find_track_id_relaxed(artist: str, title: str,
 
 
 def extract_youtube_id(url: str) -> Optional[str]:
-    """Extract the 11-character video ID from a YouTube or YouTube Music URL."""
+    """Extract the 11-character video ID from a YouTube or YouTube Music URL, ID or filename."""
     if not url:
         return None
     import re
@@ -1049,6 +1049,9 @@ def extract_youtube_id(url: str) -> Optional[str]:
         val = m.group(1)
         if len(val) == 11:
             return val
+    stem = Path(url).stem
+    if len(stem) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", stem):
+        return stem
     if len(url) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", url):
         return url
     return None

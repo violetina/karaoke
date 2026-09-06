@@ -55,11 +55,49 @@ def scan_and_ingest_folder(
 
     for path in audio_files:
         try:
-            # 1. Tags & Fingerprint
+            # 1. Tags, YouTube ID lookup, Shazam Fingerprint, and Recording Markers
             t = tags.extract_tags(path)
             artist, title, album = t.artist, t.title, t.album
             duration = t.duration
 
+            # 1a. Fallback: YouTube Video ID lookup (e.g. -1jPUB7gRyg.webm in cache)
+            if not artist or not title or artist.lower() in ("unknown", "track"):
+                vid = localcache.extract_youtube_id(path.name) or localcache.extract_youtube_id(str(path))
+                if vid:
+                    with (localcache.connect()) as conn_check:
+                        row = conn_check.execute(
+                            """
+                            SELECT t.artist, t.title, t.album, t.duration
+                            FROM tracks t
+                            JOIN sources s ON s.track_id = t.track_id
+                            WHERE s.url LIKE ?
+                            LIMIT 1
+                            """,
+                            (f"%{vid}%",),
+                        ).fetchone()
+                        if row:
+                            artist, title = row[0], row[1]
+                            album = row[2] or album
+                            duration = duration or row[3]
+
+            # 1b. Fallback: Recording Session markers (e.g. seg-*.flac in recordings/)
+            if (not artist or not title or artist.lower() in ("unknown", "track")) and "recordings" in str(path):
+                rec_dir = path.parent
+                with localcache.connect() as conn_check:
+                    rec_row = conn_check.execute(
+                        "SELECT recording_id FROM recordings WHERE dir LIKE ? OR dir = ?",
+                        (f"%{rec_dir.name}%", str(rec_dir)),
+                    ).fetchone()
+                    if rec_row:
+                        rec_id = rec_row[0]
+                        from . import recorder
+                        from .recording_slice import segments
+                        marks = recorder.load_marks(rec_id)
+                        segs = segments(marks)
+                        if segs:
+                            artist, title = segs[0].artist, segs[0].title
+
+            # 1c. Fallback: Shazam/songrec Fingerprint
             if use_fingerprint and (not artist or not title or artist.lower() in ("unknown", "track")):
                 fp = identify_file_fingerprint(path)
                 if fp and fp.artist and fp.title:
@@ -91,14 +129,18 @@ def scan_and_ingest_folder(
             yt_url = None
             spotify_uri = None
             if resolve_streaming:
-                try:
-                    yt_candidates = youtube.search(f"{artist} {title}", limit=5)
-                    best_yt = source_select.select_best_source(
-                        yt_candidates, artist, title, reference_duration=duration)
-                    if best_yt:
-                        yt_url = best_yt.get("url")
-                except Exception:
-                    pass
+                vid = localcache.extract_youtube_id(path.name) or localcache.extract_youtube_id(str(path))
+                if vid:
+                    yt_url = f"https://www.youtube.com/watch?v={vid}"
+                else:
+                    try:
+                        yt_candidates = youtube.search(f"{artist} {title}", limit=5)
+                        best_yt = source_select.select_best_source(
+                            yt_candidates, artist, title, reference_duration=duration)
+                        if best_yt:
+                            yt_url = best_yt.get("url")
+                    except Exception:
+                        pass
 
                 try:
                     from .spotify_client import SpotifyClient
