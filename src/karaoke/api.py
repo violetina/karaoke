@@ -88,12 +88,14 @@ def list_tracks(
         cur = conn.cursor()
         base = """
             SELECT t.track_id, t.artist, t.title, t.album, t.duration, s.url, s.kind,
+                   a.detected_key AS key, a.bpm, a.energy, a.brightness,
                    EXISTS(
                        SELECT 1 FROM lyrics l
                        WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
                    ) AS has_synced
             FROM tracks t
             LEFT JOIN sources s ON t.track_id = s.track_id
+            LEFT JOIN track_analysis a ON a.track_id = t.track_id
         """
         if q:
             pattern = f"%{q.strip()}%"
@@ -126,6 +128,10 @@ def list_tracks(
                 "duration": row["duration"],
                 "url": row["url"],
                 "kind": row["kind"],
+                "key": row["key"] or "",
+                "bpm": row["bpm"],
+                "energy": row["energy"],
+                "brightness": row["brightness"],
                 "has_synced_lyrics": bool(row["has_synced"]),
             }
             for row in cur.fetchall()

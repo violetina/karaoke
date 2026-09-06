@@ -102,6 +102,8 @@ def test_load_songs_prefers_browser_openable_source(tmp_path, monkeypatch):
     class FakeTable:
         def add_row(self, *args):
             pass
+        def clear(self):
+            pass
 
     monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable())
     app.load_songs()
@@ -109,4 +111,65 @@ def test_load_songs_prefers_browser_openable_source(tmp_path, monkeypatch):
     assert len(app._song_data) == 1
     assert app._song_data[0]["kind"] == "youtube"
     assert "youtube.com" in app._song_data[0]["url"]
+
+
+def test_browse_mood_slider_filtering(monkeypatch):
+    app = browse.KaraokeBrowser()
+    fake_tracks = [
+        {"artist": "Mellow", "title": "Song A", "energy": 0.2, "key": "C major", "bpm": 80},
+        {"artist": "Mid", "title": "Song B", "energy": 0.5, "key": "G major", "bpm": 120},
+        {"artist": "Heavy", "title": "Song C", "energy": 0.85, "key": "A minor", "bpm": 160},
+    ]
+    monkeypatch.setattr(app.api, "list_tracks", lambda *a, **k: fake_tracks)
+
+    class FakeTable:
+        def add_row(self, *args): pass
+        def clear(self): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable())
+    app.load_songs()
+    assert len(app._visible_songs) == 3
+
+    # Increase energy threshold to 60%
+    app.action_increase_mood()
+    app.action_increase_mood()
+    app.action_increase_mood()
+    app.action_increase_mood()
+    app.action_increase_mood()
+    app.action_increase_mood()
+    assert app._mood_level == 0.6
+    assert len(app._visible_songs) == 1
+    assert app._visible_songs[0]["artist"] == "Heavy"
+
+
+def test_browse_mood_presets(monkeypatch):
+    app = browse.KaraokeBrowser()
+    fake_tracks = [
+        {"artist": "Mellow", "title": "Song A", "energy": 0.2, "key": "C major", "bpm": 80},
+        {"artist": "Mid", "title": "Song B", "energy": 0.5, "key": "G major", "bpm": 120},
+        {"artist": "Heavy", "title": "Song C", "energy": 0.85, "key": "A minor", "bpm": 160},
+    ]
+    monkeypatch.setattr(app.api, "list_tracks", lambda *a, **k: fake_tracks)
+
+    class FakeTable:
+        def add_row(self, *args): pass
+        def clear(self): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable())
+    app.load_songs()
+
+    # Cycle to Chill / Mellow (0% - 40%)
+    app.action_cycle_mood_mode()
+    assert len(app._visible_songs) == 1
+    assert app._visible_songs[0]["artist"] == "Mellow"
+
+    # Cycle to Groovy / Upbeat (40% - 75%)
+    app.action_cycle_mood_mode()
+    assert len(app._visible_songs) == 1
+    assert app._visible_songs[0]["artist"] == "Mid"
+
+    # Cycle to High Energy / Anthem (75% - 100%)
+    app.action_cycle_mood_mode()
+    assert len(app._visible_songs) == 1
+    assert app._visible_songs[0]["artist"] == "Heavy"
 
