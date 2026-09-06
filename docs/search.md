@@ -128,6 +128,21 @@ Tracked as an issue; see the repository issue list.
 
 ---
 
+## Real-Time Filtering, Sorting & Play Count Priority
+
+Search results in the TUI (`/` box) pass through real-time filtering and sorting before display:
+
+- **Energy / Mood Filter**: Matches are filtered by the active energy threshold (`energy ≥ X%`, set via `-` / `+` or mood presets) and mood band (🔥 High Energy, ⚡ Groovy, 🌙 Chill).
+- **Sort Priority**: Search results can be sorted by:
+  - `Artist / Title (A-Z)` (Default weighted search ranking)
+  - `🌱 Priority: Least Played` (sorts by `play_count ASC` so undiscovered songs surface first)
+  - `⭐ Most Played` (`play_count DESC`)
+  - `🔥 Energy (High → Low)` / `🌙 Energy (Low → High)`
+  - `🥁 BPM (Fast → Slow)` / `🎹 BPM (Slow → Fast)`
+  - `🎵 Key`
+
+---
+
 ## Semantic search (OpenSearch)
 
 `karaoke.search` queries the `tracks` index and answers a different question:
