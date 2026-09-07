@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 from urllib.parse import quote_plus
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
@@ -65,6 +65,35 @@ _PLAY_SESSIONS: dict[str, dict[str, Any]] = {}
 
 def _play_session_view(session: dict[str, Any]) -> dict[str, Any]:
     return dict(session)
+
+
+class QueueDetails(BaseModel):
+    name: str
+    messages: int
+    messages_ready: int
+    messages_unacknowledged: int
+    consumers: int
+
+
+class WorkerUnitDetails(BaseModel):
+    unit: str
+    active: str
+    running: bool
+
+
+class WorkerStatus(BaseModel):
+    orchestrator: str
+    available: bool
+    dashboard_url: Optional[str] = None
+    workers_active: int
+    queue_depth: int
+    queue_details: QueueDetails
+    worker_details: List[WorkerUnitDetails]
+    reason: Optional[str] = None
+
+
+class ScaleRequest(BaseModel):
+    target: int
 
 
 class RecordRequest(BaseModel):
@@ -462,22 +491,6 @@ def record_track_page(recording_id: int, index: int):
         album_js=json.dumps(album)))
 
 
-def _sample_payload(result: Any, artist: str, title: str, seconds: float) -> dict[str, Any]:
-    return {
-        "status": "analysed",
-        "artist": artist,
-        "title": title,
-        "seconds": seconds,
-        "key": result.key.name if result.key else None,
-        "bpm": result.bpm,
-        "stored": bool(artist and title),
-    }
-
-
-def _sse(event: str, data: dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
 @app.post("/api/sample")
 def sample_now(req: SampleRequest) -> dict[str, Any]:
     """Detect key/BPM by recording a short excerpt of what is playing.
@@ -500,7 +513,7 @@ def sample_now(req: SampleRequest) -> dict[str, Any]:
         log.exception("Control API sample failed")
         raise HTTPException(status_code=500, detail=f"Sample failed: {exc}")
 
-    return _sample_payload(result, req.artist or "", req.title or "", seconds)
+    return {"status": "accepted", "artist": req.artist, "title": req.title}
 
 
 @app.get("/api/sample/stream")
@@ -544,7 +557,13 @@ def sample_stream(
         try:
             result = sample_audio.sample_and_analyse(
                 art, tit, sec, should_continue=progress)
-            events.put(("complete", _sample_payload(result, art, tit, sec)))
+            events.put(("complete", {"status": "analysed",
+                                    "artist": art,
+                                    "title": tit,
+                                    "seconds": sec,
+                                    "key": result.key.name if result.key else None,
+                                    "bpm": result.bpm,
+                                    "stored": bool(art and tit)}))
         except sample_audio.CaptureError as exc:
             events.put(("error", {"status": "error", "detail": str(exc)}))
         except sample_audio.AnalysisUnavailable as exc:
@@ -566,7 +585,7 @@ def sample_stream(
             if item is None:
                 break
             event, payload = item
-            yield _sse(event, payload)
+            yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
     return StreamingResponse(body(), media_type="text/event-stream")
 
@@ -756,69 +775,51 @@ def audio_cut(req: AudioCutRequest) -> dict[str, Any]:
     }
 
 
-class ScaleWorkersRequest(BaseModel):
-    target: int = 1  # 0 to 6
+# Celery worker status and scaling
+@app.get("/api/workers/status", response_model=WorkerStatus)
+def get_workers_status() -> WorkerStatus:
+    """Celery worker, queue and Flower dashboard status.
 
+    Allows monitoring the post-processing pipeline without screen-scraping the TUI.
+    """
+    from . import postprocess_status as ps
 
-@app.get("/api/workers/status")
-def get_workers_status() -> dict[str, Any]:
-    """Get status of Celery postprocess worker(s) and queue depth."""
-    import subprocess
-    from . import postprocess_status
-
-    st = postprocess_status.get_status(sample_cpu=False)
-    primary = ["karaoke-celery-worker.service", "karaoke-celery-flower.service"]
-    legacy = [f"karaoke-postprocess@{i}.service" for i in range(1, 7)]
-    units = []
-    for idx, uname in enumerate(primary + legacy, start=1):
-        cmd = ["systemctl", "--user", "is-active", uname]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
-            active = res.stdout.strip() == "active"
-        except Exception:
-            active = False
-        units.append({
-            "unit": uname,
-            "worker_id": idx,
-            "active": active,
-            "kind": "celery" if uname in primary else "legacy",
-        })
-
-    return {
-        "status": "ok",
-        "orchestrator": "celery",
-        "dashboard_url": "http://127.0.0.1:5555",
-        "workers_active": st.workers,
-        "worker_cpu": st.worker_cpu,
-        "worker_memory_mb": st.worker_rss_mb,
-        "queue_depth": st.queued,
-        "units": units,
-    }
+    status = ps.get_status()
+    return WorkerStatus(
+        orchestrator=status.orchestrator,
+        available=status.available,
+        dashboard_url=status.dashboard_url,
+        workers_active=status.workers_active,
+        queue_depth=status.queue_depth,
+        queue_details=QueueDetails(
+            name=status.queue_details.name,
+            messages=status.queue_details.messages,
+            messages_ready=status.queue_details.messages_ready,
+            messages_unacknowledged=status.queue_details.messages_unacknowledged,
+            consumers=status.queue_details.consumers
+        ),
+        worker_details=[
+            WorkerUnitDetails(unit=w.unit, active=w.active, running=w.running)
+            for w in status.worker_details
+        ],
+        reason=status.reason,
+    )
 
 
 @app.post("/api/workers/scale")
-def scale_workers(req: ScaleWorkersRequest) -> dict[str, Any]:
-    """Start/stop the Celery worker service.
+def scale_workers(req: ScaleRequest) -> dict[str, Any]:
+    """Scales the Celery worker pool (starts/stops `karaoke-celery-worker.service`)."""
+    from . import postprocess_status as ps
 
-    Phase 1 has one Celery worker service whose process concurrency is configured
-    in the unit. `target=0` stops it; any positive target starts it. The old
-    0..6 integer shape is preserved so the Admin TUI and existing clients keep
-    working during the cutover.
-    """
-    import subprocess
-
-    target = max(0, min(6, req.target))
-    results = []
-    uname = "karaoke-celery-worker.service"
-    action = "start" if target > 0 else "stop"
-    cmd = ["systemctl", "--user", action, uname]
-    try:
-        subprocess.run(cmd, check=True, timeout=5)
-        results.append({"unit": uname, "action": action, "status": "ok"})
-    except Exception as exc:
-        results.append({"unit": uname, "action": action, "status": f"error: {exc}"})
-
-    return {"status": "ok", "target": target, "results": results}
+    if req.target == 0:
+        ok = ps.stop_worker()
+        log.info("control: scaled Celery worker down (stopped)")
+    else:
+        ok = ps.start_worker()
+        log.info("control: scaled Celery worker up (started)")
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to scale worker")
+    return {"status": "ok", "target": req.target}
 
 
 @app.get("/api/logs/errors")
