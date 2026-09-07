@@ -28,6 +28,44 @@ class KaraokeAdminApp(App):
     TITLE = "Karaoke Platform Operations & Worker Control"
     SUB_TITLE = "Manage Workers · Error Logs · Ingestion Pipeline"
 
+    # Every panel gets a bounded height and its own scroll region, so a long
+    # error traceback stays inside #log-container instead of spilling over the
+    # panels above and below it (the report that started this rework).
+    CSS = """
+    #admin-workspace { layout: vertical; height: 1fr; overflow-y: auto; }
+
+    #worker-container, #pipeline-container, #align-container,
+    #ingest-container, #clients-container, #log-container {
+        border: round $primary; padding: 0 1; margin-bottom: 1;
+        height: auto;
+    }
+
+    #worker-title { text-style: bold; }
+    #worker-controls, #pipeline-controls { height: auto; margin-bottom: 1; }
+    #worker-controls Button, #pipeline-controls Button { margin-right: 2; }
+
+    /* Bounded so a long unit list cannot push the pipeline panel off-screen. */
+    #worker-table { height: 5; margin-bottom: 1; }
+    #worker-summary { height: auto; color: $text-muted; }
+
+    #clients-container { height: auto; }
+    #clients-title { text-style: bold; }
+    #clients-table { height: 6; }
+    #clients-summary { height: 1; color: $text-muted; }
+
+    #align-container Horizontal, #ingest-container Horizontal { height: auto; }
+    #align-container Input { margin-right: 2; }
+    #ingest-container Input { margin-right: 2; }
+
+    /* The error log lives in its own fixed-height, scrollable box. This is the
+       fix for the log spilling over/under neighbouring panels: overflow is
+       clipped to the container and #error-list scrolls inside it. */
+    #log-container { height: 1fr; min-height: 6; }
+    #log-title { text-style: bold; }
+    #error-list { height: 1fr; overflow-y: auto; border: none; }
+    """
+
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh_all", "Refresh"),
@@ -40,6 +78,8 @@ class KaraokeAdminApp(App):
         ("w", "align_whisper", "Whisper Align"),
         ("s", "scan_folder", "Scan Folder"),
         ("e", "fetch_errors", "Error Logs"),
+        ("c", "refresh_clients", "Refresh Clients"),
+        ("X", "shutdown_webui", "Stop Web UI"),
     ]
 
     def __init__(self):
@@ -85,6 +125,12 @@ class KaraokeAdminApp(App):
                 yield DataTable(id="worker-table", cursor_type="row")
                 yield Static("Worker Status: Loading...", id="worker-summary")
 
+            # Connected clients: web-UI sessions and active playback sessions.
+            with Container(id="clients-container"):
+                yield Static("[bold cyan]Connected Clients (Web UI + Playback)[/bold cyan]", id="clients-title")
+                yield DataTable(id="clients-table", cursor_type="row")
+                yield Static("Clients: Loading...", id="clients-summary")
+
             # Middle: Audio Processing & Vector Ingestion Controls
             with Container(id="pipeline-container"):
                 yield Static("[bold cyan]Audio Processing & Vector Ingestion Pipeline[/bold cyan]")
@@ -110,7 +156,7 @@ class KaraokeAdminApp(App):
 
             # Bottom: Live Error Log Diagnostics
             with Container(id="log-container"):
-                yield Static("[bold red]Recent Error Logs & Diagnostics[/bold red]")
+                yield Static("[bold red]Recent Error Logs & Diagnostics[/bold red]", id="log-title")
                 yield OptionList(id="error-list")
 
         yield Footer()
@@ -118,12 +164,17 @@ class KaraokeAdminApp(App):
     def on_mount(self) -> None:
         table = self.query_one("#worker-table", DataTable)
         table.add_columns("Worker Unit", "State", "Worker ID")
+        clients = self.query_one("#clients-table", DataTable)
+        clients.add_columns("Kind", "Client / Session", "Detail", "Status")
         self.refresh_all()
         self.set_interval(3.0, self.refresh_workers)
+        self.set_interval(5.0, self.refresh_clients)
 
     def refresh_all(self) -> None:
         self.refresh_workers()
+        self.refresh_clients()
         self.refresh_errors()
+
 
     def refresh_workers(self) -> None:
         try:
@@ -196,6 +247,91 @@ class KaraokeAdminApp(App):
                 error_list.add_option("[dim]No recent system errors found.[/dim]")
         except Exception as exc:
             log.debug("refresh_errors failed", exc_info=True)
+
+    # -- connected clients ------------------------------------------------
+    WEBUI_PORT = int(os.environ.get("PORT", "8001"))
+
+    def _webui_clients(self) -> list[dict[str, Any]]:
+        """Web-UI (textual-serve) sessions, discovered from listeners on the port.
+
+        The web TUI is served by scripts/web_serve.py (textual-serve) with one
+        websocket per browser tab. There is no HTTP status endpoint, so count
+        the ESTABLISHED connections to the serve port off `ss` — best-effort and
+        never fatal when `ss` is missing or the server is down.
+        """
+        rows: list[dict[str, Any]] = []
+        try:
+            out = subprocess.run(
+                ["ss", "-Htn", "state", "established", f"( sport = :{self.WEBUI_PORT} )"],
+                capture_output=True, text=True, timeout=2,
+            ).stdout
+        except Exception:
+            return rows
+        for i, line in enumerate((out or "").splitlines(), start=1):
+            parts = line.split()
+            peer = parts[-1] if parts else "?"
+            rows.append({"kind": "web-ui", "client": f"tab {i}",
+                         "detail": peer, "status": "connected"})
+        return rows
+
+    def _playback_clients(self) -> list[dict[str, Any]]:
+        """Active playback sessions from the control API (best-effort)."""
+        rows: list[dict[str, Any]] = []
+        try:
+            res = self.api.list_play_sessions()
+        except Exception:
+            return rows
+        for s in (res or {}).get("sessions", []):
+            title = s.get("title") or s.get("url") or s.get("session_id", "?")
+            rows.append({"kind": "playback",
+                         "client": str(s.get("session_id", "?"))[:16],
+                         "detail": str(title)[:40],
+                         "status": s.get("status", "")})
+        return rows
+
+    def refresh_clients(self) -> None:
+        try:
+            table = self.query_one("#clients-table", DataTable)
+        except Exception:
+            return
+        web = self._webui_clients()
+        play = self._playback_clients()
+        table.clear()
+        for c in web + play:
+            table.add_row(c["kind"], c["client"], c["detail"], c["status"])
+        summary = (f"[bold cyan]Web UI:[/bold cyan] {len(web)} tab(s) on :{self.WEBUI_PORT}"
+                   f" | [bold green]Playback:[/bold green] {len(play)} session(s)")
+        self.query_one("#clients-summary", Static).update(summary)
+
+    def action_refresh_clients(self) -> None:
+        self.refresh_clients()
+
+    def action_shutdown_webui(self) -> None:
+        """`X`: gracefully stop the web-UI (textual-serve) server, if running.
+
+        The web TUI has no systemd unit — it is `scripts/web_serve.py` started by
+        hand. Signal it politely (SIGTERM) so open browser tabs get a clean
+        socket close rather than a reset. Never touches this admin process.
+        """
+        killed = 0
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "web_serve.py"], capture_output=True, text=True, timeout=2
+            ).stdout
+            for pid in out.split():
+                try:
+                    os.kill(int(pid), 15)  # SIGTERM: let textual-serve close sockets
+                    killed += 1
+                except (ProcessLookupError, ValueError, PermissionError):
+                    pass
+        except Exception as exc:
+            self.notify(f"Web UI shutdown failed: {exc}", severity="error")
+            return
+        if killed:
+            self.notify(f"Web UI stopped ({killed} server process(es) signalled)")
+        else:
+            self.notify("No running web UI server found", severity="warning")
+        self.refresh_clients()
 
     def action_scale_up(self) -> None:
         self._target_workers = 1
