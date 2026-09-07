@@ -4,6 +4,23 @@ from __future__ import annotations
 from karaoke.admin_tui import KaraokeAdminApp
 
 
+class _FakeLock:
+    def __init__(self, name: str):
+        self.name = name
+        self.held = False
+
+    def acquire(self, *, blocking: bool = False) -> bool:
+        self.held = True
+        return True
+
+    def release(self) -> None:
+        self.held = False
+
+
+def _fake_pipeline_lock(monkeypatch):
+    monkeypatch.setattr("karaoke.lockfile.ProcessLock", _FakeLock)
+
+
 def test_admin_app_initialization(monkeypatch):
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app._target_workers = 1
@@ -13,7 +30,7 @@ def test_admin_app_initialization(monkeypatch):
 
 def test_admin_app_scaling_actions(monkeypatch):
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
-    app._target_workers = 2
+    app._target_workers = 0
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
 
@@ -26,15 +43,15 @@ def test_admin_app_scaling_actions(monkeypatch):
 
     monkeypatch.setattr(app, "api", FakeApi(), raising=False)
 
-    # 1. Scale Up
+    # 1. Start worker
     app.action_scale_up()
-    assert app._target_workers == 3
-    assert calls[0] == ("/api/workers/scale", {"target": 3})
+    assert app._target_workers == 1
+    assert calls[0] == ("/api/workers/scale", {"target": 1})
 
-    # 2. Scale Down
+    # 2. Stop worker
     app.action_scale_down()
-    assert app._target_workers == 2
-    assert calls[1] == ("/api/workers/scale", {"target": 2})
+    assert app._target_workers == 0
+    assert calls[1] == ("/api/workers/scale", {"target": 0})
 
 
 def test_admin_pipeline_actions_dispatch(monkeypatch):
@@ -42,6 +59,7 @@ def test_admin_pipeline_actions_dispatch(monkeypatch):
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app._bg_busy = False
     app._bg_lock = None
+    _fake_pipeline_lock(monkeypatch)
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
 
@@ -66,6 +84,7 @@ def test_admin_whisper_align_dispatch(monkeypatch):
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app._bg_busy = False
     app._bg_lock = None
+    _fake_pipeline_lock(monkeypatch)
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
 
@@ -97,6 +116,7 @@ def test_admin_single_operation_guard(monkeypatch):
     app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app._bg_busy = False
     app._bg_lock = None
+    _fake_pipeline_lock(monkeypatch)
     notifications = []
     monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append((msg, k)), raising=False)
 

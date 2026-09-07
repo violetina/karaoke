@@ -4,8 +4,9 @@ Feeds the TUI a compact health/load read-out:
 
 - queue depth (ready / unacked), consumer count, delivery rate — via the RabbitMQ
   management HTTP API (default http://localhost:15672).
-- worker CPU% and RSS — by finding the ``karaoke.postprocess_worker`` process on
-  the host and sampling ``/proc/<pid>/stat`` over a short interval.
+- worker CPU% and RSS — by finding Celery post-processing workers (and legacy
+  ``karaoke.postprocess_worker`` processes during rollback) on the host and
+  sampling ``/proc/<pid>/stat`` over a short interval.
 
 Everything is best-effort: any failure yields ``available=False`` with a reason,
 never an exception, so the TUI never breaks when RabbitMQ or the worker is down.
@@ -20,7 +21,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
-QUEUE_NAME = "karaoke-postprocess"
+QUEUE_NAME = os.environ.get("KARAOKE_POSTPROCESS_STATUS_QUEUE",
+                            "karaoke-postprocess-celery")
 
 
 @dataclass
@@ -72,9 +74,10 @@ def _fetch_queue(timeout: float = 1.5) -> Optional[dict]:
 def find_worker_pids() -> list[int]:
     """Every postprocess worker PID, by scanning /proc cmdlines (Linux).
 
-    Workers scale horizontally (``karaoke-postprocess@{1..N}``), so this
-    deliberately returns all of them: reporting one worker's CPU while twelve
-    are running would understate the load by an order of magnitude.
+    Celery workers are the default now, but the legacy
+    ``karaoke.postprocess_worker`` service can still run for rollback/debugging.
+    Return all matching workers: reporting one worker's CPU while several are
+    running would understate the load by an order of magnitude.
     """
     proc = "/proc"
     if not os.path.isdir(proc):
@@ -88,8 +91,13 @@ def find_worker_pids() -> list[int]:
                 cmd = fh.read().replace(b"\x00", b" ").decode(errors="ignore")
         except OSError:
             continue
-        # Match the module invocation, not any shell that merely mentions it.
-        if "postprocess_worker" in cmd and "python" in cmd:
+        # Match real worker invocations, not shells that merely mention them.
+        celery_worker = (
+            "celery" in cmd and "karaoke.celery_app" in cmd
+            and "worker" in cmd
+        )
+        legacy_worker = "postprocess_worker" in cmd and "python" in cmd
+        if celery_worker or legacy_worker:
             pids.append(int(name))
     return sorted(pids)
 

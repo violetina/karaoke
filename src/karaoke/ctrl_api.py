@@ -762,24 +762,32 @@ class ScaleWorkersRequest(BaseModel):
 
 @app.get("/api/workers/status")
 def get_workers_status() -> dict[str, Any]:
-    """Get status of systemd postprocess workers and error log summary."""
+    """Get status of Celery postprocess worker(s) and queue depth."""
     import subprocess
     from . import postprocess_status
 
     st = postprocess_status.get_status(sample_cpu=False)
+    primary = ["karaoke-celery-worker.service", "karaoke-celery-flower.service"]
+    legacy = [f"karaoke-postprocess@{i}.service" for i in range(1, 7)]
     units = []
-    for i in range(1, 7):
-        uname = f"karaoke-postprocess@{i}.service"
+    for idx, uname in enumerate(primary + legacy, start=1):
         cmd = ["systemctl", "--user", "is-active", uname]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
             active = res.stdout.strip() == "active"
         except Exception:
             active = False
-        units.append({"unit": uname, "worker_id": i, "active": active})
+        units.append({
+            "unit": uname,
+            "worker_id": idx,
+            "active": active,
+            "kind": "celery" if uname in primary else "legacy",
+        })
 
     return {
         "status": "ok",
+        "orchestrator": "celery",
+        "dashboard_url": "http://127.0.0.1:5555",
         "workers_active": st.workers,
         "worker_cpu": st.worker_cpu,
         "worker_memory_mb": st.worker_rss_mb,
@@ -790,20 +798,25 @@ def get_workers_status() -> dict[str, Any]:
 
 @app.post("/api/workers/scale")
 def scale_workers(req: ScaleWorkersRequest) -> dict[str, Any]:
-    """Scale systemd postprocess workers up or down (0 to 6)."""
+    """Start/stop the Celery worker service.
+
+    Phase 1 has one Celery worker service whose process concurrency is configured
+    in the unit. `target=0` stops it; any positive target starts it. The old
+    0..6 integer shape is preserved so the Admin TUI and existing clients keep
+    working during the cutover.
+    """
     import subprocess
 
     target = max(0, min(6, req.target))
     results = []
-    for i in range(1, 7):
-        uname = f"karaoke-postprocess@{i}.service"
-        action = "start" if i <= target else "stop"
-        cmd = ["systemctl", "--user", action, uname]
-        try:
-            subprocess.run(cmd, check=True, timeout=5)
-            results.append({"unit": uname, "action": action, "status": "ok"})
-        except Exception as exc:
-            results.append({"unit": uname, "action": action, "status": f"error: {exc}"})
+    uname = "karaoke-celery-worker.service"
+    action = "start" if target > 0 else "stop"
+    cmd = ["systemctl", "--user", action, uname]
+    try:
+        subprocess.run(cmd, check=True, timeout=5)
+        results.append({"unit": uname, "action": action, "status": "ok"})
+    except Exception as exc:
+        results.append({"unit": uname, "action": action, "status": f"error: {exc}"})
 
     return {"status": "ok", "target": target, "results": results}
 

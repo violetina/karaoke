@@ -1,6 +1,6 @@
 """Backend Operations & Admin TUI for Karaoke Platform.
 
-Provides live worker pool management (karaoke-postprocess@1..6.service),
+Provides live Celery worker / Flower dashboard management,
 error log diagnostics, and file ingestion / folder scan triggers.
 """
 from __future__ import annotations
@@ -77,10 +77,10 @@ class KaraokeAdminApp(App):
         with Vertical(id="admin-workspace"):
             # Top: Worker Pool Status & Scaling Controls
             with Container(id="worker-container"):
-                yield Static("[bold cyan]Post-Processing Workers (systemd karaoke-postprocess@1..6.service)[/bold cyan]", id="worker-title")
+                yield Static("[bold cyan]Post-Processing Workers (Celery + Flower)[/bold cyan]", id="worker-title")
                 with Horizontal(id="worker-controls"):
-                    yield Button("Scale Up (+1)", id="btn-scale-up", variant="success")
-                    yield Button("Scale Down (-1)", id="btn-scale-down", variant="warning")
+                    yield Button("Start Worker (+)", id="btn-scale-up", variant="success")
+                    yield Button("Stop Worker (-)", id="btn-scale-down", variant="warning")
                     yield Button("Restart Workers", id="btn-restart-workers", variant="error")
                 yield DataTable(id="worker-table", cursor_type="row")
                 yield Static("Worker Status: Loading...", id="worker-summary")
@@ -140,27 +140,31 @@ class KaraokeAdminApp(App):
         table.clear()
         units = res.get("units", [])
         active_count = 0
+        worker_active = False
         for u in units:
             uname = u.get("unit", "")
             is_act = bool(u.get("active"))
             st = "[bold green]ACTIVE[/bold green]" if is_act else "[dim]inactive[/dim]"
             if is_act:
                 active_count += 1
+            if uname == "karaoke-celery-worker.service" and is_act:
+                worker_active = True
             table.add_row(uname, st, str(u.get("worker_id", "")))
 
-        self._target_workers = active_count or 1
+        self._target_workers = 1 if worker_active else 0
         cpu = res.get("worker_cpu") or 0.0
         ram = res.get("worker_memory_mb") or 0.0
         q_len = res.get("queue_depth") or 0
-        summary = f"[bold green]Active Workers:[/bold green] {active_count}/6 | [bold yellow]RAM:[/bold yellow] {ram:.1f} MB | [bold cyan]Queue Depth:[/bold cyan] {q_len} jobs"
+        dash = res.get("dashboard_url", "http://127.0.0.1:5555")
+        summary = f"[bold green]Celery services:[/bold green] {active_count} active | [bold yellow]RAM:[/bold yellow] {ram:.1f} MB | [bold cyan]Queue Depth:[/bold cyan] {q_len} jobs | Flower: {dash}"
         self.query_one("#worker-summary", Static).update(summary)
 
     def _direct_worker_status(self) -> dict[str, Any]:
         """Direct systemd fallback when ctrl_api HTTP is unreachable."""
         units = []
         active_count = 0
-        for i in range(1, 7):
-            uname = f"karaoke-postprocess@{i}.service"
+        names = ["karaoke-celery-worker.service", "karaoke-celery-flower.service"]
+        for i, uname in enumerate(names, start=1):
             try:
                 r = subprocess.run(["systemctl", "--user", "is-active", uname], capture_output=True, text=True, timeout=2)
                 act = r.stdout.strip() == "active"
@@ -168,9 +172,11 @@ class KaraokeAdminApp(App):
                 act = False
             if act:
                 active_count += 1
-            units.append({"unit": uname, "worker_id": i, "active": act})
+            units.append({"unit": uname, "worker_id": i, "active": act, "kind": "celery"})
         return {
             "status": "ok",
+            "orchestrator": "celery",
+            "dashboard_url": "http://127.0.0.1:5555",
             "workers_active": active_count,
             "worker_cpu": 0.0,
             "worker_memory_mb": 0.0,
@@ -192,17 +198,17 @@ class KaraokeAdminApp(App):
             log.debug("refresh_errors failed", exc_info=True)
 
     def action_scale_up(self) -> None:
-        self._target_workers = min(6, self._target_workers + 1)
+        self._target_workers = 1
         self._scale_workers(self._target_workers)
 
     def action_scale_down(self) -> None:
-        self._target_workers = max(0, self._target_workers - 1)
+        self._target_workers = 0
         self._scale_workers(self._target_workers)
 
     def _scale_workers(self, target: int) -> None:
         res = self.api._http_post(self.api.ctrl_url, "/api/workers/scale", {"target": target})
         if res and res.get("status") == "ok":
-            self.notify(f"Worker pool target set to {target}")
+            self.notify("Celery worker started" if target else "Celery worker stopped")
             try:
                 self.refresh_workers()
             except Exception:
@@ -212,7 +218,7 @@ class KaraokeAdminApp(App):
 
     def action_restart_workers(self) -> None:
         self._scale_workers(self._target_workers or 1)
-        self.notify("Restarted postprocess worker pool")
+        self.notify("Restarted Celery postprocess worker")
 
     def action_scan_folder(self) -> None:
         inp = self.query_one("#ingest-input", Input)

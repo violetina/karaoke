@@ -10,9 +10,10 @@ visuals know each song's key and tempo:
 2. **Audio analysis** — musical **key + tempo (BPM) + energy/brightness**, stored in
    the `track_analysis` table and shown in the TUI (Camelot wheel, rhythm bar, cartwheel).
 
-The work is dispatched over a **RabbitMQ queue** running in the local kind cluster and
-executed by a **host-side worker**. The queue is intentionally non-durable — if it's
-reset, just refill it from SQLite.
+The work is dispatched through **Celery**, using the existing **RabbitMQ broker**
+running in the local kind cluster, and executed by a **host-side Celery worker**.
+Flower provides the dashboard at http://127.0.0.1:5555. The old pika consumer is
+still available as a rollback/manual path via `KARAOKE_ORCHESTRATOR=legacy`.
 
 ---
 
@@ -24,12 +25,13 @@ kubectl --context kind-karaoke apply -k deploy/k8s   # deploy the RabbitMQ broke
 
 # Each working session (manual)
 make mq-port-forward         # terminal A: expose broker to host (localhost:5672)
-make postprocess-worker      # terminal B: run one consumer
+make celery-worker           # terminal B: run Celery worker
+make celery-flower           # terminal C: dashboard on http://127.0.0.1:5555
 make postprocess-enqueue-all # terminal C (optional): queue every track that needs work
 
 # Preferred long-running setup
 make systemd-install
-make systemd-up              # starts mq-forward + karaoke-postprocess@1..6
+make systemd-up              # starts mq-forward + Celery worker + Flower
 ```
 
 The TUI also **auto-enqueues** whatever song you play, so in normal use you only need
@@ -70,9 +72,9 @@ print('track_id:', tid, 'needs:', needs_postprocessing(tid, conn))
 ```
  TUI plays a song ─┐
                    ├─► enqueue_if_needed() ──► RabbitMQ (kind cluster)
- make …-enqueue-all┘        (only if gaps)         │  queue: karaoke-postprocess
+ make …-enqueue-all┘        (only if gaps)         │  queue: karaoke-postprocess-celery
                                                    ▼
-                                   karaoke-postprocess-worker (HOST)
+                                   karaoke-celery-worker (HOST)
                                      • download audio (yt-dlp)
                                      • analyze key/BPM/energy  ─► track_analysis
                                      • upgrade word timings     ─► lyrics (Enhanced LRC)
@@ -88,8 +90,15 @@ in kind.
 
 Key modules:
 - `src/karaoke/postprocess_queue.py` — `needs_postprocessing()` (gap detection),
-  `enqueue_if_needed()` / `publish_postprocess_task()` (publish).
-- `src/karaoke/postprocess_worker.py` — the consumer (`karaoke-postprocess-worker`).
+  `enqueue_if_needed()` / `publish_postprocess_task()` (publish to Celery by default;
+  `KARAOKE_ORCHESTRATOR=legacy` keeps the old pika path available).
+- `src/karaoke/celery_app.py` — Celery app configuration (RabbitMQ broker, queue
+  name `karaoke-postprocess-celery`).
+- `src/karaoke/tasks.py` — Celery task wrapper. Phase 1 deliberately calls the proven
+  `postprocess_worker.process_task()` so behaviour stays unchanged while Celery adds
+  retries, visibility and dashboard control.
+- `src/karaoke/postprocess_worker.py` — legacy pika consumer and the reusable processing
+  implementation.
 - `scripts/enqueue_postprocess.py` — bulk backfill from SQLite.
 - `deploy/k8s/rabbitmq.yaml` — broker Deployment + NodePort Service.
 
@@ -113,14 +122,27 @@ Leave this running. Management UI: http://localhost:15672 (guest/guest).
 
 ### 3. Run the worker
 ```bash
-make postprocess-worker
+make celery-worker
 ```
-It prints `Post-processing worker listening on queue 'karaoke-postprocess' …` and then
-processes tasks as they arrive. Keep it running while you use the app. For real
-use, prefer `make systemd-up`: it starts six `karaoke-postprocess@N` workers as
-RabbitMQ competing consumers with `prefetch_count=1`, all capped by
-`karaoke-postprocess.slice` so analysis does not starve playback. Workers
-reconnect automatically if the broker/port-forward drops.
+It starts a Celery worker on queue `karaoke-postprocess-celery` and processes tasks
+as they arrive. Keep it running while you use the app. For real use, prefer
+`make systemd-up`: it starts `karaoke-celery-worker.service`, capped by
+`karaoke-postprocess.slice` so analysis does not starve playback.
+
+Rollback/manual legacy worker:
+
+```bash
+KARAOKE_ORCHESTRATOR=legacy make postprocess-worker
+```
+
+### 3b. Run the dashboard
+
+```bash
+make celery-flower
+```
+
+Open http://127.0.0.1:5555 to watch tasks, worker status and failures. Under
+systemd, `karaoke-celery-flower.service` is started by `karaoke.target`.
 
 ### 4. Fill the queue
 Either **play songs in the TUI** (auto-enqueues anything missing assets), or backfill
@@ -176,6 +198,10 @@ forwarded alongside AMQP by `make mq-port-forward` / `karaoke-mq-forward.service
 |---|---|---|
 | `RABBITMQ_HOST` | `localhost` | Broker host for publisher + worker. |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | `guest` / `guest` | Broker credentials. |
+| `KARAOKE_ORCHESTRATOR` | `celery` | `celery` (default) publishes Celery tasks; `legacy` uses the old pika queue. |
+| `KARAOKE_CELERY_POSTPROCESS_QUEUE` | `karaoke-postprocess-celery` | Celery queue name for post-processing tasks. |
+| `CELERY_BROKER_URL` | *(derived from RabbitMQ env)* | Full Celery broker URL override. |
+| `CELERY_RESULT_BACKEND` | *(unset)* | Optional result backend; phase 1 runs fire-and-forget without Redis. |
 | `KARAOKE_COOKIES_FROM_BROWSER` | *(unset)* | Browser to pull YouTube cookies from (e.g. `firefox`) for Premium/age-restricted access. |
 | `KARAOKE_YTDLP_REMOTE_COMPONENTS` | `ejs:github` | yt-dlp EJS challenge-solver components (see below). Set empty to disable. |
 

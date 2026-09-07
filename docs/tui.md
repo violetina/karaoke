@@ -62,7 +62,7 @@ go stale. The ones worth knowing:
 ## Operations & Admin Dashboard (`make admin`)
 
 Launch with `make admin` or `python -m karaoke.admin_tui`:
-- **Worker Pool Management**: Real-time controls for `karaoke-postprocess@1..6.service` user units (`[+]` scale up, `[-]` scale down, `[R]` restart pool). Falls back to querying `systemctl --user` directly if the control API is unreachable.
+- **Worker Management**: Real-time controls for the Celery post-processing worker (`+` start, `-` stop, `R` restart) plus Flower dashboard visibility at http://127.0.0.1:5555. Falls back to querying `systemctl --user` directly if the control API is unreachable.
 - **Audio Processing & Vector Ingestion Pipeline**:
   - `b` — Run audio backfill (`scripts/fill_analysis_and_vector_gaps.py`): fills key/BPM/energy gaps and CLAP genre labels.
   - `v` — Rebuild OpenSearch vector indices (`tracks`, `tracks-lines`).

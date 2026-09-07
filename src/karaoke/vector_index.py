@@ -274,12 +274,19 @@ def rebuild_from_sqlite(
     os_client: Any = None,
 ) -> VectorIndexStats:
     """Index SQLite tracks into OpenSearch; safe to re-run."""
-    from .lockfile import ProcessLock
-    lock = ProcessLock("vector_rebuild")
-    if not lock.acquire():
-        from .logger import log
-        log.info("vector_index: rebuild lock held by another process; skipping concurrent run.")
-        return VectorIndexStats()
+    # Production rebuilds touch the shared OpenSearch indexes and need a global
+    # lock. Explicit test/spike rebuilds against an explicit DB and either a
+    # fake client or dry-run are isolated; let them run even while a live Admin
+    # TUI rebuild holds the production lock.
+    isolated = db_path is not None and (dry_run or os_client is not None)
+    lock = None
+    if not isolated:
+        from .lockfile import ProcessLock
+        lock = ProcessLock("vector_rebuild")
+        if not lock.acquire():
+            from .logger import log
+            log.info("vector_index: rebuild lock held by another process; skipping concurrent run.")
+            return VectorIndexStats()
 
     try:
         from .osclient import client, ensure_index
@@ -341,7 +348,8 @@ def rebuild_from_sqlite(
                 c.indices.refresh(index=f"{settings.index_name}-notes")
         return stats
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
 
 
 def vector_index_main(argv: Optional[list[str]] = None) -> int:

@@ -37,7 +37,7 @@ K8S_NAMESPACE ?= karaoke
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run folder-scan \
-        mq-port-forward postprocess-worker postprocess-enqueue-all \
+        mq-port-forward postprocess-worker celery-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
         recordings recording-show recording-analyse
@@ -247,7 +247,17 @@ mq-port-forward: ## Expose the in-cluster RabbitMQ AMQP on localhost:5672 (manag
 	kubectl --context $(KUBE_CONTEXT) -n $(K8S_NAMESPACE) port-forward svc/rabbitmq 5672:5672 15672:15672
 
 postprocess-worker: ## Run the host-side post-processing worker (analysis + word-timing)
-	$(PYTHON) -m karaoke.postprocess_worker
+	KARAOKE_ORCHESTRATOR=legacy $(PYTHON) -m karaoke.postprocess_worker
+
+celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
+	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
+		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2}
+
+celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
+	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
+		-A karaoke.celery_app:app flower \
+		--address=$${FLOWER_HOST:-127.0.0.1} --port=$${FLOWER_PORT:-5555}
 
 postprocess-enqueue-all: ## Enqueue every track missing key/BPM or word-timing for post-processing
 	$(PYTHON) scripts/enqueue_postprocess.py
@@ -277,6 +287,8 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-ctrl-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess@.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.slice $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
@@ -288,7 +300,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \

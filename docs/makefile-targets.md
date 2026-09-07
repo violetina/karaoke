@@ -2,6 +2,7 @@
 Generated from make help
 ```text
 make[1]: Entering directory '/home/tina/karaoke'
+admin                        Run the backend operations & worker management TUI
 analyze                      Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 api                          Launch the FastAPI library backend (read-only: tracks, lyrics, stats)
 audio-check                  Report whether audio analysis is available (and from where)
@@ -10,6 +11,8 @@ auth-status                  Report Spotify token validity and playback-window s
 auth-youtube                 Sign in to YouTube / YT Music (Premium) in the playback Chrome profile
 browse                       Launch the interactive song browser TUI
 browse-log                   Follow TUI/open debug logs
+celery-flower                Run the Celery/Flower dashboard on http://127.0.0.1:5555
+celery-worker                Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 clean                        Remove build artifacts
 clean-tools                  Remove cached helper tools
 ctrl-api                     Launch the host-side control API (playback; needs a desktop session)
@@ -21,6 +24,7 @@ docs-confluence-prep         Generate Confluence-friendly docs tree
 docs-confluence-publish      Build Confluence export site
 docs-live                    Serve MkDocs locally on http://$(DOCS_ADDR)
 docs-write                   Regenerate generated docs
+folder-scan                  Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 format                       Run formatters
 health                       Run the karaoke platform health check (services, ports, cluster, DB)
 help                         Show available targets
@@ -60,5 +64,7 @@ vector-index-dry-run         Preview SQLite -> OpenSearch vector indexing withou
 vector-index                 Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
 venv                         Create virtual environment
 view_makeflow                Open generated SVG locally
+web                          Serve the TUI in a web browser using textual-serve
+webtui                       Alias for make web
 make[1]: Leaving directory '/home/tina/karaoke'
 ```

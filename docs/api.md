@@ -74,17 +74,17 @@ without screen-scraping the TUI.
 ```json
 {
   "available": true,
-  "queue":   {"name": "karaoke-postprocess", "ready": 0, "unacked": 0,
-              "queued": 0, "consumers": 12, "deliver_rate": 0.0,
+  "queue":   {"name": "karaoke-postprocess-celery", "ready": 0, "unacked": 0,
+              "queued": 0, "consumers": 1, "deliver_rate": 0.0,
               "publish_rate": 0.0, "busy": false},
-  "workers": {"count": 12, "running": true, "pids": [509910, "..."],
+  "workers": {"count": 1, "running": true, "pids": [509910, "..."],
               "cpu_percent": 0.0, "rss_mb": 674.6}
 }
 ```
 
-CPU and memory are **summed across every worker** — they scale horizontally
-(`systemctl --user start karaoke-postprocess@{1..12}`), so one worker's usage
-would understate the fleet.
+CPU and memory are **summed across every worker process**. The default runtime is
+now Celery (`karaoke-celery-worker.service`) with Flower at http://127.0.0.1:5555;
+legacy `karaoke-postprocess@N` pika workers are still detected for rollback.
 
 Best-effort by design: if RabbitMQ is unreachable, or the workers run on
 another host (in a container `/proc` shows none of them), the response is

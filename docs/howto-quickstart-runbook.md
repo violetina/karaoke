@@ -37,7 +37,7 @@ for a folder of local audio files rather than the YouTube cache.
 
 ### 2. Analyse: key / BPM / energy + genre (needs local audio)
 
-Batch path via the post-processing workers:
+Batch path via the Celery post-processing worker:
 
 ```bash
 make postprocess-enqueue-all      # enqueue every track missing key/BPM or word-timing
@@ -45,9 +45,11 @@ make postprocess-enqueue-all      # enqueue every track missing key/BPM or word-
 
 Then drain the queue with either:
 
-- the systemd workers: `systemctl --user start karaoke-postprocess@{1..6}` (see
+- the systemd Celery worker: `systemctl --user start karaoke-celery-worker` (see
   [systemd services](howto-systemd-services.md)), or
-- a foreground worker: `make postprocess-worker`
+- a foreground worker: `make celery-worker`
+
+Watch it in Flower with `make celery-flower`, then open http://127.0.0.1:5555.
 
 Single file (ad-hoc):
 
