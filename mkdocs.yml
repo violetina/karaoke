@@ -60,6 +60,7 @@ extra_javascript:
 
 nav:
   - Overview: index.md
+  - Quickstart runbook: howto-quickstart-runbook.md
   - Architecture: architecture.md
   - Cache schema: cache-schema.md
   - Local cache and stats: local-cache-and-stats.md
