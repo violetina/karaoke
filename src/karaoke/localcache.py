@@ -197,18 +197,27 @@ def ensure_play_count_column(conn: sqlite3.Connection) -> None:
     step by record_event and seeded here from the historical play_events log.
     """
     have = {r["name"] for r in conn.execute("PRAGMA table_info(tracks)")}
+    if not have:
+        # No tracks table yet (a database predating it, or a minimal test
+        # fixture). Nothing to migrate; the table's own CREATE carries the
+        # column when it is finally made.
+        return
     if "play_count" not in have:
         conn.execute("ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
-        conn.execute(
-            """
-            UPDATE tracks SET play_count = COALESCE((
-                SELECT COUNT(*) FROM play_events p
-                WHERE p.event IN ('play', 'discover')
-                  AND LOWER(p.artist) = LOWER(tracks.artist)
-                  AND LOWER(p.title) = LOWER(tracks.title)
-            ), 0)
-            """
-        )
+        # Backfill only when the columns the seed query needs are present. A
+        # legacy tracks table can be as minimal as (track_id); referencing
+        # artist/title there would crash the migration on connect().
+        if {"artist", "title"} <= have:
+            conn.execute(
+                """
+                UPDATE tracks SET play_count = COALESCE((
+                    SELECT COUNT(*) FROM play_events p
+                    WHERE p.event IN ('play', 'discover')
+                      AND LOWER(p.artist) = LOWER(tracks.artist)
+                      AND LOWER(p.title) = LOWER(tracks.title)
+                ), 0)
+                """
+            )
         conn.commit()
 
 
