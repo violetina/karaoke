@@ -20,22 +20,70 @@ def client() -> OpenSearch:
     )
 
 
+def synonym_settings() -> dict[str, Any]:
+    """Reusable analysis settings for OpenSearch synonym expansion."""
+    return {
+        "analysis": {
+            "analyzer": {
+                "synonym_analyzer": {
+                    "tokenizer": "standard",
+                    "filter": ["lowercase", "synonym_filter"]
+                }
+            },
+            "filter": {
+                "synonym_filter": {
+                    "type": "synonym",
+                    "synonyms": [
+                        "rock, stoner rock, psychedelic rock, punk rock, post-punk, grunge, hard rock, heavy metal, metal",
+                        "sad, depressed, melancholy, blue, sorrow, gloom, tearful, crying, weeping, lonely, dark, tender",
+                        "happy, glad, joyful, upbeat, cheerful, bright, high energy, energetic",
+                        "chill, mellow, relax, relaxing, calm, slow, down, ambient",
+                        "hip hop, rap, trap, r and b, rnb, soul, funk",
+                        "techno, electronic, electronica, electro, synth, synthesizer, beats, drum and bass, dnb, dance, house, rave, club, party, EDM"
+                    ]
+                }
+            }
+        }
+    }
+
+
 def index_body() -> dict[str, Any]:
     """Mapping for the `tracks` index: metadata + lyrics + kNN lyric vector."""
     return {
-        "settings": {"index": {"knn": True, "number_of_replicas": 0}},
+        "settings": {
+            "index": {"knn": True, "number_of_replicas": 0},
+            "analysis": synonym_settings()["analysis"],
+        },
         "mappings": {
             "properties": {
                 "path": {"type": "keyword"},
-                "title": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "artist": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "album": {"type": "text"},
+                "title": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "artist": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "album": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer"
+                },
                 "year": {"type": "integer"},
                 "duration": {"type": "float"},
                 "source": {"type": "keyword"},          # local | spotify
                 "has_synced": {"type": "boolean"},
                 "lyrics_source": {"type": "keyword"},    # lrclib | whisper | none
-                "plain_lyrics": {"type": "text"},
+                "plain_lyrics": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer"
+                },
                 "synced_lyrics": {"type": "text", "index": False},  # raw LRC, retrieved not searched
                 "lyrics_vector": {
                     "type": "knn_vector",

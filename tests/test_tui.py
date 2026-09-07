@@ -419,6 +419,37 @@ def test_queue_filtering_on_genre_change(monkeypatch):
     assert [row["title"] for row in app._queue] == ["Fast"]
 
 
+def test_star_search_can_fill_queue_for_active_genre_filter(tmp_path):
+    """`*` is the explicit show-all query; genre can narrow it afterwards."""
+    from karaoke import localcache
+    from karaoke.lyrics import Lyrics
+    from karaoke.tui import KaraokeTui
+
+    conn = localcache.connect(tmp_path / "k.db")
+    try:
+        rock_id = localcache.add_track_and_lyrics(
+            "A", "Rock Song", Lyrics(plain="words", source="lrclib"),
+            url="https://youtu.be/rock", conn=conn)
+        pop_id = localcache.add_track_and_lyrics(
+            "B", "Pop Song", Lyrics(plain="words", source="lrclib"),
+            url="https://youtu.be/pop", conn=conn)
+        conn.execute("INSERT INTO track_genre (track_id, genre, labelled_at) VALUES (?, ?, 1)",
+                     (rock_id, "rock"))
+        conn.execute("INSERT INTO track_genre (track_id, genre, labelled_at) VALUES (?, ?, 1)",
+                     (pop_id, "pop"))
+        conn.commit()
+
+        app = KaraokeTui.__new__(KaraokeTui)
+        app._mood_filter = "all"
+        app._genre_filter = "pop"
+        app._mood_level = 0.0
+
+        rows = app._apply_mood_filter(app._all_queue_rows(conn), conn)
+        assert [row["title"] for row in rows] == ["Pop Song"]
+    finally:
+        conn.close()
+
+
 def test_play_count_migration_and_increment(tmp_path):
     """play_count column is backfilled from play_events and bumped on play."""
     from karaoke import localcache

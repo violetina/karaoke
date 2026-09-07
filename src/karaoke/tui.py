@@ -1731,12 +1731,15 @@ class KaraokeTui(App):
 
         try:
             with localcache.connect() as conn:
-                hits = librarysearch.search(query, conn)
-                rows = [{"track_id": h.track_id, "artist": h.artist,
-                         "title": h.title, "score": h.score,
-                         "fields": h.fields,
-                         "url": librarysearch.playable_url(h.track_id, conn) or ""}
-                        for h in hits]
+                if query.strip() == "*":
+                    rows = self._all_queue_rows(conn)
+                else:
+                    hits = librarysearch.search(query, conn)
+                    rows = [{"track_id": h.track_id, "artist": h.artist,
+                             "title": h.title, "score": h.score,
+                             "fields": h.fields,
+                             "url": librarysearch.playable_url(h.track_id, conn) or ""}
+                            for h in hits]
                 rows = self._apply_mood_filter(rows, conn)
         except Exception as exc:
             log.debug("search failed", exc_info=True)
@@ -1744,6 +1747,54 @@ class KaraokeTui(App):
                                   severity="error")
             return
         self.call_from_thread(self._set_queue, rows, query)
+
+    def _all_queue_rows(self, conn) -> list[dict]:
+        """Playable library rows for `*` search, before mood/genre filters."""
+        cur = conn.cursor()
+        try:
+            from .track_analysis import ensure_schema
+            ensure_schema(conn)
+        except Exception:
+            pass
+        cur.execute(
+            """
+            SELECT t.track_id, t.artist, t.title,
+                   COALESCE(s.url, '') AS url,
+                   g.genre AS genre,
+                   a.energy
+            FROM tracks t
+            LEFT JOIN sources s ON s.source_id = (
+                SELECT s2.source_id FROM sources s2
+                WHERE s2.track_id = t.track_id
+                ORDER BY
+                    CASE
+                        WHEN s2.kind = 'youtube_music' THEN 0
+                        WHEN s2.kind = 'youtube' THEN 1
+                        WHEN s2.url LIKE 'http%' THEN 2
+                        WHEN s2.kind = 'spotify' THEN 3
+                        ELSE 4
+                    END,
+                    s2.source_id
+                LIMIT 1
+            )
+            LEFT JOIN lyrics l
+              ON t.track_id = l.track_id AND l.kind = 'approved'
+            LEFT JOIN track_analysis a
+              ON a.track_id = t.track_id
+            LEFT JOIN track_genre g
+              ON g.track_id = t.track_id
+            WHERE (t.duration IS NULL OR t.duration <= :album_seconds)
+              AND (COALESCE(l.synced_lyrics, '') != ''
+                   OR COALESCE(l.plain_lyrics, '') != '')
+            GROUP BY t.track_id
+            ORDER BY t.artist, t.title
+            """,
+            {"album_seconds": localcache.ALBUM_UPLOAD_SECONDS},
+        )
+        return [{"track_id": row["track_id"], "artist": row["artist"] or "",
+                 "title": row["title"] or "", "url": row["url"] or "",
+                 "genre": row["genre"], "energy": row["energy"]}
+                for row in cur.fetchall()]
 
     def _set_queue(self, rows: list, query: str = "") -> None:
         """Show the result list and start it playing."""

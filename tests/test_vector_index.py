@@ -10,6 +10,7 @@ from karaoke.lyrics import Lyrics
 class FakeIndices:
     def __init__(self):
         self.created = []
+        self.created_bodies = {}
         self.refreshed = []
 
     def exists(self, index):
@@ -17,6 +18,7 @@ class FakeIndices:
 
     def create(self, index, body):
         self.created.append(index)
+        self.created_bodies[index] = body
 
     def refresh(self, index):
         self.refreshed.append(index)
@@ -96,6 +98,21 @@ def test_rebuild_from_sqlite_indexes_tracks_and_lines(tmp_path):
     assert fake.docs[1][1] == "sqlite-line:1:0"
     assert fake.docs[1][2]["duration_s"] == 3.0
     assert fake.docs[2][2]["duration_s"] is None
+    line_mapping = fake.indices.created_bodies["tracks-lines"]["mappings"]["properties"]
+    assert line_mapping["text"]["search_analyzer"] == "synonym_analyzer"
+    assert line_mapping["context"]["search_analyzer"] == "synonym_analyzer"
+
+
+def test_track_index_uses_synonym_analyzer_for_keyword_fields():
+    from karaoke import osclient
+
+    body = osclient.index_body()
+    analysis = body["settings"]["analysis"]
+    fields = body["mappings"]["properties"]
+    assert "synonym_filter" in analysis["filter"]
+    assert "melancholy" in ", ".join(analysis["filter"]["synonym_filter"]["synonyms"])
+    assert fields["plain_lyrics"]["search_analyzer"] == "synonym_analyzer"
+    assert fields["title"]["search_analyzer"] == "synonym_analyzer"
 
 
 def test_vector_index_main_dry_run_no_cluster(tmp_path, capsys):

@@ -158,19 +158,41 @@ def ensure_line_index(os_client: Any, index_name: str) -> bool:
     """Create the line-level vector index if absent."""
     if os_client.indices.exists(index=index_name):
         return False
+    from .osclient import synonym_settings
     body = {
-        "settings": {"index": {"knn": True, "number_of_replicas": 0}},
+        "settings": {
+            "index": {"knn": True, "number_of_replicas": 0},
+            "analysis": synonym_settings()["analysis"],
+        },
         "mappings": {
             "properties": {
                 "track_id": {"type": "integer"},
                 "line_index": {"type": "integer"},
-                "artist": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "title": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
+                "artist": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "title": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
                 "start_s": {"type": "float"},
                 "end_s": {"type": "float"},
                 "duration_s": {"type": "float"},
-                "text": {"type": "text"},
-                "context": {"type": "text"},
+                "text": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer"
+                },
+                "context": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer"
+                },
                 "source": {"type": "keyword"},
                 "indexed_at": {"type": "date"},
                 "line_vector": {
@@ -232,17 +254,40 @@ def ensure_note_index(os_client: Any, index_name: str) -> bool:
     """Create the note-level vector index if absent."""
     if os_client.indices.exists(index=index_name):
         return False
+    from .osclient import synonym_settings
     body = {
-        "settings": {"index": {"knn": True, "number_of_replicas": 0}},
+        "settings": {
+            "index": {"knn": True, "number_of_replicas": 0},
+            "analysis": synonym_settings()["analysis"],
+        },
         "mappings": {
             "properties": {
                 "note_id": {"type": "integer"},
                 "track_id": {"type": "integer"},
                 "kind": {"type": "keyword"},
-                "artist": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "title": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "album": {"type": "text", "fields": {"raw": {"type": "keyword"}}},
-                "text": {"type": "text"},
+                "artist": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "title": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "album": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer",
+                    "fields": {"raw": {"type": "keyword"}}
+                },
+                "text": {
+                    "type": "text",
+                    "analyzer": "synonym_analyzer",
+                    "search_analyzer": "synonym_analyzer"
+                },
                 "note_source": {"type": "keyword"},
                 "confidence": {"type": "float"},
                 "source": {"type": "keyword"},
