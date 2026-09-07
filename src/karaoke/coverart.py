@@ -239,6 +239,11 @@ def to_text(pixels: list[list[tuple[int, int, int]]], *, pad_to: int = 0):
         if left:
             text.append(" " * left)
         for (r, g, b) in row:
+            # Defensive render-boundary clamp: Rich/Textual only accepts RGB
+            # channels in 0..255, and callers may animate or transform pixels.
+            r = max(0, min(255, int(r)))
+            g = max(0, min(255, int(g)))
+            b = max(0, min(255, int(b)))
             text.append(" ", style=f"on rgb({r},{g},{b})")
         if y < len(pixels) - 1:
             text.append("\n")

@@ -135,3 +135,37 @@ def test_admin_single_operation_guard(monkeypatch):
         assert any(k.get("severity") == "warning" for _, k in notifications)
     finally:
         app._release_bg_lock()
+
+
+def test_admin_task_status_helpers_update_visible_status(monkeypatch):
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    updates = []
+
+    class FakeStatic:
+        def update(self, message):
+            updates.append(message)
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeStatic(), raising=False)
+    app._current_task_label = None
+    app._current_task_started_at = None
+
+    app._mark_task_started("Vector rebuild")
+    assert app._current_task_label == "Vector rebuild"
+    assert "RUNNING" in updates[-1]
+
+    app._mark_task_finished("Vector rebuild", "Vector indices updated")
+    assert app._current_task_label is None
+    assert "DONE" in updates[-1]
+
+
+def test_admin_format_event_line_includes_state_task_and_id():
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    line = app._format_event_line({
+        "ts": 1788800803.0,
+        "state": "SUCCESS",
+        "task_name": "karaoke.tasks.postprocess_track",
+        "task_id": "abcdef1234567890",
+    })
+    assert "SUCCESS" in line
+    assert "karaoke.tasks.postprocess_track" in line
+    assert "abcdef123456" in line

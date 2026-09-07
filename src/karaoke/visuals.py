@@ -333,8 +333,15 @@ def animate_mood_pixels(pixels: list[list[tuple[int, int, int]]], elapsed: float
             nr = int(r + (255 - r) * boost)
             ng = int(g + (255 - g) * boost)
             nb = int(b + (255 - b) * boost)
-            
-            new_row.append((min(255, nr), min(255, ng), min(255, nb)))
+
+            # boost can be negative (sin dips below 0), which drives a channel
+            # below 0 — clamp BOTH ends to the valid 0-255 range so the rendered
+            # `rgb(...)` style never carries an out-of-range (e.g. -18) value.
+            new_row.append((
+                max(0, min(255, nr)),
+                max(0, min(255, ng)),
+                max(0, min(255, nb)),
+            ))
         animated.append(new_row)
     return animated
 

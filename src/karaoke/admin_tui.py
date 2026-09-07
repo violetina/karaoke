@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import subprocess
 from typing import Any
 from pathlib import Path
@@ -38,17 +39,32 @@ class KaraokeAdminApp(App):
     }
 
     #controls-column {
-        width: 55%;
+        width: 45%;
         height: 1fr;
         overflow-y: auto;
         padding-right: 1;
     }
 
     #log-container {
-        width: 45%;
+        width: 55%;
         height: 1fr;
         border: round $primary;
         padding: 0 1;
+    }
+
+    #job-status {
+        height: 3;
+        border: round $warning;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+
+    #event-log {
+        height: 9;
+        overflow-y: auto;
+        border: round $accent;
+        padding: 0 1;
+        margin-bottom: 1;
     }
 
     #log-title {
@@ -114,6 +130,10 @@ class KaraokeAdminApp(App):
         self._bg_busy = False
         self._bg_lock = None
         self._last_event_ts: float | None = None
+        self._last_event_ids: tuple[str, ...] = ()
+        self._last_logs_seen: list[str] = []
+        self._current_task_label: str | None = None
+        self._current_task_started_at: float | None = None
 
     def _acquire_bg_lock(self) -> bool:
         # In-process guard first (fast path), then a cross-process lockfile so a
@@ -137,6 +157,25 @@ class KaraokeAdminApp(App):
         if lock is not None:
             lock.release()
             self._bg_lock = None
+
+    def _set_job_status(self, message: str) -> None:
+        try:
+            self.query_one("#job-status", Static).update(message)
+        except Exception:
+            pass
+
+    def _mark_task_started(self, label: str) -> None:
+        self._current_task_label = label
+        self._current_task_started_at = time.time()
+        self._set_job_status(f"[bold yellow]RUNNING[/bold yellow] {label}\n[dim]Started just now. Other admin pipeline tasks are locked until this finishes.[/dim]")
+
+    def _mark_task_finished(self, label: str, message: str, *, severity: str = "ok") -> None:
+        started = self._current_task_started_at
+        elapsed = f" after {time.time() - started:.1f}s" if started else ""
+        style = "bold green" if severity == "ok" else "bold red"
+        self._current_task_label = None
+        self._current_task_started_at = None
+        self._set_job_status(f"[{style}]DONE[/] {label}{elapsed}\n[dim]{message}[/dim]")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -184,8 +223,10 @@ class KaraokeAdminApp(App):
                         yield Input(placeholder="Path to folder or audio file (e.g. ~/Music)...", id="ingest-input")
                         yield Button("Scan Folder", id="btn-scan", variant="primary")
 
-            # Right column: Dedicated Log & Diagnostics Viewer (full height, isolated)
+            # Right column: live task status, latest platform events, diagnostics.
             with Vertical(id="log-container"):
+                yield Static("[bold green]No admin pipeline task running.[/bold green]", id="job-status")
+                yield RichLog(id="event-log", highlight=True, markup=True, wrap=True)
                 yield Static("[bold red]Recent Error Logs & Diagnostics[/bold red]", id="log-title")
                 yield RichLog(id="error-log", highlight=True, markup=True, wrap=True)
 
@@ -204,6 +245,7 @@ class KaraokeAdminApp(App):
     def refresh_all(self) -> None:
         self.refresh_workers()
         self.refresh_clients()
+        self.refresh_events()
         self.refresh_errors()
 
 
@@ -266,6 +308,34 @@ class KaraokeAdminApp(App):
             "units": units,
         }
 
+    def _format_event_line(self, event: dict[str, Any]) -> str:
+        ts = event.get("ts")
+        task_name = event.get("task_name") or event.get("type") or "event"
+        state = event.get("state") or ""
+        task_id = str(event.get("task_id") or event.get("id") or "")[:12]
+        when = f"{float(ts):.0f}" if isinstance(ts, int | float) else str(ts or "")
+        state_style = "bold green" if str(state).upper() in {"SUCCESS", "SUCCEEDED", "OK"} else "bold yellow"
+        return f"[dim]{when}[/dim] [{state_style}]{state or 'event'}[/] {task_name} [dim]{task_id}[/dim]"
+
+    def refresh_events(self) -> None:
+        try:
+            res = self.api.recent_events(limit=10)
+            events = res.get("events", []) if res else []
+            event_ids = tuple(str(e.get("task_id") or e.get("id") or e.get("ts") or i) for i, e in enumerate(events))
+            if event_ids == self._last_event_ids:
+                return
+            self._last_event_ids = event_ids
+            event_log = self.query_one("#event-log", RichLog)
+            event_log.clear()
+            event_log.write("[bold cyan]Latest Platform Events[/bold cyan]")
+            if not events:
+                event_log.write("[dim]No platform events observed yet.[/dim]")
+                return
+            for event in events:
+                event_log.write(self._format_event_line(event))
+        except Exception:
+            log.debug("refresh_events failed", exc_info=True)
+
     def refresh_errors(self) -> None:
         try:
             res = self.api._http_get(self.api.ctrl_url, "/api/logs/errors?lines=50")
@@ -311,8 +381,10 @@ class KaraokeAdminApp(App):
             if newest_ts:
                 self._last_event_ts = float(newest_ts)
 
-            # If any postprocess / task event completed, refresh worker table immediately
+            # If any postprocess / task event completed, refresh right pane and workers immediately.
+            self.call_from_thread(self.refresh_events)
             self.call_from_thread(self.refresh_workers)
+            self.call_from_thread(self.refresh_errors)
 
         try:
             self.run_worker(_work, exclusive=False, thread=True)
@@ -440,6 +512,8 @@ class KaraokeAdminApp(App):
         """`b`: Trigger audio gap-fill and zero-shot genre backfill."""
         if not self._acquire_bg_lock():
             return
+        label = "Audio backfill"
+        self._mark_task_started(label)
         self.notify("Started audio gap-fill and classification backfill...")
         def _bg():
             try:
@@ -447,9 +521,13 @@ class KaraokeAdminApp(App):
                 p = Path(__file__).resolve().parent.parent.parent / "scripts" / "fill_analysis_and_vector_gaps.py"
                 if p.is_file():
                     subprocess.run([sys.executable, str(p)], check=True, timeout=600)
-                    self.call_from_thread(self.notify, "Audio backfill completed successfully!")
+                    msg = "Audio backfill completed successfully!"
+                    self.call_from_thread(self.notify, msg)
+                    self.call_from_thread(self._mark_task_finished, label, msg)
             except Exception as exc:
-                self.call_from_thread(self.notify, f"Backfill failed: {exc}", severity="error")
+                msg = f"Backfill failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
             finally:
                 self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
@@ -458,6 +536,8 @@ class KaraokeAdminApp(App):
         """`v`: Rebuild OpenSearch vector indices."""
         if not self._acquire_bg_lock():
             return
+        label = "Vector rebuild"
+        self._mark_task_started(label)
         self.notify("Rebuilding OpenSearch vector indices...")
         def _bg():
             try:
@@ -466,8 +546,11 @@ class KaraokeAdminApp(App):
                     st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
                 msg = f"Vector indices updated: {st.indexed} tracks, {st.line_docs} lines"
                 self.call_from_thread(self.notify, msg)
+                self.call_from_thread(self._mark_task_finished, label, msg)
             except Exception as exc:
-                self.call_from_thread(self.notify, f"Vector rebuild note: {exc}")
+                msg = f"Vector rebuild failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
             finally:
                 self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
@@ -476,6 +559,8 @@ class KaraokeAdminApp(App):
         """`a`: Process, decompile, and ingest detected song vectors from recordings."""
         if not self._acquire_bg_lock():
             return
+        label = "Recording analysis"
+        self._mark_task_started(label)
         self.notify("Analysing captured audio recordings and ingesting song vectors...")
         def _bg():
             try:
@@ -490,9 +575,13 @@ class KaraokeAdminApp(App):
                             processed += 1
                     if processed:
                         vector_index.rebuild_from_sqlite(embed=True, include_lines=True, include_notes=True)
-                self.call_from_thread(self.notify, f"Processed {processed} recording(s) and ingested song vectors")
+                msg = f"Processed {processed} recording(s) and ingested song vectors"
+                self.call_from_thread(self.notify, msg)
+                self.call_from_thread(self._mark_task_finished, label, msg)
             except Exception as exc:
-                self.call_from_thread(self.notify, f"Recording analysis note: {exc}")
+                msg = f"Recording analysis failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
             finally:
                 self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
@@ -506,13 +595,18 @@ class KaraokeAdminApp(App):
             return
         if not self._acquire_bg_lock():
             return
+        label = "Whisper alignment"
+        self._mark_task_started(label)
         self.notify(f"Aligning lyrics for '{track_input}' with Whisper...")
         def _bg():
             try:
                 res = align_plain_text_for_track(track_input, text_input)
                 self.call_from_thread(self.notify, res)
+                self.call_from_thread(self._mark_task_finished, label, str(res))
             except Exception as exc:
-                self.call_from_thread(self.notify, f"Alignment failed: {exc}", severity="error")
+                msg = f"Alignment failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
             finally:
                 self.call_from_thread(self._release_bg_lock)
         self.run_worker(_bg, thread=True)
