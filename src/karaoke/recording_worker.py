@@ -289,6 +289,7 @@ def analyse_segment(segment: Segment, files: list[SegmentFile],
                 energy=result.energy,
                 brightness=result.brightness,
                 analyzer_version=result.version,
+                source_kind="recording",
                 conn=c,
             )
         finally:
@@ -538,15 +539,34 @@ def recording_main(argv: Optional[list[str]] = None) -> int:
         print("\n".join(show(args.show)))
         return 0
     if args.analyse is not None:
-        print("\n".join(analyse(args.analyse, keep=args.keep or None)))
+        # Route the mutating action through the control API so the CLI, TUI and
+        # a future web UI all trigger analysis the same way; falls back to an
+        # in-process call when no server is running.
+        from .api_client import ApiClient
+        res = ApiClient().record_analyse(args.analyse, keep=bool(args.keep))
+        status = res.get("status", "unknown")
+        if status == "analysed":
+            # Ran synchronously in-process (no server up).
+            print("\n".join(res.get("lines", [])))
+        elif status == "accepted":
+            print(f"recording {args.analyse}: analysis dispatched")
+        elif status == "unreachable":
+            print("\n".join(analyse(args.analyse, keep=args.keep or None)))
+        else:
+            print(f"recording {args.analyse}: {res.get('detail', status)}")
         return 0
     if args.prune:
         notes = prune_recordings()
         print("\n".join(notes) if notes else "nothing to prune")
         return 0
     if args.discard is not None:
-        freed = discard_audio(args.discard)
-        print(f"freed {freed / 1e6:.0f} MB")
+        from .api_client import ApiClient
+        res = ApiClient().record_discard_audio(args.discard)
+        freed = res.get("freed_bytes")
+        if freed is not None:
+            print(f"freed {freed / 1e6:.0f} MB")
+        else:
+            print(f"recording {args.discard}: {res.get('detail', res.get('status', 'unknown'))}")
         return 0
     ap.error("give --list, --show, --analyse, --discard or --prune")
     return 2

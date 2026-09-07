@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from . import localcache
 from .musictheory import Key, KeyReconciliation, parse_key, reconcile_key
@@ -30,6 +30,22 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     brightness      REAL,
     analyzer_version INTEGER DEFAULT 0,
     updated_at      REAL NOT NULL,
+    FOREIGN KEY(track_id) REFERENCES tracks(track_id)
+);
+
+CREATE TABLE IF NOT EXISTS track_analysis_history (
+    history_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id        INTEGER NOT NULL,
+    source_kind     TEXT DEFAULT '',
+    detected_key    TEXT DEFAULT '',
+    key_confidence  REAL DEFAULT 0.0,
+    key_agreement   TEXT DEFAULT '',
+    bpm             REAL,
+    method          TEXT DEFAULT '',
+    energy          REAL,
+    brightness      REAL,
+    analyzer_version INTEGER DEFAULT 0,
+    created_at      REAL NOT NULL,
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 """
@@ -71,6 +87,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     for col, coltype in _ADDED_COLUMNS.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE track_analysis ADD COLUMN {col} {coltype}")
+    history_count = conn.execute("SELECT COUNT(*) FROM track_analysis_history").fetchone()[0]
+    if history_count == 0:
+        conn.execute(
+            """
+            INSERT INTO track_analysis_history
+                (track_id, source_kind, detected_key, key_confidence, key_agreement,
+                 bpm, method, energy, brightness, analyzer_version, created_at)
+            SELECT track_id, COALESCE(NULLIF(method, ''), 'baseline'), detected_key,
+                   key_confidence, key_agreement, bpm, method, energy, brightness,
+                   analyzer_version, updated_at
+            FROM track_analysis
+            """
+        )
     conn.commit()
 
 
@@ -118,6 +147,7 @@ def save_detected(
     analyzer_version: int = 0,
     energy: Optional[float] = None,
     brightness: Optional[float] = None,
+    source_kind: str = "",
     conn: sqlite3.Connection,
 ) -> TrackAnalysis:
     """Upsert a locally-detected key/tempo/energy analysis and re-reconcile.
@@ -130,6 +160,7 @@ def save_detected(
     reference = existing.reference_key if existing else None
     reference_src = existing.reference_src if existing else ""
     rec = reconcile_key(detected_key, reference)
+    now = time.time()
     conn.execute(
         """
         INSERT INTO track_analysis
@@ -154,13 +185,58 @@ def save_detected(
             track_id, _key_name(detected_key), key_confidence, key_agreement,
             _key_name(reference), reference_src, _key_name(rec.resolved),
             rec.relation, bpm, method, energy, brightness,
-            analyzer_version, time.time(),
+            analyzer_version, now,
+        ),
+    )
+    # Record history version entry
+    conn.execute(
+        """
+        INSERT INTO track_analysis_history
+            (track_id, source_kind, detected_key, key_confidence, key_agreement,
+             bpm, method, energy, brightness, analyzer_version, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            track_id, source_kind or method, _key_name(detected_key), key_confidence, key_agreement,
+            bpm, method, energy, brightness, analyzer_version, now,
         ),
     )
     conn.commit()
     result = get_analysis(track_id, conn)
     assert result is not None
     return result
+
+
+def get_analysis_history(track_id: int, conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return all historical analysis versions for a track, newest first."""
+    ensure_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT history_id, track_id, source_kind, detected_key, key_confidence,
+               key_agreement, bpm, method, energy, brightness, analyzer_version, created_at
+        FROM track_analysis_history
+        WHERE track_id = ?
+        ORDER BY history_id DESC
+        """,
+        (track_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "history_id": r["history_id"],
+            "track_id": r["track_id"],
+            "source_kind": r["source_kind"],
+            "detected_key": r["detected_key"],
+            "key_confidence": float(r["key_confidence"] or 0.0),
+            "key_agreement": r["key_agreement"],
+            "bpm": r["bpm"],
+            "method": r["method"],
+            "energy": r["energy"],
+            "brightness": r["brightness"],
+            "analyzer_version": r["analyzer_version"],
+            "created_at": float(r["created_at"] or 0.0),
+        })
+    return out
 
 
 def verify_key(

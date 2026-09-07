@@ -73,7 +73,7 @@ def test_alignment_keeps_the_real_words(conn, monkeypatch, tmp_path):
 
     monkeypatch.setattr("karaoke.lyric_align.align_lines", _aligned)
 
-    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is True
+    assert pw.run_sync_logic(1, tmp_path / "audio.webm", conn) is True
     row = conn.execute("SELECT synced_lyrics, plain_lyrics, source FROM lyrics"
                        " WHERE track_id = 1").fetchone()
     assert "one line" in row["synced_lyrics"]
@@ -84,7 +84,7 @@ def test_alignment_keeps_the_real_words(conn, monkeypatch, tmp_path):
 def test_a_track_with_no_plain_text_is_refused(conn, tmp_path):
     from karaoke import postprocess_worker as pw
 
-    assert pw._run_sync(3, tmp_path / "audio.webm", conn) is False
+    assert pw.run_sync_logic(3, tmp_path / "audio.webm", conn) is False
 
 
 def test_an_alignment_that_produces_nothing_is_not_stored(conn, monkeypatch,
@@ -103,7 +103,7 @@ def test_an_alignment_that_produces_nothing_is_not_stored(conn, monkeypatch,
                         lambda lines, words, total_duration=None, bpm=None,
                         report=None: [])
 
-    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
+    assert pw.run_sync_logic(1, tmp_path / "audio.webm", conn) is False
     row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
                        ).fetchone()
     assert not row["synced_lyrics"]
@@ -135,7 +135,7 @@ def test_an_alignment_with_no_anchors_at_all_is_not_stored(conn, monkeypatch,
 
     monkeypatch.setattr("karaoke.lyric_align.align_lines", _unanchored)
 
-    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
+    assert pw.run_sync_logic(1, tmp_path / "audio.webm", conn) is False
     row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
                        ).fetchone()
     assert not row["synced_lyrics"]
@@ -162,7 +162,7 @@ def test_a_sparsely_anchored_alignment_is_stored_and_flagged(conn, monkeypatch,
 
     monkeypatch.setattr("karaoke.lyric_align.align_lines", _sparse)
 
-    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is True
+    assert pw.run_sync_logic(1, tmp_path / "audio.webm", conn) is True
     row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = 1"
                        ).fetchone()
     assert row["synced_lyrics"]                      # kept, not discarded
@@ -178,7 +178,7 @@ def test_a_transcription_failure_is_not_fatal(conn, monkeypatch, tmp_path):
         raise RuntimeError("no whisper here")
 
     monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_words", boom)
-    assert pw._run_sync(1, tmp_path / "audio.webm", conn) is False
+    assert pw.run_sync_logic(1, tmp_path / "audio.webm", conn) is False
 
 
 # -- the trigger --------------------------------------------------------

@@ -43,7 +43,7 @@ def test_line_tag_matches_first_word_tag():
     """Enhanced LRC spec: the first word timestamp matches the line stamp."""
     out = json3_to_enhanced_lrc(_json3([_cue(21_920, ["Heat", "up", "here."])]))
     line = out.splitlines()[0]
-    assert line.startswith("[00:21.92]<00:21.92>Heat")
+    assert line.startswith("[00:21.92] <00:21.92>Heat")
 
 
 def test_enhanced_output_strips_noise_and_speakers():

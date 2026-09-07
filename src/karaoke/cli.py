@@ -348,43 +348,61 @@ def stats_main() -> int:
 
     import time as _time
     from . import localcache
+    from .api_client import ApiClient
 
-    since = _time.time() - args.days * 86400 if args.days else None
-    s = localcache.summarize(limit=args.limit, since=since)
+    # Prefer the Library API so `karaoke-stats` and a web UI read identical
+    # numbers; fall back to a direct SQLite summary when no server is running.
+    data = ApiClient().get_stats(limit=args.limit, days=args.days)
+    if data is None:
+        since = _time.time() - args.days * 86400 if args.days else None
+        s = localcache.summarize(limit=args.limit, since=since)
+        data = {
+            "plays": s.plays, "discoveries": s.discoveries,
+            "cache_hits": s.cache_hits, "cache_misses": s.cache_misses,
+            "cache_hit_rate": s.cache_hit_rate,
+            "distinct_tracks": s.distinct_tracks, "distinct_artists": s.distinct_artists,
+            "top_tracks": [list(t) for t in s.top_tracks],
+            "top_artists": [list(a) for a in s.top_artists],
+            "by_mode": [list(m) for m in s.by_mode],
+            "total_events": s.total_events,
+        }
 
     if args.json:
         import json
         print(json.dumps({
-            "total_events": s.total_events, "plays": s.plays,
-            "discoveries": s.discoveries, "cache_hits": s.cache_hits,
-            "cache_misses": s.cache_misses, "cache_hit_rate": round(s.cache_hit_rate, 3),
-            "distinct_tracks": s.distinct_tracks, "distinct_artists": s.distinct_artists,
-            "top_tracks": [{"artist": a, "title": t, "plays": n} for a, t, n in s.top_tracks],
-            "top_artists": [{"artist": a, "plays": n} for a, n in s.top_artists],
-            "by_mode": [{"mode": m, "plays": n} for m, n in s.by_mode],
+            "total_events": data["total_events"], "plays": data["plays"],
+            "discoveries": data["discoveries"], "cache_hits": data["cache_hits"],
+            "cache_misses": data["cache_misses"],
+            "cache_hit_rate": round(data["cache_hit_rate"], 3),
+            "distinct_tracks": data["distinct_tracks"],
+            "distinct_artists": data["distinct_artists"],
+            "top_tracks": [{"artist": t[0], "title": t[1], "plays": t[2]} for t in data["top_tracks"]],
+            "top_artists": [{"artist": a[0], "plays": a[1]} for a in data["top_artists"]],
+            "by_mode": [{"mode": m[0], "plays": m[1]} for m in data["by_mode"]],
         }, indent=2))
         return 0
 
     window = f" (last {args.days:g} days)" if args.days else ""
     print(f"Karaoke stats{window}")
-    print(f"  plays={s.plays}  discoveries={s.discoveries}  "
-          f"tracks={s.distinct_tracks}  artists={s.distinct_artists}")
-    print(f"  local-cache hits={s.cache_hits}  misses={s.cache_misses}  "
-          f"hit-rate={s.cache_hit_rate*100:.0f}%")
-    if s.by_mode:
+    print(f"  plays={data['plays']}  discoveries={data['discoveries']}  "
+          f"tracks={data['distinct_tracks']}  artists={data['distinct_artists']}")
+    print(f"  local-cache hits={data['cache_hits']}  misses={data['cache_misses']}  "
+          f"hit-rate={data['cache_hit_rate']*100:.0f}%")
+    if data["by_mode"]:
         print("\n  by mode:")
-        for mode, n in s.by_mode:
+        for mode, n in data["by_mode"]:
             print(f"    {mode:10s} {n}")
-    if s.top_tracks:
+    if data["top_tracks"]:
         print("\n  top tracks:")
-        for a, t, n in s.top_tracks:
-            label = f"{a} - {t}" if a else t
+        for t in data["top_tracks"]:
+            a, title, n = t[0], t[1], t[2]
+            label = f"{a} - {title}" if a else title
             print(f"    {n:4d}  {label}")
-    if s.top_artists:
+    if data["top_artists"]:
         print("\n  top artists:")
-        for a, n in s.top_artists:
+        for a, n in data["top_artists"]:
             print(f"    {n:4d}  {a}")
-    if s.total_events == 0:
+    if data["total_events"] == 0:
         print("  (no events yet — play something with `karaoke` first)")
     return 0
 
@@ -552,6 +570,56 @@ def backfill_main(argv: Optional[list[str]] = None) -> int:
     from .backfill import backfill_main as _backfill_main
     return _backfill_main(argv)
 
+
+def folder_scan_main(argv: Optional[list[str]] = None) -> int:
+    """Run the `karaoke-folder-scan` CLI.
+
+    Scans a music folder, fingerprints with Shazam/songrec, classifies audio
+    (key/BPM/CLAP/genre), resolves YouTube/Spotify links, and ingests into the
+    library. The heavy lifting lives in :mod:`karaoke.folder_scan`, which is the
+    same code the control API's ``/api/scan/folder`` calls.
+    """
+    import argparse
+    from pathlib import Path
+
+    from .folder_scan import scan_and_ingest_folder
+
+    ap = argparse.ArgumentParser(
+        prog="karaoke-folder-scan",
+        description="Scan a music folder, fingerprint, classify, resolve "
+                    "YT/Spotify, and ingest into the library",
+    )
+    ap.add_argument("dir", type=Path, help="Folder containing music files")
+    ap.add_argument("--no-fingerprint", action="store_true",
+                    help="disable songrec Shazam fingerprinting")
+    ap.add_argument("--no-classify", action="store_true",
+                    help="disable key/BPM/CLAP/genre classification")
+    ap.add_argument("--no-streaming", action="store_true",
+                    help="disable YouTube/Spotify link resolution")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="preview enrichment without writing to the library")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="process at most N files")
+    args = ap.parse_args(argv)
+
+    stats = scan_and_ingest_folder(
+        args.dir,
+        use_fingerprint=not args.no_fingerprint,
+        classify_audio=not args.no_classify,
+        resolve_streaming=not args.no_streaming,
+        dry_run=args.dry_run,
+        limit=args.limit,
+    )
+    if args.dry_run:
+        for item in stats["items"]:
+            print(f"  {item['artist']} - {item['title']}  "
+                  f"[key={item['key']} bpm={item['bpm']} genre={item['genre']}]")
+    print(f"\nseen={stats['seen']} processed={stats['processed']} "
+          f"fingerprinted={stats['fingerprinted']} classified={stats['classified']} "
+          f"sourced={stats['sourced']} errors={stats['errors']}")
+    return 0
+
+
 def browse_main(argv: Optional[list[str]] = None) -> int:
     """Run the `karaoke-browse` TUI."""
     from .browse import browse_main as _browse_main
@@ -671,6 +739,7 @@ def analyze_main(argv: Optional[list[str]] = None) -> int:
                     energy=result.energy,
                     brightness=result.brightness,
                     analyzer_version=result.version,
+                    source_kind="cli",
                     conn=conn,
                 )
                 print(f"stored analysis for track_id={track_id}", file=sys.stderr)

@@ -4,8 +4,8 @@ VENV ?= .venv
 PYTHON := PYTHONPATH=src $(VENV)/bin/python
 MKDOCS := $(VENV)/bin/mkdocs
 # mkdocs defaults to :8000, which karaoke-api already listens on (systemd --user),
-# so serving the docs there fails to bind. Override with DOCS_ADDR if 8001 clashes too.
-DOCS_ADDR ?= 127.0.0.1:8001
+# so serving the docs there fails to bind. Default to 127.0.0.1:8085 (free port).
+DOCS_ADDR ?= 127.0.0.1:8085
 AUDIO_VENV ?= .venv-audio
 AUDIO_PY := $(AUDIO_VENV)/bin/python
 
@@ -36,8 +36,8 @@ K8S_NAMESPACE ?= karaoke
         install-audio analyze api ctrl-api \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
-        index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run \
-        mq-port-forward postprocess-worker postprocess-enqueue-all \
+        index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run folder-scan \
+        mq-port-forward postprocess-worker celery-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
         recordings recording-show recording-analyse
@@ -232,6 +232,9 @@ k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
 
+folder-scan: ## Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
+	$(PYTHON) -c "import sys; from karaoke.cli import folder_scan_main; args=['$(DIR)']+(['--limit','$(LIMIT)'] if '$(LIMIT)' else [])+(['--dry-run'] if '$(DRY_RUN)' else []); raise SystemExit(folder_scan_main(args))"
+
 db-cleanup: ## Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 	$(PYTHON) scripts/db_cleanup.py
 
@@ -244,7 +247,18 @@ mq-port-forward: ## Expose the in-cluster RabbitMQ AMQP on localhost:5672 (manag
 	kubectl --context $(KUBE_CONTEXT) -n $(K8S_NAMESPACE) port-forward svc/rabbitmq 5672:5672 15672:15672
 
 postprocess-worker: ## Run the host-side post-processing worker (analysis + word-timing)
-	$(PYTHON) -m karaoke.postprocess_worker
+	KARAOKE_ORCHESTRATOR=legacy $(PYTHON) -m karaoke.postprocess_worker
+
+celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
+	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
+		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2} \
+		--events
+
+celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
+	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
+		-A karaoke.celery_app:app flower \
+		--address=$${FLOWER_HOST:-127.0.0.1} --port=$${FLOWER_PORT:-5555}
 
 postprocess-enqueue-all: ## Enqueue every track missing key/BPM or word-timing for post-processing
 	$(PYTHON) scripts/enqueue_postprocess.py
@@ -261,12 +275,23 @@ vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without wr
 health: ## Run the karaoke platform health check (services, ports, cluster, DB)
 	$(PYTHON) scripts/healthcheck.py
 
+webtui: web ## Alias for make web
+
+admin: ## Run the backend operations & worker management TUI
+	$(PYTHON) -m karaoke.admin_tui
+
+web: ## Serve the TUI in a web browser using textual-serve
+	$(PYTHON) scripts/web_serve.py
+
 systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
 	mkdir -p $(HOME)/.config/systemd/user
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-ctrl-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
-	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess@.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.slice $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.timer $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke.target $(HOME)/.config/systemd/user/
@@ -276,9 +301,10 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-postprocess
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
+	      $(HOME)/.config/systemd/user/karaoke-*.slice \
 	      $(HOME)/.config/systemd/user/karaoke.target
 	systemctl --user daemon-reload
 

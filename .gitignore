@@ -20,3 +20,6 @@ docs_confluence/
 *.webm
 .venv
 .venv-audio/
+
+# Hermes agent scratch (plans, local notes)
+.hermes/

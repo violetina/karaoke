@@ -1,0 +1,31 @@
+[Unit]
+Description=Karaoke Celery worker (post-processing workflows)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_ORCHESTRATOR=celery
+Environment=RABBITMQ_HOST=localhost
+# Pull YouTube cookies from Firefox so downloads/captions authenticate as you.
+Environment=KARAOKE_COOKIES_FROM_BROWSER=firefox
+# Analysis is librosa/numpy; cap thread pools and let Celery manage process concurrency.
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-postprocess-celery --loglevel=INFO --concurrency=2 --events
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-celery-worker
+
+# Background work must never starve playback.
+Nice=15
+Slice=karaoke-postprocess.slice
+
+[Install]
+WantedBy=karaoke.target

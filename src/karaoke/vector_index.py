@@ -274,64 +274,82 @@ def rebuild_from_sqlite(
     os_client: Any = None,
 ) -> VectorIndexStats:
     """Index SQLite tracks into OpenSearch; safe to re-run."""
-    from .osclient import client, ensure_index
+    # Production rebuilds touch the shared OpenSearch indexes and need a global
+    # lock. Explicit test/spike rebuilds against an explicit DB and either a
+    # fake client or dry-run are isolated; let them run even while a live Admin
+    # TUI rebuild holds the production lock.
+    isolated = db_path is not None and (dry_run or os_client is not None)
+    lock = None
+    if not isolated:
+        from .lockfile import ProcessLock
+        lock = ProcessLock("vector_rebuild")
+        if not lock.acquire():
+            from .logger import log
+            log.info("vector_index: rebuild lock held by another process; skipping concurrent run.")
+            return VectorIndexStats()
 
-    conn = localcache.connect(None if db_path is None else Path(db_path))
-    stats = VectorIndexStats()
     try:
-        rows = list(iter_track_rows(conn))
-        note_rows = list(localcache.iter_note_rows(conn)) if include_notes else []
-    finally:
-        conn.close()
+        from .osclient import client, ensure_index
 
-    if limit is not None:
-        rows = rows[:limit]
-
-    c = os_client if os_client is not None else (None if dry_run else client())
-    if c is not None:
-        ensure_index(c)
-        if include_lines:
-            ensure_line_index(c, f"{settings.index_name}-lines")
-        if include_notes:
-            ensure_note_index(c, f"{settings.index_name}-notes")
-
-    for row in rows:
-        stats.seen += 1
+        conn = localcache.connect(None if db_path is None else Path(db_path))
+        stats = VectorIndexStats()
         try:
-            doc = build_track_doc(row, embed=embed)
-            if dry_run:
-                stats.skipped += 1
-            else:
-                assert c is not None
-                c.index(index=settings.index_name, id=track_doc_id(row["track_id"]), body=doc)
-                stats.indexed += 1
+            rows = list(iter_track_rows(conn))
+            note_rows = list(localcache.iter_note_rows(conn)) if include_notes else []
+        finally:
+            conn.close()
+
+        if limit is not None:
+            rows = rows[:limit]
+
+        c = os_client if os_client is not None else (None if dry_run else client())
+        if c is not None:
+            ensure_index(c)
             if include_lines:
-                for _doc_id, line_doc in build_line_docs(row, embed=embed):
-                    stats.line_docs += 1
-                    if not dry_run:
-                        assert c is not None
-                        c.index(index=f"{settings.index_name}-lines", id=_doc_id, body=line_doc)
-        except Exception:
-            stats.errors += 1
+                ensure_line_index(c, f"{settings.index_name}-lines")
+            if include_notes:
+                ensure_note_index(c, f"{settings.index_name}-notes")
 
-    for note_row in note_rows:
-        try:
-            note_doc = build_note_doc(note_row, embed=embed)
-            stats.note_docs += 1
-            if not dry_run:
-                assert c is not None
-                c.index(index=f"{settings.index_name}-notes",
-                        id=note_doc_id(note_row["note_id"]), body=note_doc)
-        except Exception:
-            stats.errors += 1
+        for row in rows:
+            stats.seen += 1
+            try:
+                doc = build_track_doc(row, embed=embed)
+                if dry_run:
+                    stats.skipped += 1
+                else:
+                    assert c is not None
+                    c.index(index=settings.index_name, id=track_doc_id(row["track_id"]), body=doc)
+                    stats.indexed += 1
+                if include_lines:
+                    for _doc_id, line_doc in build_line_docs(row, embed=embed):
+                        stats.line_docs += 1
+                        if not dry_run:
+                            assert c is not None
+                            c.index(index=f"{settings.index_name}-lines", id=_doc_id, body=line_doc)
+            except Exception:
+                stats.errors += 1
 
-    if c is not None and not dry_run:
-        c.indices.refresh(index=settings.index_name)
-        if include_lines:
-            c.indices.refresh(index=f"{settings.index_name}-lines")
-        if include_notes:
-            c.indices.refresh(index=f"{settings.index_name}-notes")
-    return stats
+        for note_row in note_rows:
+            try:
+                note_doc = build_note_doc(note_row, embed=embed)
+                stats.note_docs += 1
+                if not dry_run:
+                    assert c is not None
+                    c.index(index=f"{settings.index_name}-notes",
+                            id=note_doc_id(note_row["note_id"]), body=note_doc)
+            except Exception:
+                stats.errors += 1
+
+        if c is not None and not dry_run:
+            c.indices.refresh(index=settings.index_name)
+            if include_lines:
+                c.indices.refresh(index=f"{settings.index_name}-lines")
+            if include_notes:
+                c.indices.refresh(index=f"{settings.index_name}-notes")
+        return stats
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def vector_index_main(argv: Optional[list[str]] = None) -> int:

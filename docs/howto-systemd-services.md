@@ -13,7 +13,10 @@ stack every 5 minutes.
 | `karaoke-api.service` | FastAPI library backend (read-only tracks/lyrics/stats) | 8000 |
 | `karaoke-ctrl-api.service` | Host-side playback control API (opens browser/Spotify) | 8765 |
 | `karaoke-mq-forward.service` | `kubectl port-forward` for in-cluster RabbitMQ | 5672 / 15672 |
-| `karaoke-postprocess.service` | Post-processing worker (key/BPM + word-timing) | — |
+| `karaoke-celery-worker.service` | Celery post-processing worker (key/BPM + word-timing workflow tasks) | — |
+| `karaoke-celery-flower.service` | Flower dashboard for Celery tasks/workers | 5555 |
+| `karaoke-postprocess@1..6.service` | Legacy pika post-processing workers (rollback/manual debugging) | — |
+| `karaoke-postprocess.slice` | Shared CPU/memory cap for all worker instances | — |
 | `karaoke-healthcheck.service` | One-shot health probe (run by the timer) | — |
 | `karaoke-healthcheck.timer` | Fires the health check every 5 min | — |
 | `karaoke.target` | Umbrella — start/stop all of the above at once | — |
@@ -37,13 +40,38 @@ make systemd-uninstall # stop + remove the units
 platform comes back after a reboot/login. (For it to run without you being
 logged in, enable lingering once: `loginctl enable-linger $USER`.)
 
+## Post-processing runners
+
+`karaoke.target` starts `karaoke-celery-worker.service` and
+`karaoke-celery-flower.service`. Celery consumes the RabbitMQ-backed
+`karaoke-postprocess-celery` queue, gives every task retry/backoff/visibility,
+stores task results in `~/.local/share/karaoke/celery-results.sqlite`, and Flower
+exposes the dashboard at http://127.0.0.1:5555.
+
+The legacy `karaoke-postprocess@.service` template is still installed for
+rollback/manual debugging (`KARAOKE_ORCHESTRATOR=legacy`) but is no longer started
+by `karaoke.target`.
+
+The Celery worker runs in `karaoke-postprocess.slice`, currently capped at
+`CPUQuota=600%` with low CPU/IO weight, so background analysis does not starve
+browser playback.
+
+Useful controls:
+
+```bash
+systemctl --user start karaoke-celery-worker karaoke-celery-flower
+systemctl --user stop karaoke-celery-worker karaoke-celery-flower
+systemctl --user status karaoke-postprocess.slice
+```
+
 ## Logs (journald)
 
 Every service logs to the journal under its `SyslogIdentifier`:
 
 ```bash
 journalctl --user -u karaoke-api -f                 # follow the library API
-journalctl --user -u karaoke-postprocess -f         # follow the worker
+journalctl --user -u karaoke-celery-worker -f       # follow Celery worker
+journalctl --user -u karaoke-celery-flower -f       # follow Flower dashboard
 journalctl --user -u karaoke-healthcheck -n 20      # recent health reports
 journalctl --user -u 'karaoke-*' --since '10 min ago'  # everything, last 10 min
 ```
@@ -91,7 +119,12 @@ Units read the same env vars as the app; override per-unit with
 |---|---|---|
 | `KARAOKE_API_PORT` | `8000` | library API |
 | `KARAOKE_CTRL_PORT` | `8765` | control API |
-| `RABBITMQ_HOST` | `localhost` | worker |
+| `RABBITMQ_HOST` | `localhost` | worker, Flower |
+| `KARAOKE_ORCHESTRATOR` | `celery` | publisher/worker selection (`legacy` rolls back to pika) |
+| `KARAOKE_CELERY_POSTPROCESS_QUEUE` | `karaoke-postprocess-celery` | Celery worker queue |
+| `CELERY_RESULT_BACKEND` | SQLite result DB | persistent Celery result backend override |
+| `KARAOKE_CELERY_RESULT_DB` | `~/.local/share/karaoke/celery-results.sqlite` | default SQLite result DB |
+| `KARAOKE_CELERY_RESULT_EXPIRES` | `604800` | result retention seconds |
 | `KARAOKE_COOKIES_FROM_BROWSER` | `firefox` | worker (YouTube auth) |
 | `KUBE_CONTEXT` | `kind-karaoke` | port-forward, health check |
 | `K8S_NAMESPACE` | `karaoke` | port-forward, health check |

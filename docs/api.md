@@ -66,27 +66,51 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.beats
 
-## `GET /api/workers`
+## `GET /api/workers/status`
 
-Post-processing worker and queue statistics, so the pipeline can be monitored
-without screen-scraping the TUI.
+Celery worker, queue and Flower dashboard status. Allows monitoring the
+post-processing pipeline without screen-scraping the TUI.
 
 ```json
 {
+  "orchestrator": "celery",
   "available": true,
-  "queue":   {"name": "karaoke-postprocess", "ready": 0, "unacked": 0,
-              "queued": 0, "consumers": 12, "deliver_rate": 0.0,
-              "publish_rate": 0.0, "busy": false},
-  "workers": {"count": 12, "running": true, "pids": [509910, "..."],
-              "cpu_percent": 0.0, "rss_mb": 674.6}
+  "dashboard_url": "http://127.0.0.1:5555",
+  "workers_active": 1,
+  "queue_depth": 0,
+  "queue_details": {
+    "name": "karaoke-postprocess-celery",
+    "messages": 0,
+    "messages_ready": 0,
+    "messages_unacknowledged": 0,
+    "consumers": 1
+  },
+  "worker_details": [
+    {
+      "unit": "karaoke-celery-worker.service",
+      "active": "active",
+      "running": true
+    }
+  ]
 }
 ```
 
-CPU and memory are **summed across every worker** — they scale horizontally
-(`systemctl --user start karaoke-postprocess@{1..12}`), so one worker's usage
-would understate the fleet.
+The `orchestrator` field indicates the active backend (`celery` or `legacy`).
+`available: false` means RabbitMQ is unreachable or no workers are running; a
+`reason` field is also present on failure. CPU and memory metrics are no
+longer exposed via this API directly.
 
-Best-effort by design: if RabbitMQ is unreachable, or the workers run on
-another host (in a container `/proc` shows none of them), the response is
-`200` with `available: false` and a `reason`. A broker outage cannot take the
-library endpoints down with it.
+### `POST /api/workers/scale`
+
+Scales the Celery worker pool (starts/stops `karaoke-celery-worker.service`).
+
+Request body:
+
+```json
+{
+  "target": 1
+}
+```
+
+`target` (integer): Desired number of active workers. `0` stops the worker;
+`1` (or higher) starts it. Returns `200 OK` on success.

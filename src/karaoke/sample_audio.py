@@ -254,6 +254,7 @@ def analyse_sample(sample: Sample, artist: str = "", title: str = "",
                 energy=result.energy,
                 brightness=result.brightness,
                 analyzer_version=result.version,
+                source_kind="sample",
                 conn=c,
             )
             _label_genre(track_id, sample.path, c)

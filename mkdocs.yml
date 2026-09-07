@@ -60,14 +60,20 @@ extra_javascript:
 
 nav:
   - Overview: index.md
+  - Quickstart runbook: howto-quickstart-runbook.md
   - Architecture: architecture.md
   - Cache schema: cache-schema.md
   - Local cache and stats: local-cache-and-stats.md
   - API reference: api.md
+  - Control API: control-api.md
+  - systemd services: howto-systemd-services.md
+  - Post-processing: howto-post-processing.md
+  - Event hooks: howto-events.md
   - Workflow poc: workflow.md
   - Makefile targets: makefile-targets.md
   - Flows: flows.md
   - The TUI: tui.md
+  - Web TUI: web-tui.md
   - TUI visuals: tui-visuals.md
   - Modes:
       - Overview: modes/index.md

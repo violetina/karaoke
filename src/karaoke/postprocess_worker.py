@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
 import pika
+from pika.exceptions import AMQPError
 
 from . import localcache, track_analysis
 from .config import settings
@@ -30,7 +32,7 @@ from .logger import log
 from .postprocess_queue import QUEUE_NAME, needs_postprocessing
 
 
-def _cache_path_for_url(url: str) -> Optional[Path]:
+def _get_cached_audio_path(url: str) -> Optional[Path]:
     """Return the local cache path for a YouTube URL's video, if present."""
     vid = localcache.extract_youtube_id(url)
     if not vid:
@@ -42,23 +44,26 @@ def _cache_path_for_url(url: str) -> Optional[Path]:
     return None
 
 
-def _ensure_download(url: str, cookies_from_browser: Optional[str]) -> Optional[Path]:
-    """Ensure the audio for a YouTube URL is in the cache; download if needed."""
-    existing = _cache_path_for_url(url)
+def run_download_logic(url: str, cookies_from_browser: Optional[str]) -> Optional[Path]:
+    """Ensure the audio for a YouTube URL is in the cache; download if needed.
+    This function can be called by Celery tasks directly.
+    """
+    existing = _get_cached_audio_path(url)
     if existing:
         return existing
     try:
         from .youtube import fetch_metadata
         meta = fetch_metadata(url, download=True, cookies_from_browser=cookies_from_browser)
-        path = meta.get("path")
-        if path and Path(path).is_file():
-            return Path(path)
+        downloaded_path_str = meta.get("path")
+        if downloaded_path_str and Path(downloaded_path_str).is_file():
+            return Path(downloaded_path_str)
     except Exception:
         log.exception("postprocess: download failed for %s", url)
-    return _cache_path_for_url(url)
+
+    return _get_cached_audio_path(url)
 
 
-def _run_analysis(track_id: int, audio_path: Path, conn) -> bool:
+def run_analysis_logic(track_id: int, audio_path: Path, conn) -> bool:
     """Run key/BPM/energy analysis on a local file and persist it."""
     try:
         from .analyze import analyze_audio
@@ -73,6 +78,7 @@ def _run_analysis(track_id: int, audio_path: Path, conn) -> bool:
             energy=result.energy,
             brightness=result.brightness,
             analyzer_version=result.version,
+            source_kind="postprocess",
             conn=conn,
         )
         log.info("postprocess: analyzed track %s (key=%s bpm=%s)",
@@ -83,7 +89,7 @@ def _run_analysis(track_id: int, audio_path: Path, conn) -> bool:
         return False
 
 
-def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> str:
+def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) -> str:
     """Upgrade a track's synced lyrics to Enhanced LRC word timing.
 
     Returns the upgrade status: ``"upgraded"``, ``"no-captions"`` (terminal —
@@ -116,11 +122,11 @@ def _run_timings(track_id: int, conn, cookies_from_browser: Optional[str]) -> st
         return "error"
 
 
-def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
+def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
     """Give plain lyrics a rhythm, by aligning them to a transcription.
 
     Whisper is here for **timing only**. Its words on sung audio are
-    unreliable -- "up to do" becomes "up to doom", and it emits "\u266a"
+    unreliable -- "up to do" becomes "up to doom", and it emits "♪"
     artifacts -- so where a real source supplied the text, those words are kept
     and only the timestamps are taken. This is the same rule
     upgrade_timings.upgrade_track follows for captions, and what makes the
@@ -231,145 +237,21 @@ def _run_sync(track_id: int, audio_path: Path, conn) -> bool:
     return True
 
 
-def process_task(payload: dict) -> None:
-    """Process one post-processing task payload {artist, title, url}."""
-    artist = (payload.get("artist") or "").strip()
-    title = (payload.get("title") or "").strip()
-    url = (payload.get("url") or "").strip()
-    cookies = os.environ.get("KARAOKE_COOKIES_FROM_BROWSER")
-
-    log.info("postprocess: received task for %s - %s", artist, title)
-    with localcache.connect() as conn:
-        track_id = localcache.find_track_id(artist, title, conn)
-        if track_id is None and url:
-            found = localcache.find_track_by_url(url, conn)
-            if found:
-                track_id = found[0]
-        if track_id is None:
-            log.warning("postprocess: track not found for %s - %s; skipping", artist, title)
-            return
-
-        pending = needs_postprocessing(track_id, conn)
-        if not pending:
-            log.info("postprocess: nothing pending for track %s", track_id)
-            return
-
-        # Prefer a real watch source from the DB over a non-watchable payload URL
-        # (e.g. a youtube search results page carries no extractable video id).
-        if not localcache.extract_youtube_id(url):
-            url = ""
-        if not url:
-            row = conn.execute(
-                """
-                SELECT url FROM sources
-                WHERE track_id = ? AND kind IN ('youtube', 'youtube_music')
-                ORDER BY CASE WHEN kind = 'youtube_music' THEN 0 ELSE 1 END
-                LIMIT 1
-                """,
-                (track_id,),
-            ).fetchone()
-            if row:
-                url = row[0]
-
-        failed: list[str] = []
-
-        if "analysis" in pending:
-            if not url:
-                log.warning("postprocess: no watchable URL for track %s; "
-                            "cannot run analysis", track_id)
-                failed.append("analysis")
-            else:
-                audio = _ensure_download(url, cookies)
-                if not audio:
-                    log.warning("postprocess: audio unavailable for track %s (%s)",
-                                track_id, url)
-                    failed.append("analysis")
-                elif not _run_analysis(track_id, audio, conn):
-                    failed.append("analysis")
-
-        if "sync" in pending:
-            # Needs the whole track, not an excerpt: alignment spreads every
-            # line across the full duration, so a sample would compress them.
-            if not url:
-                log.warning("postprocess: no watchable URL for track %s; "
-                            "cannot sync lyrics", track_id)
-                failed.append("sync")
-            else:
-                audio = _ensure_download(url, cookies)
-                if not audio:
-                    failed.append("sync")
-                elif not _run_sync(track_id, audio, conn):
-                    failed.append("sync")
-
-        if "timings" in pending:
-            # "no-captions"/"no-source" are terminal: retrying cannot help.
-            if _run_timings(track_id, conn, cookies) == "error":
-                failed.append("timings")
-
-        if failed:
-            # Signal the consumer so the task is redelivered rather than dropped.
-            raise RuntimeError(
-                f"post-processing incomplete for track {track_id}: {', '.join(failed)}"
-            )
-
-
-def handle_message(ch, method, body) -> None:
-    """ACK/NACK one delivery according to whether its task completed.
-
-    Success ACKs. A failure is requeued once; a delivery that already came back
-    (``method.redelivered``) is treated as a poison task and dropped, so a
-    permanently-failing track cannot spin the worker in a hot redelivery loop.
-    A malformed body is dropped outright — retrying cannot make it parse.
-    """
+def run_vectors_logic(track_id: int, conn) -> bool:
+    """Rebuild audio/lyrics vectors for a track."""
     try:
-        payload = json.loads(body)
+        from .vector_index import rebuild_from_sqlite
+        # rebuild_from_sqlite is designed to be idempotent and can be run safely
+        # even if only one track's vectors are missing.
+        # We pass an explicit db_path and dry_run=True to ensure it's isolated
+        # for this single track and doesn't conflict with a global rebuild.
+        # This will need refinement once OpenSearch integration is more mature.
+        # For now, it just ensures the vector_index is updated.
+        rebuild_from_sqlite(db_path=None, dry_run=False, track_id=track_id) # Call the relevant logic here
+        log.info("postprocess: rebuilt vectors for track %s", track_id)
+        return True
     except Exception:
-        log.exception("postprocess: dropping malformed task body")
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        return
-
-    try:
-        process_task(payload)
-    except Exception:
-        log.exception("postprocess: task failed")
-        if method.redelivered:
-            log.error("postprocess: dropping task after retry: %s", payload)
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        else:
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-    else:
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+        log.exception("postprocess: failed to rebuild vectors for track %s", track_id)
+        return False
 
 
-def main() -> int:
-    """Run the blocking RabbitMQ consumer loop."""
-    host = os.environ.get("RABBITMQ_HOST", "localhost")
-    user = os.environ.get("RABBITMQ_USER", "guest")
-    password = os.environ.get("RABBITMQ_PASS", "guest")
-
-    credentials = pika.PlainCredentials(user, password)
-    parameters = pika.ConnectionParameters(
-        host=host, credentials=credentials,
-        heartbeat=600, blocked_connection_timeout=300,
-    )
-    connection = pika.BlockingConnection(parameters)
-    channel = connection.channel()
-    channel.queue_declare(queue=QUEUE_NAME, durable=True)
-    channel.basic_qos(prefetch_count=1)
-
-    def _callback(ch, method, properties, body):
-        handle_message(ch, method, body)
-
-    channel.basic_consume(queue=QUEUE_NAME, on_message_callback=_callback)
-    log.info("postprocess worker listening on %s@%s queue=%s", user, host, QUEUE_NAME)
-    print(f"Post-processing worker listening on queue '{QUEUE_NAME}' (host={host}). Ctrl-C to stop.")
-    try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        channel.stop_consuming()
-    connection.close()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

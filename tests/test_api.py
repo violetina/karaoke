@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from karaoke import api as api_mod
 from karaoke import ctrl_api as ctrl_mod
 from karaoke import localcache
+from karaoke import track_analysis
+from karaoke.musictheory import Key
 
 # Capture the real connect() before monkeypatching to avoid infinite recursion.
 _real_connect = localcache.connect
@@ -86,6 +88,26 @@ def test_get_track_detail_includes_sources(db, client):
     assert body["sources"][0]["url"] == "https://youtu.be/XFkzRNyygfk"
 
 
+def test_get_track_analysis_history(db, client):
+    db_path, track_id = db
+    conn = _real_connect(db_path)
+    try:
+        track_analysis.save_detected(
+            track_id, detected_key=Key(9, "minor"), bpm=92.0,
+            method="essentia-edma-vote+sample", conn=conn,
+        )
+    finally:
+        conn.close()
+
+    resp = client.get(f"/api/tracks/{track_id}/analysis/history")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["track_id"] == track_id
+    assert body["count"] == 1
+    assert body["history"][0]["detected_key"] == "A minor"
+    assert body["history"][0]["method"] == "essentia-edma-vote+sample"
+
+
 def test_get_track_missing_returns_404(db, client):
     assert client.get("/api/tracks/999999").status_code == 404
 
@@ -140,27 +162,30 @@ def test_ctrl_play_launches_url(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "karaoke.ctrl_api.open_song_url",
-        lambda url, kind: calls.append((url, kind)) or 4242,
+        lambda url, kind, **kwargs: calls.append((url, kind, kwargs)) or 4242,
     )
     resp = TestClient(ctrl_mod.app).post(
         "/api/play", json={"url": "https://youtu.be/abc", "kind": "youtube"}
     )
     assert resp.status_code == 200
     assert resp.json()["pid"] == 4242
-    assert calls == [("https://youtu.be/abc", "youtube")]
+    assert resp.json()["session_id"].startswith("play_")
+    assert calls[0][0:2] == ("https://youtu.be/abc", "youtube")
+    assert calls[0][2]["prefer_audio"] is True
 
 
 def test_ctrl_play_falls_back_to_youtube_search(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "karaoke.ctrl_api.open_song_url",
-        lambda url, kind: captured.update(url=url, kind=kind) or 1,
+        lambda url, kind, **kwargs: captured.update(url=url, kind=kind, kwargs=kwargs) or 1,
     )
     resp = TestClient(ctrl_mod.app).post(
         "/api/play", json={"artist": "Radiohead", "title": "Creep"}
     )
     assert resp.status_code == 200
-    assert captured["kind"] == "youtube_search"
+    assert captured["kind"] == "youtube_music_search"
+    assert "music.youtube.com/search" in captured["url"]
     assert "Radiohead" in captured["url"]
 
 
@@ -169,7 +194,7 @@ def test_ctrl_play_requires_some_input():
 
 
 def test_ctrl_play_surfaces_launch_failure(monkeypatch):
-    def boom(url, kind):
+    def boom(url, kind, **kwargs):
         raise RuntimeError("no display")
 
     monkeypatch.setattr("karaoke.ctrl_api.open_song_url", boom)

@@ -40,12 +40,35 @@ go stale. The ones worth knowing:
 | key | does |
 |---|---|
 | `H` | library overlay; picking a song closes it |
+| `-` `/` `+` | adjust mood energy slider floor (real-time filtering) |
+| `a` | enqueue highlighted track to end of active queue |
+| `U` | shuffle upcoming queue items |
+| `C` | clear active queue |
 | `F` | focus mode — hides everything but the lyrics |
 | `R` | mic/radio mode (songrec) |
 | `A` | queue the playing track for post-processing |
 | `T` | stats — library, pipeline, listening, keys, tempo |
 | `?` | key reference |
 | `,` `.` | nudge lyric sync ∓0.1s, `S` saves it for that track |
+
+## Library, Mood Slider & Playlist Controls
+
+- **Interactive Mood Slider (`-` / `+` / `m`)**: Sidebar slider `energy ≥ 30% [███░░░░░░░] -/+` dynamically sets the energy floor and filters both the library list and search results in real time.
+- **Sort Selector**: Sort tracks by `Artist / Title (A-Z)`, `🌱 Priority: Least Played`, `⭐ Most Played`, `Energy (high→low)`, `Energy (low→high)`, `BPM (fast→slow)`, `BPM (slow→fast)`, or `Key`. Play counts are stored per track (`tracks.play_count`, incremented on every play/discover event) so "least played" surfaces undiscovered tracks first.
+- **Genre & Feeling Column**: Displays CLAP zero-shot genre label + acoustic feeling glyph (`Genre/Feel` e.g. `hip hop 🌙`, `rock 🔥`, `pop ⚡`). Feeling is derived from energy (arousal) and brightness (valence proxy): 🔥/☀/⚡/🌗/♡/🌙.
+- **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear queue (`C`), Play-once auto-advance (`o`).
+- **Keep the vibe going** (`G`): appends tracks that fit the *whole* current queue. Seeds on every queued track by audio similarity (CLAP embedding, with a per-seed spectral fallback), pools the neighbours, and adds the ones closest to the set — a track that fits several queued songs outranks one that only resembles a single outlier. Already-queued tracks are skipped and each artist is capped. Needs the OpenSearch audio/CLAP indexes; if no seed has a vector it reports that instead of adding anything.
+
+## Operations & Admin Dashboard (`make admin`)
+
+Launch with `make admin` or `python -m karaoke.admin_tui`:
+- **Worker Management**: Real-time controls for the Celery post-processing worker (`+` start, `-` stop, `R` restart) plus Flower dashboard visibility at http://127.0.0.1:5555. Falls back to querying `systemctl --user` directly if the control API is unreachable.
+- **Audio Processing & Vector Ingestion Pipeline**:
+  - `b` — Run audio backfill (`scripts/fill_analysis_and_vector_gaps.py`): fills key/BPM/energy gaps and CLAP genre labels.
+  - `v` — Rebuild OpenSearch vector indices (`tracks`, `tracks-lines`).
+  - `a` — Analyse captured recordings and ingest detected-song vectors.
+- **Error Log Diagnostics**: Real-time exception & traceback viewer for worker and backend troubleshooting.
+- **Folder Scan & Ingestion**: Trigger folder scans or file ingestion directly from the Operations dashboard.
 
 ## Making the lyrics bigger
 

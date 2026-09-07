@@ -32,50 +32,198 @@ def _cdp_page_socket(timeout: float = 1.0) -> "str | None":
     return None
 
 
-def _cdp_send(method: str, params: dict, *, timeout: float = 2.0):
-    """Send one CDP command and return its result, or None.
+class _CdpChannel:
+    """One CDP connection on one thread, reused by every caller.
 
-    Runs the socket work on its own thread with ``asyncio.run``: the callers
-    here are Textual workers and timers that may already have a running event
-    loop, which ``asyncio.run`` refuses to nest.
+    The previous version ran each command in a fresh thread with
+    ``asyncio.run`` and then abandoned that thread on timeout::
+
+        thread.start()
+        thread.join(timeout=timeout + 1.5)   # gives up
+        return out.get("reply")              # ...and walks away
+
+    A thread that outlives the join keeps a whole event loop alive, and
+    :func:`browser_playback` is called from a two-second timer, so every slow
+    reply from Chromium leaked one. Observed in a live TUI: **46 stranded
+    ``asyncio`` threads**, which on a 24-core box cannot even come from one
+    executor -- its cap is 28 -- so they were 46 separate loops.
+
+    They cost more than memory. Quitting joins them, and anyio replaces
+    CPython's bounded wait with ``thread.join()`` carrying no timeout at all
+    (``anyio/_backends/_asyncio.py``), so the 300-second warning fires and then
+    shutdown blocks for good. That is issue #39.
+
+    One connection, one thread, so there is nothing left to strand. A caller
+    that times out gives up on its *reply*; the thread stays and serves the
+    next request. Commands are serialised by an ``asyncio.Lock`` held inside
+    the loop rather than a lock held across threads, so a slow reply delays
+    other callers only as far as their own timeouts.
     """
-    import asyncio
-    import json
-    import threading
 
-    ws_url = _cdp_page_socket()
-    if not ws_url:
-        return None
-    try:
+    def __init__(self) -> None:
+        import itertools
+        import threading
+
+        self._start_lock = threading.Lock()
+        self._loop = None
+        self._thread = None
+        self._ws = None
+        self._send_lock = None
+        self._ids = itertools.count(1)
+
+    # -- the loop thread ---------------------------------------------------
+
+    def _ensure_loop(self):
+        """The channel's event loop, started on first use."""
+        import asyncio
+        import threading
+
+        with self._start_lock:
+            if self._loop is not None and self._thread.is_alive():
+                return self._loop
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever, name="cdp", daemon=True)
+            thread.start()
+            self._loop, self._thread = loop, thread
+            self._ws, self._send_lock = None, None
+            return loop
+
+    # -- the connection ----------------------------------------------------
+
+    async def _connection(self):
+        """The open socket, reconnecting if the browser dropped it."""
         import websockets
-    except ImportError:
-        log.debug("websockets not installed; CDP unavailable")
-        return None
 
-    out: dict = {}
+        if self._ws is not None:
+            # Chromium drops the socket when the page navigates away, and a
+            # send on a dead one raises rather than returning.
+            if getattr(self._ws, "close_code", None) is not None:
+                self._ws = None
+            else:
+                try:
+                    await self._ws.ping()
+                    return self._ws
+                except Exception:
+                    self._ws = None
 
-    async def send():
-        async with websockets.connect(ws_url) as ws:
-            await ws.send(json.dumps({"id": 1, "method": method, "params": params}))
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            out["reply"] = json.loads(raw)
+        url = _cdp_page_socket()
+        if not url:
+            return None
+        self._ws = await websockets.connect(url)
+        return self._ws
 
-    def run() -> None:
+    async def _request(self, method: str, params: dict, timeout: float):
+        import asyncio
+        import json
+
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+
+        async with self._send_lock:
+            ws = await self._connection()
+            if ws is None:
+                return None
+            request_id = next(self._ids)
+            await ws.send(json.dumps(
+                {"id": request_id, "method": method, "params": params}))
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return None
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                message = json.loads(raw)
+                # CDP interleaves unsolicited events with replies; only a
+                # matching id answers this call.
+                if message.get("id") == request_id:
+                    return message
+
+    def send(self, method: str, params: dict, timeout: float = 2.0):
+        """Run one command, or return None."""
+        import asyncio
+
         try:
-            asyncio.run(send())
-        except Exception:
-            log.debug("CDP %s failed", method, exc_info=True)
+            import websockets  # noqa: F401
+        except ImportError:
+            log.debug("websockets not installed; CDP unavailable")
+            return None
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout + 1.5)
-    return out.get("reply")
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._request(method, params, timeout), loop)
+        try:
+            return future.result(timeout=timeout + 1.5)
+        except Exception:
+            # Cancelling matters: it releases the lock and drops the socket
+            # rather than leaving the next caller behind a dead request.
+            future.cancel()
+            self._drop()
+            log.debug("CDP %s failed", method, exc_info=True)
+            return None
+
+    def _drop(self) -> None:
+        """Forget the socket so the next call reconnects."""
+        import asyncio
+
+        ws, self._ws = self._ws, None
+        if ws is not None and self._loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), self._loop)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Stop the loop and its thread. Safe to call more than once."""
+        with self._start_lock:
+            loop, thread = self._loop, self._thread
+            self._loop, self._thread, self._ws = None, None, None
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+
+_CHANNEL = _CdpChannel()
+
+
+def _cdp_send(method: str, params: dict, *, timeout: float = 2.0):
+    """Send one CDP command and return its result, or None."""
+    return _CHANNEL.send(method, params, timeout=timeout)
+
+
+def close_cdp() -> None:
+    """Shut the shared CDP connection down, for use when an app exits."""
+    _CHANNEL.close()
+
+
+_BYPASS_BEFOREUNLOAD_JS = """(() => {
+  try {
+    window.onbeforeunload = null;
+    window.onpagehide = null;
+  } catch (e) {}
+})()"""
 
 
 def try_chrome_cdp_navigate(url: str) -> bool:
-    """Navigate the existing kiosk window to a URL. True on success."""
+    """Navigate the existing kiosk window to a URL, bypassing beforeunload prompts."""
+    _cdp_send("Runtime.evaluate", {"expression": _BYPASS_BEFOREUNLOAD_JS})
+    _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+
     reply = _cdp_send("Page.navigate", {"url": url})
-    return reply is not None
+    if reply is not None:
+        _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+        return True
+
+    reply_js = _cdp_send(
+        "Runtime.evaluate",
+        {"expression": f"window.onbeforeunload = null; window.location.href = '{url}';"}
+    )
+    return reply_js is not None
 
 
 # Reads the page's own <video> element. MPRIS reports a position but not
@@ -134,18 +282,7 @@ def track_finished(state: "dict | None", *, tail: float = 1.5) -> bool:
 
 
 def track_idle(state: "dict | None") -> bool:
-    """Whether the element holds nothing that could ever play.
-
-    YouTube Music keeps a ``<video>`` on every page, including artist and
-    search pages, so navigating off a watch URL leaves an element that is
-    present but empty. That state never satisfies :func:`track_finished` --
-    it has no duration and will never set ``ended`` -- so a queue waiting for
-    the track to end waits forever. ``readyState`` is what separates the two:
-    a live stream also reports no duration, but it has data.
-
-    Idle is not the same as finished: a watch URL reads as idle for a moment
-    while it loads. Callers must see it hold before acting on it.
-    """
+    """Whether the element holds nothing that could ever play."""
     if not state or not state.get("present"):
         return False
     if state.get("ended"):
@@ -155,6 +292,49 @@ def track_idle(state: "dict | None") -> bool:
     except (TypeError, ValueError):
         return False
     return ready == 0  # HAVE_NOTHING: no source loaded at all
+
+
+def get_window_bounds() -> "dict | None":
+    """Get the Chrome browser window ID and geometry/state over CDP."""
+    reply = _cdp_send("Browser.getWindowForTarget", {})
+    if reply and "result" in reply:
+        return reply["result"]
+    return None
+
+
+def set_window_bounds(
+    *,
+    state: "str | None" = None,
+    left: "int | None" = None,
+    top: "int | None" = None,
+    width: "int | None" = None,
+    height: "int | None" = None,
+) -> bool:
+    """Set Chrome browser window state ('normal', 'minimized', 'maximized', 'fullscreen') or bounds."""
+    info = get_window_bounds()
+    if not info or "windowId" not in info:
+        return False
+    window_id = info["windowId"]
+    bounds = {}
+    if state:
+        bounds["windowState"] = state
+    if left is not None:
+        bounds["left"] = left
+    if top is not None:
+        bounds["top"] = top
+    if width is not None:
+        bounds["width"] = width
+    if height is not None:
+        bounds["height"] = height
+
+    reply = _cdp_send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+    return reply is not None
+
+
+def bring_to_front() -> bool:
+    """Bring the active Chrome page tab to front."""
+    reply = _cdp_send("Page.bringToFront", {})
+    return reply is not None
 
 
 def _kiosk_mpris_names(names: "list[str]") -> "set[str]":
@@ -178,11 +358,47 @@ def _kiosk_mpris_names(names: "list[str]") -> "set[str]":
     return kiosk
 
 
-def open_song_url(url: str, kind: str | None) -> int | None:
+def launch_kiosk_browser(url: str = "https://music.youtube.com") -> bool:
+    """Launch Google Chrome in kiosk debugging mode (:9222) if down."""
+    import os
+    import shutil
+    import time
+
+    if _cdp_page_socket() is not None:
+        return True
+
+    chrome = os.environ.get("CHROME", "google-chrome-stable")
+    if not shutil.which(chrome):
+        chrome = "google-chrome"
+        if not shutil.which(chrome):
+            return False
+
+    profile = os.path.expanduser("~/.local/share/karaoke/kiosk-chrome")
+    cmd = [
+        chrome,
+        f"--app={url}",
+        f"--remote-debugging-port={CDP_PORT}",
+        f"--user-data-dir={profile}",
+    ]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.2)
+        return _cdp_page_socket() is not None
+    except Exception:
+        return False
+
+
+def open_song_url(url: str, kind: str | None, *, artist: str = "",
+                  title: str = "", prefer_audio: bool = True) -> int | None:
     """Open a song URL and return the spawned process id when applicable.
 
     YouTube/browser URLs are opened asynchronously so the TUI remains responsive.
     stdout/stderr are captured to log files so xdg-open failures are debuggable.
+
+    ``prefer_audio`` deliberately opens YouTube/YT Music through a Music search
+    when artist/title are known. A bare ``music.youtube.com/watch?v=...`` can
+    land on the video side for official videos, which is often out of sync with
+    the album audio; search lets YouTube Music resolve the canonical audio track.
     """
     # Pause any other active players first so audio does not overlap!
     try:
@@ -220,27 +436,38 @@ def open_song_url(url: str, kind: str | None) -> int | None:
             url = f"https://open.spotify.com/track/{track_id}"
         kind = "spotify_web"
 
-    # Automatically upgrade standard YouTube links to YouTube Music links for superior audio
-    if kind == "youtube" or "youtube.com" in url.lower() or "youtu.be" in url.lower():
+    # Automatically upgrade standard YouTube links to YouTube Music audio. When
+    # the caller knows artist/title, prefer a Music search rather than a direct
+    # watch URL: direct watch links can land on the video side, and those clips
+    # are often out of sync with the album/audio track.
+    is_youtube = kind in ("youtube", "youtube_music", "youtube_search", "youtube_music_search") or "youtube.com" in url.lower() or "youtu.be" in url.lower()
+    if is_youtube:
         from .localcache import extract_youtube_id
         vid = extract_youtube_id(url)
         if vid:
+            # Direct watch link in YouTube Music plays immediately!
             url = f"https://music.youtube.com/watch?v={vid}"
             kind = "youtube_music"
+        elif prefer_audio and f"{artist} {title}".strip():
+            from urllib.parse import quote_plus
+            search_query = f"{artist} {title}".strip()
+            url = f"https://music.youtube.com/search?q={quote_plus(search_query)}"
+            kind = "youtube_music_search"
         elif "/results?search_query=" in url:
-            # A search URL has no video id to convert, but its query does carry
-            # over — so the no-URL fallback lands in the same player as
-            # everything else instead of dropping the user into plain YouTube.
-            from urllib.parse import parse_qs, quote_plus, urlparse
+            from urllib.parse import parse_qs, urlparse, quote_plus
             query = parse_qs(urlparse(url).query).get("search_query", [""])[0]
             if query:
                 url = f"https://music.youtube.com/search?q={quote_plus(query)}"
                 kind = "youtube_music_search"
 
-    # Try to navigate an active kiosk/debugging browser first to avoid tab clutter!
+    # Try to navigate an active kiosk/debugging browser first, or launch it if down!
     if try_chrome_cdp_navigate(url):
         log.info("Navigated active kiosk-mode Chrome via CDP: %s", url)
         return None
+    elif launch_kiosk_browser(url):
+        if try_chrome_cdp_navigate(url):
+            log.info("Launched kiosk-mode Chrome and navigated via CDP: %s", url)
+            return None
 
     OPEN_STDOUT_LOG.parent.mkdir(parents=True, exist_ok=True)
     stdout = OPEN_STDOUT_LOG.open("ab")

@@ -142,3 +142,54 @@ def identify_live(mic: bool = True, timeout: int = 30,
         offset=offset,
         offset_mono=mono if offset is not None else None,
     )
+
+
+def identify_file_fingerprint(path: str | Path, duration_s: float = 10.0) -> Optional[SongRef]:
+    """Fingerprint a local audio file using songrec / Shazam.
+
+    Extracts a short audio slice via ffmpeg and feeds it to `songrec recognize -j`.
+    Returns None if songrec/ffmpeg is not installed, or if the file cannot be recognized.
+    """
+    if not shutil.which("songrec") or not shutil.which("ffmpeg"):
+        return None
+
+    p = Path(path)
+    if not p.is_file():
+        return None
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        slice_wav = Path(tmp) / "sample.wav"
+        cmd_cut = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(p), "-ss", "10", "-t", str(duration_s),
+            "-ac", "1", "-ar", "16000", str(slice_wav),
+        ]
+        try:
+            subprocess.run(cmd_cut, capture_output=True, check=True, timeout=15)
+        except Exception:
+            return None
+
+        cmd_rec = ["songrec", "recognize", "-d", str(slice_wav), "-j"]
+        try:
+            out = subprocess.run(cmd_rec, capture_output=True, text=True, timeout=20)
+            data = json.loads(out.stdout.strip())
+            track = data["track"]
+            offset = robust_offset(data.get("matches", []))
+            album = ""
+            sections = track.get("sections", [])
+            if sections and "metadata" in sections[0]:
+                for meta in sections[0]["metadata"]:
+                    if meta.get("title", "").lower() == "album":
+                        album = meta.get("text", "")
+                        break
+            return SongRef(
+                artist=track.get("subtitle", ""),
+                title=track.get("title", ""),
+                album=album,
+                path=str(p),
+                source="fingerprint",
+                offset=offset,
+            )
+        except Exception:
+            return None

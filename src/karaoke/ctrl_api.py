@@ -13,16 +13,33 @@ from __future__ import annotations
 import html
 import json
 import os
-from typing import Any, Optional
+import shutil
+import time
+import uuid
+from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import Any, Optional, List, Dict
 from urllib.parse import quote_plus
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .logger import log
 from .player_open import open_song_url
 
-CTRL_API_VERSION = "0.3.0"
+CTRL_API_VERSION = "0.5.0"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from . import recorder
+    try:
+        recorder.reconcile_stale()
+    except Exception:
+        log.debug("reconciling stale recordings on ctrl_api startup failed", exc_info=True)
+    yield
+
 
 app = FastAPI(
     title="Karaoke Control API",
@@ -31,6 +48,7 @@ app = FastAPI(
         "and launches media players; not intended for cluster deployment."
     ),
     version=CTRL_API_VERSION,
+    lifespan=lifespan,
 )
 
 
@@ -39,6 +57,43 @@ class PlayRequest(BaseModel):
     kind: Optional[str] = None
     artist: Optional[str] = None
     title: Optional[str] = None
+    prefer_audio: bool = True
+
+
+_PLAY_SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+def _play_session_view(session: dict[str, Any]) -> dict[str, Any]:
+    return dict(session)
+
+
+class QueueDetails(BaseModel):
+    name: str
+    messages: int
+    messages_ready: int
+    messages_unacknowledged: int
+    consumers: int
+
+
+class WorkerUnitDetails(BaseModel):
+    unit: str
+    active: str
+    running: bool
+
+
+class WorkerStatus(BaseModel):
+    orchestrator: str
+    available: bool
+    dashboard_url: Optional[str] = None
+    workers_active: int
+    queue_depth: int
+    queue_details: QueueDetails
+    worker_details: List[WorkerUnitDetails]
+    reason: Optional[str] = None
+
+
+class ScaleRequest(BaseModel):
+    target: int
 
 
 class RecordRequest(BaseModel):
@@ -46,6 +101,7 @@ class RecordRequest(BaseModel):
 
     source: Optional[str] = None       # PipeWire source; default is the playing sink
     keep_audio: bool = False           # audio is a means to metadata, not a library
+    note: Optional[str] = None         # optional note / description for the recording session
 
 
 class StopRequest(BaseModel):
@@ -58,6 +114,49 @@ class SampleRequest(BaseModel):
     artist: Optional[str] = None
     title: Optional[str] = None
     seconds: Optional[float] = None
+
+
+class PlayerControlRequest(BaseModel):
+    """Target a specific MPRIS player, or let playerctl choose when omitted."""
+
+    player: Optional[str] = None
+
+
+class SeekRequest(BaseModel):
+    """Seek the (targeted) player by a relative offset in seconds."""
+
+    offset_s: float
+    player: Optional[str] = None
+
+
+class FolderScanRequest(BaseModel):
+    """Scan a local music folder and ingest it into the library."""
+
+    dir: str
+    use_fingerprint: bool = True
+    classify_audio: bool = True
+    resolve_streaming: bool = True
+    dry_run: bool = False
+    limit: Optional[int] = None
+
+
+class AudioCutRequest(BaseModel):
+    """Cut a slice out of an audio file with ffmpeg."""
+
+    file_path: str
+    start_s: float = 0.0
+    duration_s: float
+    output_path: Optional[str] = None
+
+
+class WindowRequest(BaseModel):
+    """Control Chrome CDP window state or bounds."""
+
+    state: Optional[str] = None  # "normal", "minimized", "maximized", "fullscreen", "focus"
+    left: Optional[int] = None
+    top: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @app.get("/health")
@@ -75,7 +174,7 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/play")
 def play_track(req: PlayRequest) -> dict[str, Any]:
-    """Open/play a song URL, or fall back to a YouTube search for artist/title."""
+    """Open/play a song URL and return a durable-ish session handle."""
     url = req.url
     kind = req.kind
     artist = req.artist or ""
@@ -87,23 +186,63 @@ def play_track(req: PlayRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=400, detail="No URL or artist/title provided"
             )
-        url = f"https://www.youtube.com/results?search_query={query}"
-        kind = "youtube_search"
+        url = f"https://music.youtube.com/search?q={query}"
+        kind = "youtube_music_search"
 
     try:
-        pid = open_song_url(url, kind)
+        pid = open_song_url(
+            url, kind, artist=artist, title=title, prefer_audio=req.prefer_audio)
     except Exception as exc:
         log.exception("Control API play error for %s", url)
         raise HTTPException(status_code=500, detail=f"Failed to launch player: {exc}")
 
-    return {
+    session_id = f"play_{uuid.uuid4().hex[:12]}"
+    session = {
+        "session_id": session_id,
         "status": "launched",
         "url": url,
         "kind": kind,
         "pid": pid,
         "artist": artist,
         "title": title,
+        "prefer_audio": req.prefer_audio,
+        "launched_at": time.time(),
     }
+    _PLAY_SESSIONS[session_id] = session
+    return _play_session_view(session)
+
+
+@app.get("/api/play/sessions")
+def list_play_sessions() -> dict[str, Any]:
+    sessions = sorted(_PLAY_SESSIONS.values(),
+                      key=lambda s: s.get("launched_at", 0), reverse=True)
+    return {"sessions": [_play_session_view(s) for s in sessions],
+            "count": len(sessions)}
+
+
+@app.get("/api/play/sessions/{session_id}")
+def get_play_session(session_id: str) -> dict[str, Any]:
+    session = _PLAY_SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Play session not found")
+    return _play_session_view(session)
+
+
+@app.delete("/api/play/sessions/{session_id}")
+def stop_play_session(session_id: str) -> dict[str, Any]:
+    session = _PLAY_SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Play session not found")
+    # The dedicated player is usually browser/MPRIS-controlled rather than a
+    # child process we should kill. Pause it and mark the logical session stopped.
+    try:
+        from . import playerctl
+        playerctl.pause()
+    except Exception:
+        log.debug("failed to pause player for session %s", session_id, exc_info=True)
+    session["status"] = "stopped"
+    session["stopped_at"] = time.time()
+    return _play_session_view(session)
 
 
 # -- record mode ----------------------------------------------------------
@@ -118,8 +257,22 @@ def record_start(req: RecordRequest) -> dict[str, Any]:
     """Begin recording the playing output and marking what is on it."""
     from . import recorder
 
+    active = recorder.active_sessions()
+    if active:
+        for sid in active:
+            src = recorder.session_source(sid)
+            if not req.source or req.source == src:
+                dir_path = recorder.session_directory(sid)
+                return {
+                    "status": "recording",
+                    "recording_id": sid,
+                    "source": src or "",
+                    "dir": str(dir_path) if dir_path else "",
+                    "reused": True,
+                }
+
     try:
-        session = recorder.start(req.source or "", keep_audio=req.keep_audio)
+        session = recorder.start(req.source or "", keep_audio=req.keep_audio, note=req.note)
     except recorder.RecorderError as exc:
         # Nothing playing, or no ffmpeg: the caller's problem to fix, not a bug.
         raise HTTPException(status_code=409, detail=str(exc))
@@ -214,6 +367,37 @@ def record_discard(recording_id: int) -> dict[str, Any]:
     freed = recording_worker.discard_audio(recording_id)
     return {"status": "discarded", "recording_id": recording_id,
             "freed_bytes": freed}
+
+
+@app.get("/api/players/window")
+def get_player_window() -> dict[str, Any]:
+    """Get the current Chrome kiosk window bounds and state over CDP."""
+    from . import player_open
+    info = player_open.get_window_bounds()
+    if not info:
+        raise HTTPException(status_code=503, detail="Chrome CDP window is not active (:9222 down)")
+    return info
+
+
+@app.post("/api/players/window")
+def set_player_window(req: WindowRequest) -> dict[str, Any]:
+    """Control Chrome kiosk window state (fullscreen, normal, focus, etc.) or geometry."""
+    from . import player_open
+
+    if req.state == "focus":
+        ok = player_open.bring_to_front()
+        return {"status": "ok" if ok else "failed", "focused": ok}
+
+    ok = player_open.set_window_bounds(
+        state=req.state,
+        left=req.left,
+        top=req.top,
+        width=req.width,
+        height=req.height,
+    )
+    if not ok:
+        raise HTTPException(status_code=503, detail="Failed to update Chrome window state/bounds")
+    return {"status": "ok", "state": req.state}
 
 
 # Deliberately plain. This page exists to hold one <audio> element and to
@@ -331,13 +515,335 @@ def sample_now(req: SampleRequest) -> dict[str, Any]:
 
     return {
         "status": "analysed",
-        "artist": req.artist or "",
-        "title": req.title or "",
+        "artist": req.artist,
+        "title": req.title,
         "seconds": seconds,
         "key": result.key.name if result.key else None,
         "bpm": result.bpm,
         "stored": bool(req.artist and req.title),
     }
+
+
+@app.get("/api/sample/stream")
+def sample_stream(
+    artist: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
+    seconds: Optional[float] = Query(None),
+):
+    """Stream live sample progress and result as Server-Sent Events.
+
+    This keeps the TUI/web UI off direct callbacks while still reporting the
+    real-time capture phase. Event names: start, progress, complete, error.
+    """
+    import queue
+    import threading
+
+    from . import sample_audio
+
+    sec = float(seconds or sample_audio.DEFAULT_SECONDS)
+    art = artist or ""
+    tit = title or ""
+    events: "queue.Queue[tuple[str, dict[str, Any]] | None]" = queue.Queue()
+
+    def worker() -> None:
+        started = time.monotonic()
+        last_emit = 0.0
+
+        def progress() -> bool:
+            nonlocal last_emit
+            elapsed = max(0.0, time.monotonic() - started)
+            if elapsed - last_emit >= 1.0 or elapsed >= sec:
+                last_emit = elapsed
+                events.put(("progress", {
+                    "status": "capturing",
+                    "elapsed_s": round(min(elapsed, sec), 2),
+                    "percent": round(min(elapsed / sec, 1.0) * 100, 1),
+                    "seconds": sec,
+                }))
+            return True
+
+        try:
+            result = sample_audio.sample_and_analyse(
+                art, tit, sec, should_continue=progress)
+            events.put(("complete", {"status": "analysed",
+                                    "artist": art,
+                                    "title": tit,
+                                    "seconds": sec,
+                                    "key": result.key.name if result.key else None,
+                                    "bpm": result.bpm,
+                                    "stored": bool(art and tit)}))
+        except sample_audio.CaptureError as exc:
+            events.put(("error", {"status": "error", "detail": str(exc)}))
+        except sample_audio.AnalysisUnavailable as exc:
+            events.put(("error", {"status": "unavailable", "detail": str(exc)}))
+        except Exception as exc:
+            log.exception("Control API streaming sample failed")
+            events.put(("error", {"status": "failed", "detail": str(exc)}))
+        finally:
+            events.put(None)
+
+    def body():
+        events.put(("start", {
+            "status": "started", "artist": art, "title": tit, "seconds": sec,
+        }))
+        thread = threading.Thread(target=worker, name="sample-stream", daemon=True)
+        thread.start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            event, payload = item
+            yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(body(), media_type="text/event-stream")
+
+
+# -- player controls (MPRIS via playerctl) --------------------------------
+#
+# These live here rather than in karaoke.api because playerctl talks to the
+# desktop session's MPRIS bus, which does not exist in a container. Everything
+# the TUI does to a player is exposed so a future web UI can do the same.
+
+
+@app.get("/api/players")
+def players_list() -> dict[str, Any]:
+    """Every MPRIS player, which are playing, and which one is active."""
+    from . import playerctl
+
+    names = playerctl.list_players()
+    playing = playerctl.playing_players()
+    return {
+        "players": names,
+        "playing": playing,
+        "active": playerctl.playing_player(),
+        "count": len(names),
+    }
+
+
+@app.get("/api/players/current")
+def player_current(player: str = "") -> dict[str, Any]:
+    """Current track metadata + playback state for a player (or the active one)."""
+    from . import playerctl
+
+    target = player or playerctl.playing_player()
+    meta = playerctl.current_metadata(target)
+    return {
+        "player": target,
+        "status": playerctl.status(target),
+        "position_s": playerctl.position(target),
+        "art_url": playerctl.art_url(target),
+        "metadata": None if meta is None else {
+            "artist": meta.artist,
+            "title": meta.title,
+            "album": meta.album,
+            "url": meta.url,
+            "player": meta.player,
+            "mpris_name": meta.mpris_name,
+            "duration": meta.duration,
+        },
+    }
+
+
+def _player_action(name: str, fn, req: PlayerControlRequest) -> dict[str, Any]:
+    ok = fn((req.player or ""))
+    if not ok:
+        raise HTTPException(status_code=409,
+                            detail=f"No player could handle '{name}'")
+    return {"status": "ok", "action": name, "player": req.player or ""}
+
+
+@app.post("/api/players/play-pause")
+def player_play_pause(req: PlayerControlRequest) -> dict[str, Any]:
+    """Toggle play/pause on the (targeted) player."""
+    from . import playerctl
+    return _player_action("play-pause", playerctl.play_pause, req)
+
+
+@app.post("/api/players/pause")
+def player_pause(req: PlayerControlRequest) -> dict[str, Any]:
+    """Pause the (targeted) player (never resumes)."""
+    from . import playerctl
+    return _player_action("pause", playerctl.pause, req)
+
+
+@app.post("/api/players/next")
+def player_next(req: PlayerControlRequest) -> dict[str, Any]:
+    """Skip to the next track."""
+    from . import playerctl
+    return _player_action("next", playerctl.next_track, req)
+
+
+@app.post("/api/players/previous")
+def player_previous(req: PlayerControlRequest) -> dict[str, Any]:
+    """Skip to the previous track."""
+    from . import playerctl
+    return _player_action("previous", playerctl.previous_track, req)
+
+
+@app.post("/api/players/seek")
+def player_seek(req: SeekRequest) -> dict[str, Any]:
+    """Seek the (targeted) player by a relative offset in seconds."""
+    from . import playerctl
+
+    if not playerctl.seek(req.offset_s, req.player or ""):
+        raise HTTPException(status_code=409,
+                            detail="No player could handle 'seek'")
+    return {"status": "ok", "action": "seek", "offset_s": req.offset_s,
+            "player": req.player or ""}
+
+
+# -- library ingestion (folder scan, audio cut) ---------------------------
+#
+# Folder scanning needs ffmpeg + songrec + the analysis stack, and audio cut
+# needs ffmpeg, none of which belong in the slim library container.
+
+
+@app.post("/api/scan/folder")
+def scan_folder(req: FolderScanRequest, background: BackgroundTasks) -> dict[str, Any]:
+    """Scan a music folder: tags, fingerprint, classify, source, and ingest.
+
+    A dry run returns the enrichment preview synchronously. A real ingest can
+    run long over a big library, so it is dispatched to the background and the
+    caller polls the library API for the new tracks.
+    """
+    from . import folder_scan
+
+    root = Path(req.dir).expanduser()
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory not found: {root}")
+
+    if req.dry_run:
+        stats = folder_scan.scan_and_ingest_folder(
+            root,
+            use_fingerprint=req.use_fingerprint,
+            classify_audio=req.classify_audio,
+            resolve_streaming=req.resolve_streaming,
+            dry_run=True,
+            limit=req.limit,
+        )
+        return {"status": "preview", **stats}
+
+    background.add_task(
+        folder_scan.scan_and_ingest_folder,
+        root,
+        use_fingerprint=req.use_fingerprint,
+        classify_audio=req.classify_audio,
+        resolve_streaming=req.resolve_streaming,
+        dry_run=False,
+        limit=req.limit,
+    )
+    return {"status": "accepted", "dir": str(root)}
+
+
+@app.post("/api/audio/cut")
+def audio_cut(req: AudioCutRequest) -> dict[str, Any]:
+    """Cut a slice out of an audio file with ffmpeg. Returns the output path."""
+    import subprocess
+    import tempfile
+
+    src = Path(req.file_path).expanduser()
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail=f"File not found: {src}")
+    if req.duration_s <= 0:
+        raise HTTPException(status_code=400, detail="duration_s must be positive")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=503, detail="ffmpeg is not installed")
+
+    if req.output_path:
+        out = Path(req.output_path).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        fd, tmp = tempfile.mkstemp(suffix=src.suffix or ".wav", prefix="karaoke-cut-")
+        os.close(fd)
+        out = Path(tmp)
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(src), "-ss", f"{req.start_s:.3f}", "-t", f"{req.duration_s:.3f}",
+        "-ac", "2", "-ar", "44100", str(out),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, check=True,
+                       timeout=max(120.0, req.duration_s * 4))
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"ffmpeg failed: {exc.stderr.decode(errors='ignore')[:200]}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cut failed: {exc}")
+
+    if not out.is_file() or out.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="Cut produced no output")
+
+    return {
+        "status": "ok",
+        "output_path": str(out),
+        "start_s": req.start_s,
+        "duration_s": req.duration_s,
+        "bytes": out.stat().st_size,
+    }
+
+
+# Celery worker status and scaling
+@app.get("/api/workers/status", response_model=WorkerStatus)
+def get_workers_status() -> WorkerStatus:
+    """Celery worker, queue and Flower dashboard status.
+
+    Allows monitoring the post-processing pipeline without screen-scraping the TUI.
+    """
+    from . import postprocess_status as ps
+
+    status = ps.get_status()
+    return WorkerStatus(
+        orchestrator=status.orchestrator,
+        available=status.available,
+        dashboard_url=status.dashboard_url,
+        workers_active=status.workers_active,
+        queue_depth=status.queue_depth,
+        queue_details=QueueDetails(
+            name=status.queue_details.name,
+            messages=status.queue_details.messages,
+            messages_ready=status.queue_details.messages_ready,
+            messages_unacknowledged=status.queue_details.messages_unacknowledged,
+            consumers=status.queue_details.consumers
+        ),
+        worker_details=[
+            WorkerUnitDetails(unit=w.unit, active=w.active, running=w.running)
+            for w in status.worker_details
+        ],
+        reason=status.reason,
+    )
+
+
+@app.post("/api/workers/scale")
+def scale_workers(req: ScaleRequest) -> dict[str, Any]:
+    """Scales the Celery worker pool (starts/stops `karaoke-celery-worker.service`)."""
+    from . import postprocess_status as ps
+
+    if req.target == 0:
+        ok = ps.stop_worker()
+        log.info("control: scaled Celery worker down (stopped)")
+    else:
+        ok = ps.start_worker()
+        log.info("control: scaled Celery worker up (started)")
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to scale worker")
+    return {"status": "ok", "target": req.target}
+
+
+@app.get("/api/logs/errors")
+def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+    """Get the latest error log entries from karaoke.log."""
+    log_file = Path.home() / ".local/share/karaoke/logs/karaoke.log"
+    if not log_file.is_file():
+        return {"status": "ok", "logs": []}
+
+    try:
+        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        errs = [l.rstrip() for l in all_lines if "ERROR" in l or "CRITICAL" in l or "Traceback" in l or "Exception" in l]
+        return {"status": "ok", "count": len(errs), "logs": errs[-lines:]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
 
 
 def main() -> None:

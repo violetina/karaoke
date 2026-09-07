@@ -23,6 +23,12 @@ import pika
 from .logger import log
 
 QUEUE_NAME = "karaoke-postprocess"
+ORCHESTRATOR_ENV = "KARAOKE_ORCHESTRATOR"
+
+
+def orchestrator() -> str:
+    """Selected background orchestrator (`celery` by default, `legacy` fallback)."""
+    return os.environ.get(ORCHESTRATOR_ENV, "celery").strip().lower() or "celery"
 
 
 def needs_postprocessing(track_id: int, conn: sqlite3.Connection) -> list[str]:
@@ -143,13 +149,30 @@ def enqueue_if_needed(
 
 
 def publish_postprocess_task(artist: str, title: str, url: str = "") -> bool:
-    """Publish a track post-processing task to the RabbitMQ queue.
+    """Publish a track post-processing task to RabbitMQ.
 
     Returns True if successfully published, False otherwise.
     Safe: catches pika exceptions so the TUI/app never crashes.
     """
     if not (artist or title):
         return False
+
+    payload = {
+        "artist": artist.strip(),
+        "title": title.strip(),
+        "url": url.strip() if url else ""
+    }
+
+    if orchestrator() != "legacy":
+        try:
+            from .tasks import enqueue_postprocess
+            task_id = enqueue_postprocess(payload)
+            log.info("Published post-processing Celery task %s: %s - %s",
+                     task_id, artist, title)
+            return task_id
+        except Exception as exc:
+            log.debug("Celery publish skipped (unreachable/failed): %s", exc)
+            return None
 
     host = os.environ.get("RABBITMQ_HOST", "localhost")
     user = os.environ.get("RABBITMQ_USER", "guest")
@@ -169,12 +192,6 @@ def publish_postprocess_task(artist: str, title: str, url: str = "") -> bool:
         channel = connection.channel()
         channel.queue_declare(queue=QUEUE_NAME, durable=True)
 
-        payload = {
-            "artist": artist.strip(),
-            "title": title.strip(),
-            "url": url.strip() if url else ""
-        }
-        
         channel.basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,

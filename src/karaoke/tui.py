@@ -45,8 +45,10 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
 
 from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
+from .api_client import ApiClient
 from .browse import open_song_url
-from .player_open import browser_playback, track_finished, track_idle
+from .player_open import (browser_playback, close_cdp, track_finished,
+                          track_idle)
 from .logger import LOG_FILE, log, stream_logs
 from .musictheory import parse_key
 from .player import (DEFAULT_LEAD_S, LyricTimeline, _render_body,
@@ -85,6 +87,38 @@ FILTER_OPTIONS = [
     ("Staging queue", "staging"),
     ("Spotify tracks", "spotify"),
 ]
+
+MOOD_FILTER_OPTIONS = [
+    ("All Moods (0% - 100%)", "all"),
+    ("🔥 High Energy (>75%)", "high_energy"),
+    ("⚡ Groovy / Upbeat (40-75%)", "groovy"),
+    ("🌙 Chill / Mellow (<40%)", "mellow"),
+]
+
+SORT_OPTIONS = [
+    ("Artist / Title (A-Z)", "artist"),
+    ("🌱 Priority: Least Played", "least_played"),
+    ("⭐ Most Played", "most_played"),
+    ("🔥 Energy (high→low)", "energy_desc"),
+    ("🌙 Energy (low→high)", "energy_asc"),
+    ("🥁 BPM (fast→slow)", "bpm_desc"),
+    ("🎹 BPM (slow→fast)", "bpm_asc"),
+    ("🎵 Key", "key"),
+]
+
+
+def feeling_glyph(energy: float, brightness: float | None = None) -> str:
+    """A rough 'overall feeling' read from energy (arousal) and brightness
+    (valence proxy): bright+loud reads happy/energetic, dark+loud reads
+    aggressive, bright+soft reads tender, dark+soft reads melancholy. It's a
+    cheap heuristic, not sentiment analysis, but it separates the kinds of
+    tracks at a glance."""
+    b = 0.5 if brightness is None else brightness
+    if energy >= 0.66:
+        return "🔥" if b < 0.5 else "☀"
+    if energy >= 0.4:
+        return "⚡" if b >= 0.5 else "🌗"
+    return "♡" if b >= 0.5 else "🌙"
 
 # Manual mode override cycle. None == auto-detect.
 MODE_CYCLE = [None, "browse", "scan"]
@@ -729,14 +763,20 @@ class KaraokeTui(App):
     #statusbar { height: 1; }
     #mode-label { width: 1fr; }
     #worker-load { width: auto; text-align: right; }
+    #mood-label { height: auto; text-align: center; }
     #mood-square {
         height: 8; content-align: center middle; text-style: bold;
         border: heavy white; margin-bottom: 1;
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
+    #mood-slider { height: 1; color: $accent; margin-bottom: 1; }
+    #mood-select { margin-bottom: 1; }
+    #sort-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
+    #library { display: block; height: 10; border: round cyan; margin-top: 1; }
+    #library.-off { display: none; }
     /* In the left column now, with the other per-track facts. Auto height
        because it holds two or three lines depending on what is known, and a
        fixed 6 left a gap under the short case. */
@@ -804,9 +844,9 @@ class KaraokeTui(App):
     Screen.-focus #now-playing { display: none; }
     Screen.-focus #statusbar { display: none; }
     Screen.-focus Header { display: none; }
-    #browse-head { height: 3; }
-    #browse-head > Static { width: 8; content-align: left middle; }
-    #filter-select { width: 34; }
+    #browse-head { height: auto; margin-bottom: 1; }
+    #browse-head Static { width: 8; content-align: left middle; }
+    #filter-select, #mood-select, #sort-select { width: 34; }
     #library { height: 1fr; }
     #log-label, #log-path { color: $text-muted; height: 1; }
     """
@@ -819,6 +859,12 @@ class KaraokeTui(App):
         Binding("ctrl+c", "cancel_sample", "Stop sampling", show=False,
                 priority=True),
         ("H", "toggle_browse", "Browse"),
+        ("a", "enqueue_selected", "Enqueue track"),
+        ("C", "clear_queue", "Clear queue"),
+        ("U", "shuffle_queue", "Shuffle queue"),
+        ("G", "suggest_queue", "Keep vibe going"),
+        ("minus", "mood_down", "Mood-"),
+        ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
         ("k", "sample_key", "Sample key/BPM"),
         ("slash", "focus_search", "Search"),
@@ -854,6 +900,11 @@ class KaraokeTui(App):
 
     def __init__(self, *, log_level: str = "err") -> None:
         super().__init__()
+        # All player control, playback, sampling and recording actions route
+        # through the API client so the TUI drives the exact same backend a
+        # future web UI will. It falls back to in-process calls when no API
+        # server is running, so single-process `karaoke-tui` still works.
+        self.api = ApiClient()
         self._song_data: list[SongRow] = []
         self._filter = "working"
         self._mode_override: str | None = None
@@ -892,6 +943,7 @@ class KaraokeTui(App):
         self._track_duration: float | None = None  # wraps the radio playhead
         self._mic_stop: threading.Event | None = None
         self._last_error = ""      # surfaced in the track-info read-out
+        self._mood_pixels = None   # raw pixels for animation
         self._mood_art = None      # rendered picture for the current mood
         self._mood_source = ""     # 'cover' or 'generated'
         self._mood_shown = ""      # mood the picture was rendered for
@@ -900,6 +952,9 @@ class KaraokeTui(App):
         self._play_once = True     # queue decides the next track
         self._last_finished_url = ""
         self._idle_since = 0.0     # when the player last held nothing
+        self._mood_filter = "all"
+        self._mood_level = 0.0  # slider floor: show tracks with energy >= this
+        self._sort = "artist"
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -923,6 +978,15 @@ class KaraokeTui(App):
                 # about escape has no affordance to discover.
                 yield Input(placeholder="search  (/ · esc to leave)",
                             id="search-input")
+                # Mood slider + presets sit directly under search so they
+                # narrow both the library list and the search results. The
+                # slider ([ / ] adjust) is the fine control; the select is
+                # quick presets.
+                yield Static("", id="mood-slider")
+                yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
+                             allow_blank=False)
+                yield Select(SORT_OPTIONS, value="artist", id="sort-select",
+                             allow_blank=False)
                 # Key and tempo sit with the rest of the facts about this
                 # track rather than in the visuals column, which is for the
                 # things that move.
@@ -933,14 +997,12 @@ class KaraokeTui(App):
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
                 yield Static("Lyrics will render here.", id="lyrics")
-                # The result list lives under the lyrics rather than in the
-                # overlay: it is what plays next, so it belongs where the
-                # playing track is, not behind a panel you have to open.
                 yield DataTable(id="queue", cursor_type="row")
                 with Horizontal(id="statusbar"):
                     yield Static("Mode: auto", id="mode-label")
                     yield Static("worker-load: —", id="worker-load")
             with Vertical(id="visuals"):
+                yield Static("", id="mood-label")
                 yield Static(MOOD_GLYPHS["neutral"], id="mood-square")
                 yield Static("sentiment / rhythm", id="ascii-visual")
         # Floats on its own layer above #workspace, so revealing it costs the
@@ -959,8 +1021,9 @@ class KaraokeTui(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
-        table.add_columns("Artist", "Title", "Src", "♪")
+        table.add_columns("Artist", "Title", "Key", "BPM", "Energy", "Genre/Feel", "▶", "Src", "♪")
         self.load_songs()
+        self._render_mood_slider()
         self._show_selected_song()
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
@@ -974,7 +1037,12 @@ class KaraokeTui(App):
         # live capture. Close it out so the listing does not lie and its audio
         # becomes analysable.
         try:
-            recorder.reconcile_stale()
+            rec_status = self.api.record_status()
+            active = rec_status.get("recording", [])
+            if active:
+                self._recording_id = active[0]["recording_id"]
+            else:
+                recorder.reconcile_stale()
             self._warn_unanalysed_recordings()
             # Audio is kept after analysis now, so something has to bound it.
             from . import recording_worker
@@ -989,28 +1057,156 @@ class KaraokeTui(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "filter-select":
             self._filter = str(event.value)
-            self.load_songs()
-            self._show_selected_song()
+            self._apply_mood_change()
+        elif event.select.id == "mood-select":
+            self._mood_filter = str(event.value)
+            if self._mood_filter == "high_energy":
+                self._mood_level = 0.75
+            elif self._mood_filter == "groovy":
+                self._mood_level = 0.40
+            elif self._mood_filter in ("mellow", "all"):
+                self._mood_level = 0.0
+            self._apply_mood_change()
+        elif event.select.id == "sort-select":
+            self._sort = str(event.value)
+            self._apply_mood_change()
+
+    def _render_mood_slider(self) -> None:
+        """Draw the energy-floor slider bar in the sidebar."""
+        try:
+            widget = self.query_one("#mood-slider", Static)
+        except Exception:
+            return
+        pct = int(self._mood_level * 100)
+        filled = int(round(pct / 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        widget.update(f"energy ≥ {pct:>3}% [{bar}]  -/+")
+
+    def action_mood_down(self) -> None:
+        self._mood_level = max(0.0, round(self._mood_level - 0.1, 2))
+        self._apply_mood_change()
+
+    def action_mood_up(self) -> None:
+        self._mood_level = min(1.0, round(self._mood_level + 0.1, 2))
+        self._apply_mood_change()
+
+    def _apply_mood_change(self) -> None:
+        """Apply mood/energy filtering to both the library table and the active queue."""
+        self._render_mood_slider()
+        self.load_songs()
+        self._show_selected_song()
+        if hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
+            self._filter_and_set_queue()
+
 
     def load_songs(self) -> None:
         table = self.query_one("#library", DataTable)
         table.clear()
         self._song_data.clear()
         with localcache.connect() as conn:
+            from .track_analysis import ensure_schema
+            ensure_schema(conn)
             if self._filter == "staging":
                 self._load_staging(conn)
             elif self._filter == "spotify":
                 self._load_spotify(conn)
             else:
                 self._load_tracks(conn, only_working=self._filter == "working")
+
+        # Compute an energy value per song once, then filter, sort, render.
+        def _energy_of(song: dict) -> float:
+            energy_val = song.get("energy")
+            bpm_val = song.get("bpm")
+            if isinstance(energy_val, (int, float, str)):
+                try:
+                    return float(energy_val)
+                except (ValueError, TypeError):
+                    pass
+            if isinstance(bpm_val, (int, float, str)):
+                try:
+                    return min(1.0, max(0.2, (float(bpm_val) - 60.0) / 100.0))
+                except (ValueError, TypeError):
+                    pass
+            return 0.5
+
+        filtered = []
         for song in self._song_data:
+            energy = _energy_of(song)
+            song["_energy"] = energy
+            if energy < self._mood_level:
+                continue
+            if self._mood_filter == "high_energy" and energy < 0.75:
+                continue
+            if self._mood_filter == "groovy" and not (0.40 <= energy <= 0.75):
+                continue
+            if self._mood_filter == "mellow" and energy > 0.40:
+                continue
+            filtered.append(song)
+
+        def _bpm_of(song: dict) -> float:
+            v = song.get("bpm")
+            if isinstance(v, (int, float, str)):
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return 0.0
+            return 0.0
+
+        def _plays_of(song: dict) -> int:
+            v = song.get("play_count")
+            return int(v) if isinstance(v, (int, float)) else 0
+
+        if self._sort == "energy_desc":
+            filtered.sort(key=lambda s: s["_energy"], reverse=True)
+        elif self._sort == "energy_asc":
+            filtered.sort(key=lambda s: s["_energy"])
+        elif self._sort == "bpm_desc":
+            filtered.sort(key=_bpm_of, reverse=True)
+        elif self._sort == "bpm_asc":
+            filtered.sort(key=_bpm_of)
+        elif self._sort == "key":
+            filtered.sort(key=lambda s: str(s.get("key") or "~"))
+        elif self._sort == "least_played":
+            filtered.sort(key=lambda s: (_plays_of(s), str(s.get("artist") or "")))
+        elif self._sort == "most_played":
+            filtered.sort(key=_plays_of, reverse=True)
+        # "artist" keeps the SQL ORDER BY t.artist, t.title.
+
+        for song in filtered:
+            energy = song["_energy"]
+            bpm_val = song.get("bpm")
+            e_bar = "🔥" if energy >= 0.75 else "⚡" if energy >= 0.40 else "🌙"
+            e_str = f"{e_bar} {int(energy * 100)}%"
+
+            bpm_display = "—"
+            if isinstance(bpm_val, (int, float, str)):
+                try:
+                    bpm_display = f"{float(bpm_val):.0f}"
+                except (ValueError, TypeError):
+                    bpm_display = "—"
+
+            bright = song.get("brightness")
+            bright_f = float(bright) if isinstance(bright, (int, float)) else None
+            genre = str(song.get("genre") or "").strip()
+            feel = feeling_glyph(energy, bright_f)
+            genre_feel = f"{genre[:10]} {feel}" if genre else feel
+
+            artist_str = str(song.get("artist") or "")
+            title_str = str(song.get("title") or "")
             table.add_row(
-                str(song.get("artist") or ""),
-                str(song.get("title") or ""),
+                artist_str[:15],
+                title_str[:30],
+                str(song.get("key") or "—"),
+                bpm_display,
+                e_str,
+                genre_feel,
+                str(_plays_of(song)),
                 str(song.get("kind") or "—"),
                 "♪" if song.get("synced_lyrics") else (
-                    "·" if song.get("plain_lyrics") else " "),
+                    "·" if song.get("plain_lyrics") else " "
+                ),
             )
+        self._song_data = filtered
 
     def _load_spotify(self, conn) -> None:
         """Tracks that have a Spotify source, joined to that source.
@@ -1057,12 +1253,14 @@ class KaraokeTui(App):
         # opens in the browser. Deterministic per track (see browse.py).
         cur.execute(
             """
-            SELECT t.track_id, t.artist, t.title,
+            SELECT t.track_id, t.artist, t.title, t.play_count,
                    COALESCE(s.url, '') AS url,
                    COALESCE(s.kind, '') AS kind,
                    COALESCE(l.source, '') AS lyric_source,
                    COALESCE(l.synced_lyrics, '') AS synced_lyrics,
-                   COALESCE(l.plain_lyrics, '') AS plain_lyrics
+                   COALESCE(l.plain_lyrics, '') AS plain_lyrics,
+                   a.detected_key AS key, a.bpm, a.energy, a.brightness,
+                   g.genre AS genre
             FROM tracks t
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
@@ -1080,6 +1278,10 @@ class KaraokeTui(App):
             )
             LEFT JOIN lyrics l
               ON t.track_id = l.track_id AND l.kind = 'approved'
+            LEFT JOIN track_analysis a
+              ON a.track_id = t.track_id
+            LEFT JOIN track_genre g
+              ON g.track_id = t.track_id
             GROUP BY t.track_id
             ORDER BY t.artist, t.title
             """
@@ -1094,6 +1296,12 @@ class KaraokeTui(App):
                 "title": row["title"],
                 "url": row["url"],
                 "kind": row["kind"],
+                "key": row["key"],
+                "bpm": row["bpm"],
+                "energy": row["energy"],
+                "brightness": row["brightness"],
+                "genre": row["genre"],
+                "play_count": row["play_count"],
                 "lyric_source": row["lyric_source"],
                 "synced_lyrics": row["synced_lyrics"],
                 "plain_lyrics": row["plain_lyrics"],
@@ -1117,26 +1325,37 @@ class KaraokeTui(App):
     def on_data_table_row_highlighted(self, _e: DataTable.RowHighlighted) -> None:
         self._show_selected_song()
 
-    def on_data_table_row_selected(self, _e: DataTable.RowSelected) -> None:
-        self.action_select()
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # One handler for both tables: the queue plays its row directly, the
+        # library overlay opens the selected song. (Two methods of the same
+        # name would silently shadow each other.)
+        table_id = getattr(event.data_table, "id", "")
+        if table_id == "queue":
+            self.play_queue_index(event.cursor_row)
+        else:
+            self.action_select()
 
     # -- browse overlay ---------------------------------------------------
     _BROWSE_OPEN = "-visible"
 
     def _browse_open(self) -> bool:
-        return self.query_one("#browse-overlay").has_class(self._BROWSE_OPEN)
+        try:
+            return self.query_one("#browse-overlay").has_class(self._BROWSE_OPEN)
+        except Exception:
+            return False
 
     def _show_browse(self) -> None:
-        # add_class BEFORE focus: a hidden widget silently refuses focus, so
-        # reversing these two lines leaves the table unfocused and the arrow
-        # keys dead.
-        self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
-        self.query_one("#library", DataTable).focus()
+        try:
+            self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
+            self.query_one("#library", DataTable).focus()
+        except Exception:
+            pass
 
     def _hide_browse(self) -> None:
-        self.query_one("#browse-overlay").remove_class(self._BROWSE_OPEN)
-        # Back to the screen. There is no sensible focusable target in #main,
-        # and inventing one purely to hold focus would be worse.
+        try:
+            self.query_one("#browse-overlay").remove_class(self._BROWSE_OPEN)
+        except Exception:
+            pass
         self.set_focus(None)
 
     def action_toggle_browse(self) -> None:
@@ -1386,6 +1605,48 @@ class KaraokeTui(App):
         """`/`: jump to the search box."""
         self.query_one("#search-input", Input).focus()
 
+    def _apply_mood_filter(self, rows: list, conn) -> list:
+        """Filter search-result rows by the current mood/energy band and the
+        slider floor (self._mood_level)."""
+        if (self._mood_filter == "all" and self._mood_level <= 0.0) or not rows:
+            return rows
+        ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
+        if not ids:
+            return rows
+        placeholders = ",".join("?" * len(ids))
+        energies: dict = {}
+        try:
+            cur = conn.execute(
+                f"SELECT track_id, energy, bpm FROM track_analysis "
+                f"WHERE track_id IN ({placeholders})",
+                ids,
+            )
+            for row in cur.fetchall():
+                e = row["energy"]
+                if e is None and row["bpm"] is not None:
+                    e = min(1.0, max(0.2, (float(row["bpm"]) - 60.0) / 100.0))
+                energies[row["track_id"]] = e
+        except Exception:
+            return rows
+
+        kept = []
+        for r in rows:
+            e = r.get("energy")
+            if e is None:
+                e = energies.get(r.get("track_id"))
+            if e is None:
+                e = 0.5
+            if e < self._mood_level:
+                continue
+            if self._mood_filter == "high_energy" and e < 0.75:
+                continue
+            if self._mood_filter == "groovy" and not (0.40 <= e <= 0.75):
+                continue
+            if self._mood_filter == "mellow" and e > 0.40:
+                continue
+            kept.append(r)
+        return kept
+
     def on_input_submitted(self, event) -> None:
         """Enter in the search box: build a list and start playing it."""
         if event.input.id != "search-input":
@@ -1415,6 +1676,7 @@ class KaraokeTui(App):
                          "fields": h.fields,
                          "url": librarysearch.playable_url(h.track_id, conn) or ""}
                         for h in hits]
+                rows = self._apply_mood_filter(rows, conn)
         except Exception as exc:
             log.debug("search failed", exc_info=True)
             self.call_from_thread(self.notify, f"Search failed: {exc}",
@@ -1424,20 +1686,40 @@ class KaraokeTui(App):
 
     def _set_queue(self, rows: list, query: str = "") -> None:
         """Show the result list and start it playing."""
+        self._unfiltered_queue = list(rows)
+        self._filter_and_set_queue(query=query, start_playing=True)
+
+    def _filter_and_set_queue(self, query: str = "", start_playing: bool = False) -> None:
+        rows = list(getattr(self, "_unfiltered_queue", []))
+        if rows:
+            try:
+                with localcache.connect() as conn:
+                    rows = self._apply_mood_filter(rows, conn)
+            except Exception:
+                pass
         self._queue = rows
-        self._queue_at = -1
         table = self.query_one("#queue", DataTable)
+        try:
+            lib_table = self.query_one("#library", DataTable)
+        except Exception:
+            lib_table = None
+
         if not rows:
             table.set_class(False, "-on")
+            if lib_table:
+                lib_table.set_class(False, "-off")
             table.clear()
             if query:
                 self.notify(f"No matches for {query!r}", severity="warning")
             return
         table.set_class(True, "-on")
+        if lib_table:
+            lib_table.set_class(True, "-off")
         self._render_queue()
-        self.notify(f"{len(rows)} match(es) for {query!r}" if query
-                    else f"{len(rows)} queued")
-        self.play_queue_index(0)
+        if query:
+            self.notify(f"{len(rows)} match(es) for {query!r}")
+        if start_playing and rows:
+            self.play_queue_index(0)
 
     def _render_queue(self) -> None:
         """Draw the list, marking what is playing."""
@@ -1454,12 +1736,6 @@ class KaraokeTui(App):
                           row["artist"][:18], row["title"][:28], note)
         table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
                               f"{'  (play-once)' if self._play_once else ''}")
-
-    def on_data_table_row_selected(self, event) -> None:
-        """Click or Enter on a queue row plays it."""
-        if event.data_table.id != "queue":
-            return
-        self.play_queue_index(event.cursor_row)
 
     def action_toggle_play_once(self) -> None:
         """`o`: play the queue through once, or let the player carry on.
@@ -1523,7 +1799,12 @@ class KaraokeTui(App):
             self._render_queue()
             return False
         try:
-            open_song_url(url, "youtube" if "youtu" in url else "")
+            open_song_url(
+                url, "youtube" if "youtu" in url else "",
+                artist=str(row.get("artist") or ""),
+                title=str(row.get("title") or ""),
+                prefer_audio=True,
+            )
         except Exception as exc:
             log.exception("queue play failed")
             self.notify(f"Play failed: {exc}", severity="error")
@@ -1543,6 +1824,103 @@ class KaraokeTui(App):
                 return
             index += 1
         self.notify("End of queue")
+
+    def action_enqueue_selected(self) -> None:
+        """`a`: Add the currently selected track to the end of the queue."""
+        song = self._selected_song()
+        if song is None:
+            self.notify("No song selected to enqueue", severity="warning")
+            return
+        row = {
+            "track_id": song.get("track_id"),
+            "artist": str(song.get("artist") or ""),
+            "title": str(song.get("title") or ""),
+            "url": str(song.get("url") or ""),
+            "kind": str(song.get("kind") or ""),
+        }
+        if not self._queue:
+            self._set_queue([row])
+            return
+        self._queue.append(row)
+        try:
+            self.query_one("#queue", DataTable).set_class(True, "-on")
+        except Exception:
+            pass
+        self._render_queue()
+        self.notify(f"Enqueued {row['artist']} - {row['title']} (queue: {len(self._queue)})")
+
+    def action_shuffle_queue(self) -> None:
+        """`U`: Shuffle upcoming items in the queue."""
+        import random
+        if not self._queue or self._queue_at >= len(self._queue) - 1:
+            self.notify("No upcoming queue items to shuffle", severity="warning")
+            return
+        upcoming = self._queue[self._queue_at + 1:]
+        random.shuffle(upcoming)
+        self._queue = self._queue[:self._queue_at + 1] + upcoming
+        self._render_queue()
+        self.notify(f"Shuffled {len(upcoming)} upcoming queue items")
+
+    def action_clear_queue(self) -> None:
+        """`C`: Clear the current queue."""
+        self._queue = []
+        self._queue_at = -1
+        try:
+            table = self.query_one("#queue", DataTable)
+            table.set_class(False, "-on")
+            table.clear()
+        except Exception:
+            pass
+        self.notify("Queue cleared")
+
+    def action_suggest_queue(self) -> None:
+        """`G`: keep the vibe going — append tracks that fit the whole queue.
+
+        Seeds on every track in the queue by audio similarity (CLAP, spectral
+        fallback), pools the neighbours, and appends the ones that fit best,
+        skipping anything already queued.
+        """
+        seeds = [row.get("track_id") for row in self._queue
+                 if row.get("track_id")]
+        if not seeds:
+            self.notify("Queue is empty — nothing to seed suggestions on",
+                        severity="warning")
+            return
+        self.notify("Finding tracks that keep the vibe going…")
+
+        def _bg() -> None:
+            try:
+                picks = self.api.suggest_queue(list(seeds), limit=5)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.notify, f"Suggestions failed: {exc}", severity="error")
+                return
+            self.call_from_thread(self._apply_suggestions, picks)
+
+        self.run_worker(_bg, thread=True)
+
+    def _apply_suggestions(self, picks: list) -> None:
+        """Append suggested tracks to the queue (called on the UI thread)."""
+        if not picks:
+            self.notify("No suggestions — seed tracks may lack audio vectors",
+                        severity="warning")
+            return
+        for p in picks:
+            self._queue.append({
+                "track_id": p.get("track_id"),
+                "artist": str(p.get("artist") or ""),
+                "title": str(p.get("title") or ""),
+                "url": str(p.get("url") or ""),
+                "kind": "",
+            })
+        try:
+            self.query_one("#queue", DataTable).set_class(True, "-on")
+        except Exception:
+            pass
+        self._render_queue()
+        space = picks[0].get("space", "audio") if picks else "audio"
+        self.notify(f"Added {len(picks)} tracks to keep the vibe going "
+                    f"({space}); queue: {len(self._queue)}")
 
     def action_sample_key(self) -> None:
         """`k`: detect key/BPM by recording what is playing.
@@ -1679,9 +2057,30 @@ class KaraokeTui(App):
         # leaving it running on exit repeats the orphan above in miniature.
         self._cancel_sample = True
         try:
+            if hasattr(self, "api") and self.api is not None:
+                self.api.record_stop()
+        except Exception:
+            log.debug("stopping recordings via api on exit failed", exc_info=True)
+        try:
             recorder.stop_all()
         except Exception:
             log.debug("stopping recordings on exit failed", exc_info=True)
+
+        # The mic worker is a thread, and a thread worker cannot be cancelled
+        # from outside -- Textual can only ask. `_mic_loop` watches this event
+        # and nothing else, so without setting it the loop runs forever and
+        # quitting hangs on the executor join that never completes (issue #39).
+        mic_stop = getattr(self, "_mic_stop", None)
+        if mic_stop is not None:
+            mic_stop.set()
+
+        # Same shape, one layer down: the shared CDP connection owns a thread
+        # with a live event loop, and a loop nobody stops is a loop that gets
+        # joined at exit.
+        try:
+            close_cdp()
+        except Exception:
+            log.debug("closing the CDP channel on exit failed", exc_info=True)
 
     def action_toggle_record(self) -> None:
         """`O`: record the output continuously, marking what plays on it.
@@ -1691,33 +2090,44 @@ class KaraokeTui(App):
         stored as a marker, so the session can be cut back into tracks and
         analysed afterwards.
         """
+        if self._recording_id is None:
+            try:
+                st = self.api.record_status()
+                sessions = st.get("sessions", []) if isinstance(st, dict) else []
+                for s in sessions:
+                    if s.get("recording_id"):
+                        self._recording_id = int(s["recording_id"])
+                        break
+            except Exception:
+                pass
+
         if self._recording_id is not None:
-            recorded, total = recorder.mark_count(self._recording_id)
+            try:
+                recorded, total = recorder.mark_count(self._recording_id)
+            except Exception:
+                recorded, total = 0, 0
             stopped_id = self._recording_id
-            recorder.stop(stopped_id)
+            self.api.record_stop(stopped_id)
             self.notify(f"Recording {stopped_id} stopped "
                         f"({recorded}/{total} tracks identified)")
             self._recording_id = None
             self._record_marks = None
             self._refresh_record_status()
-            # Recording and analysing were separate steps with nothing joining
-            # them, so finished sessions simply accumulated -- four of them,
-            # nearly a gigabyte, before anyone noticed. Stopping now starts the
-            # analysis.
             if recorded:
                 self._analyse_recording(stopped_id)
             return
-        try:
-            session = recorder.start()
-        except recorder.RecorderError as exc:
-            self.notify(f"Cannot record: {exc}", severity="error")
+        result = self.api.record_start()
+        if result.get("status") != "recording":
+            detail = result.get("detail", "unknown error")
+            severity = "error"
+            self.notify(f"Cannot record: {detail}", severity=severity)
             return
-        except Exception as exc:
-            log.exception("failed to start recording")
-            self.notify(f"Record failed: {exc}", severity="error")
-            return
-        self._recording_id = session.recording_id
-        self.notify(f"Recording {session.recording_id} to {session.directory.name}")
+        self._recording_id = result["recording_id"]
+        directory = Path(result.get("dir", "")).name
+        if result.get("reused"):
+            self.notify(f"Reattached to active recording {self._recording_id}")
+        else:
+            self.notify(f"Recording {self._recording_id} to {directory}")
         self._refresh_record_status()
 
     def _analyse_recording(self, recording_id: int) -> None:
@@ -1769,32 +2179,64 @@ class KaraokeTui(App):
 
     def _refresh_record_status(self) -> None:
         """Keep the recording indicator current; also catches a died recorder."""
-        panel = self.query_one("#record-panel", Static)
+        try:
+            panel = self.query_one("#record-panel", Static)
+        except Exception:
+            return
         if self._recording_id is None:
+            rec_status = self.api.record_status()
+            active = rec_status.get("recording", [])
+            if active:
+                self._recording_id = int(active[0]["recording_id"])
+            else:
+                panel.set_class(False, "-on")
+                panel.update("")
+                return
+
+        rec_status = self.api.record_status()
+        active = rec_status.get("recording", [])
+        active_map = {int(item["recording_id"]): item for item in active}
+
+        rec_id = self._recording_id
+        if rec_id is None:
             panel.set_class(False, "-on")
             panel.update("")
             return
-        if not recorder.is_running(self._recording_id):
+
+        if rec_id in active_map:
+            item = active_map[rec_id]
+            self._record_tick += 1
+            panel.set_class(True, "-on")
+            panel.update(record_panel(
+                recording_id=rec_id,
+                elapsed_s=float(item.get("elapsed_s") or 0.0),
+                marks_ok=int(item.get("identified") or 0),
+                marks_total=int(item.get("marks") or 0),
+                size_bytes=int(item.get("audio_bytes") or 0),
+                source=str(item.get("source") or ""),
+                blink=self._record_tick % 2 == 1,
+            ))
+            return
+
+        if not recorder.is_running(rec_id):
             # The capture died on its own (ffmpeg exited, or a cap was hit).
-            self.notify(f"Recording {self._recording_id} ended", severity="warning")
+            self.notify(f"Recording {rec_id} ended", severity="warning")
             self._recording_id = None
             panel.set_class(False, "-on")
             panel.update("")
             return
 
         self._record_tick += 1
-        # The clock and the blink want a fast refresh; the mark count is a
-        # database round trip and does not, so it is sampled every fifth tick.
         if self._record_tick % 5 == 1 or self._record_marks is None:
-            self._record_marks = recorder.mark_count(self._recording_id)
-        directory = recorder.session_directory(self._recording_id)
+            self._record_marks = recorder.mark_count(rec_id)
+        directory = recorder.session_directory(rec_id)
         panel.set_class(True, "-on")
         panel.update(record_panel(
-            recording_id=self._recording_id,
-            elapsed_s=recorder.elapsed(self._recording_id) or 0.0,
+            recording_id=rec_id,
+            elapsed_s=recorder.elapsed(rec_id) or 0.0,
             marks_ok=self._record_marks[0], marks_total=self._record_marks[1],
             size_bytes=recorder.directory_size(directory) if directory else 0,
-            source=recorder.session_source(self._recording_id) or "",
+            source=recorder.session_source(rec_id) or "",
             blink=self._record_tick % 2 == 1,
         ))
 
@@ -2057,7 +2499,8 @@ class KaraokeTui(App):
             url = f"https://www.youtube.com/results?search_query={query}"
             kind = "youtube_search"
         try:
-            pid = open_song_url(url, kind)
+            pid = open_song_url(
+                url, kind, artist=artist, title=title, prefer_audio=True)
         except Exception as exc:
             log.exception("KaraokeTui failed to open %s", url)
             self.notify(f"Open failed; see {LOG_FILE}", severity="error")
@@ -2102,25 +2545,28 @@ class KaraokeTui(App):
 
     def action_play_pause(self) -> None:
         if self._det.is_active:
-            ok = playerctl.play_pause(self._control_player())
+            ok = self.api.player_play_pause(self._control_player())
             if not ok:
                 self.notify("control failed", severity="warning")
 
     def action_next_track(self) -> None:
+        if self._queue and self._queue_at >= 0:
+            self.action_queue_next()
+            return
         if self._det.is_active:
-            playerctl.next_track(self._control_player())
+            self.api.player_next(self._control_player())
 
     def action_previous_track(self) -> None:
         if self._det.is_active:
-            playerctl.previous_track(self._control_player())
+            self.api.player_previous(self._control_player())
 
     def action_seek_back(self) -> None:
         if self._det.is_active:
-            playerctl.seek(-5, self._control_player())
+            self.api.player_seek(-5, self._control_player())
 
     def action_seek_fwd(self) -> None:
         if self._det.is_active:
-            playerctl.seek(5, self._control_player())
+            self.api.player_seek(5, self._control_player())
 
     # -- detection + live sync -------------------------------------------
     def _effective_detection(self) -> detect.Detection:
@@ -2338,8 +2784,15 @@ class KaraokeTui(App):
             return
         # Radio mode has no MPRIS player to ask; the playhead is dead-reckoned
         # from where songrec last heard us.
-        pos = self.mic_elapsed() if self._det.mode == "radio" else \
-            playerctl.position(self._control_player())
+        pos = None
+        if self._det.mode == "radio":
+            pos = self.mic_elapsed()
+        else:
+            b_state = browser_playback()
+            if b_state and b_state.get("present") and b_state.get("position") is not None:
+                pos = float(b_state["position"])
+            else:
+                pos = playerctl.position(self._control_player())
         if pos is None:
             return
         # Pull the highlight back by the sync offset: browser MPRIS position runs
@@ -2356,10 +2809,13 @@ class KaraokeTui(App):
         self._render_visuals(self._current_song_row(), "", elapsed)
 
     def _render_synced(self, elapsed: float) -> None:
+        try:
+            lyrics_widget = self.query_one("#lyrics", Static)
+        except Exception:
+            return
         tl = self._timeline
         active = tl.active_index(elapsed)
         mood = mood_of(tl.lines[active][1]) if active >= 0 else "neutral"
-        lyrics_widget = self.query_one("#lyrics", Static)
         # Fill the panel. _render_body defaults to 8 lines total, which left
         # most of a full-height pane empty. Weighted towards what is coming up,
         # and the active line is kept off the very top and bottom edges.
@@ -2391,23 +2847,28 @@ class KaraokeTui(App):
         a wrong match obviously wrong rather than merely odd, and it is the only
         thing that still works on a terminal without colour.
         """
-        panel = self.query_one("#mood-square", Static)
+        try:
+            square_panel = self.query_one("#mood-square", Static)
+            label_panel = self.query_one("#mood-label", Static)
+        except Exception:
+            return
+        
         if mood != self._mood_shown or self._mood_art is None:
-            # A new mood needs a new picture; rendering happens off the UI
-            # thread, so fall back to the glyph block until it arrives.
             if mood != self._mood_shown:
                 self._mood_shown = mood
                 self._refresh_mood_art(mood)
+                
+        import pyfiglet
+        from rich.text import Text
+        fig_str = pyfiglet.figlet_format(mood.upper(), font="mini").rstrip()
+        label_panel.update(Text(fig_str, style="bold cyan"))
+                
         if self._mood_art is None:
-            panel.update(
-                f"{mood.upper()}\n\n{MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral'])}"
-            )
+            # Fall back to glyphs until rendering finishes
+            square_panel.update(MOOD_GLYPHS.get(mood, MOOD_GLYPHS['neutral']))
             return
-        # The mood is the label; where the picture came from is not something
-        # to read on every track, and "cover" sat next to the art competing
-        # with it for attention. Kept in _mood_source for the log.
-        label = Text(mood.upper(), style="bold")
-        panel.update(Text("\n").join([label, self._mood_art]))
+
+        square_panel.update(self._mood_art)
 
     def _refresh_mood_art(self, mood: str) -> None:
         """Render a picture for this mood in a worker thread.
@@ -2428,6 +2889,7 @@ class KaraokeTui(App):
                 pixels, source = moodframe.image_for(mood, analysis, cols, rows)
                 if not pixels:
                     return
+                self._mood_pixels = pixels
                 self._mood_art = coverart.to_text(pixels)
                 self._mood_source = source
                 self.call_from_thread(self._update_mood, mood)
@@ -2440,7 +2902,10 @@ class KaraokeTui(App):
             log.debug("mood art dispatch failed", exc_info=True)
 
     def _update_keybpm(self, song: SongMapping | None) -> None:
-        panel = self.query_one("#keybpm", Static)
+        try:
+            panel = self.query_one("#keybpm", Static)
+        except Exception:
+            return
         if song is None:
             panel.update("key: —\nbpm: —")
             return
@@ -2504,13 +2969,35 @@ class KaraokeTui(App):
         self._update_keybpm(song)
         analysis = self._lookup_analysis(song) if song else None
         bpm = analysis.bpm if analysis else None
+
+        if getattr(self, "_mood_pixels", None):
+            try:
+                from rich.text import Text
+                from . import coverart
+                import pyfiglet
+                
+                animated_pixels = visuals.animate_mood_pixels(self._mood_pixels, elapsed, bpm)
+                animated_text = coverart.to_text(animated_pixels)
+                
+                # Generate ASCII art text, strip trailing newlines
+                fig_str = pyfiglet.figlet_format(self._mood_shown.upper(), font="mini").rstrip()
+                label = Text(fig_str, style="bold cyan")
+                
+                self.query_one("#mood-label", Static).update(label)
+                self.query_one("#mood-square", Static).update(animated_text)
+            except Exception as e:
+                import logging
+                logging.getLogger("karaoke").error(f"Error animating mood square: {e}", exc_info=True)
         arc = visuals.sentiment_arc(profile)
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)
         cartwheel = visuals.cartwheel_frame(bpm, elapsed)
-        self.query_one("#ascii-visual", Static).update(
-            f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
-        )
+        try:
+            self.query_one("#ascii-visual", Static).update(
+                f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
+            )
+        except Exception:
+            pass
 
     def cover_source(self, url: str = "") -> "os.PathLike | None":
         """Where to get artwork for the current track.

@@ -23,4 +23,7 @@ ddgs>=9.16.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 pika
+celery>=5.4
+flower>=2.0
+sqlalchemy>=2.0
 

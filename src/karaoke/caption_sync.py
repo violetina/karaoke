@@ -273,7 +273,7 @@ def json3_to_lrc(payload: str | dict, *, max_words: int = 10) -> str:
     Raises ``ValueError`` when the payload is not valid json3.
     """
     return "\n".join(
-        f"{_format_lrc_timestamp(start_ms)}{text}"
+        f"{_format_lrc_timestamp(start_ms)} {text}"
         for start_ms, text, _ in _caption_rows(payload, max_words)
     )
 
@@ -298,10 +298,10 @@ def json3_to_enhanced_lrc(payload: str | dict, *, max_words: int = 10) -> str:
         stamp = _format_lrc_timestamp(start_ms)
         words = text.split()
         if len(word_ms) != len(words):
-            out.append(f"{stamp}{text}")
+            out.append(f"{stamp} {text}")
             continue
         tagged = " ".join(
             f"{_format_word_timestamp(ts)}{w}" for ts, w in zip(word_ms, words)
         )
-        out.append(f"{stamp}{tagged}")
+        out.append(f"{stamp} {tagged}")
     return "\n".join(out)

@@ -1,0 +1,20 @@
+[Unit]
+Description=Karaoke Celery Flower dashboard
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_ORCHESTRATOR=celery
+Environment=RABBITMQ_HOST=localhost
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app flower --address=127.0.0.1 --port=5555
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-celery-flower
+
+[Install]
+WantedBy=karaoke.target
