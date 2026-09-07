@@ -235,6 +235,21 @@ class ApiClient:
             return res
         return {"sessions": [], "count": 0}
 
+    def recent_events(self, since_ts: Optional[float] = None, limit: int = 50) -> dict[str, Any]:
+        """Recent Celery task-completion events (Argo Events -> OpenSearch ledger).
+
+        Used by pollers to refresh a finished track in place without a reload.
+        """
+        params = {"since_ts": since_ts, "limit": limit}
+        res = self._http_get(self.ctrl_url, "/api/events/recent", params)
+        if res is not None:
+            return res
+        if self.fallback_local:
+            from . import events
+            items = events.recent_events(since_ts=since_ts, limit=limit)
+            return {"events": items, "count": len(items)}
+        return {"events": [], "count": 0}
+
     def get_play_session(self, session_id: str) -> Optional[dict[str, Any]]:
         return self._http_get(self.ctrl_url, f"/api/play/sessions/{session_id}")
 

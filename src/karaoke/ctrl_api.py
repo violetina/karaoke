@@ -172,6 +172,23 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/api/events/recent")
+def recent_task_events(
+    since_ts: Optional[float] = Query(default=None, description="Only events newer than this epoch ts"),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    """Recent Celery task-completion events from the OpenSearch ledger.
+
+    Populated by the Argo Events sensor when a `karaoke.tasks.*` task succeeds.
+    A TUI / web-UI poller reads this to refresh a just-finished track in place
+    (new key/BPM/lyrics) without a full reload that would kill in-process work.
+    Best-effort: returns an empty list when the cluster/index is unavailable.
+    """
+    from . import events
+    items = events.recent_events(since_ts=since_ts, limit=limit)
+    return {"events": items, "count": len(items)}
+
+
 @app.post("/api/play")
 def play_track(req: PlayRequest) -> dict[str, Any]:
     """Open/play a song URL and return a durable-ish session handle."""
