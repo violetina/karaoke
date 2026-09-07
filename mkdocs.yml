@@ -62,6 +62,7 @@ nav:
   - Overview: index.md
   - Quickstart runbook: howto-quickstart-runbook.md
   - Architecture: architecture.md
+  - Services & Topology: platform-services.md
   - Cache schema: cache-schema.md
   - Local cache and stats: local-cache-and-stats.md
   - API reference: api.md
