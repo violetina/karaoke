@@ -85,8 +85,8 @@ print('track_id:', tid, 'needs:', needs_postprocessing(tid, conn))
 
 **Why the worker runs on the host (not in-cluster):** it needs the local SQLite DB, the
 YouTube audio cache, and the heavy analysis stack (essentia/librosa/whisper/yt-dlp) —
-none of which belong in the slim API container image. Only the stateless **broker** runs
-in kind.
+none of which belong in the slim API container image. Only the stateless **RabbitMQ
+broker** runs in kind.
 
 Key modules:
 - `src/karaoke/postprocess_queue.py` — `needs_postprocessing()` (gap detection),
@@ -96,9 +96,12 @@ Key modules:
   name `karaoke-postprocess-celery`).
 - `src/karaoke/tasks.py` — Celery task wrapper. Phase 1 deliberately calls the proven
   `postprocess_worker.process_task()` so behaviour stays unchanged while Celery adds
-  retries, persisted task results, visibility and dashboard control.
-- `src/karaoke/postprocess_worker.py` — legacy pika consumer and the reusable processing
-  implementation.
+- `src/karaoke/tasks.py` — **Celery orchestrator task** (`postprocess_track`), which
+  chains together the granular sub-tasks for downloading audio, analyzing, syncing
+  lyrics, and rebuilding vectors. Also includes the individual sub-tasks.
+- `src/karaoke/postprocess_worker.py` — Reusable **core logic functions** (`run_download_logic`,
+  `run_analysis_logic`, `run_timings_logic`, `run_sync_logic`, `run_vectors_logic`)
+  called by the Celery tasks. The legacy pika consumer has been removed.
 - `scripts/enqueue_postprocess.py` — bulk backfill from SQLite.
 - `deploy/k8s/rabbitmq.yaml` — broker Deployment + NodePort Service.
 
@@ -129,12 +132,6 @@ as they arrive. Keep it running while you use the app. For real use, prefer
 `make systemd-up`: it starts `karaoke-celery-worker.service`, capped by
 `karaoke-postprocess.slice` so analysis does not starve playback.
 
-Rollback/manual legacy worker:
-
-```bash
-KARAOKE_ORCHESTRATOR=legacy make postprocess-worker
-```
-
 ### 3b. Run the dashboard
 
 ```bash
@@ -144,7 +141,8 @@ make celery-flower
 Open http://127.0.0.1:5555 to watch tasks, worker status and failures. Under
 systemd, `karaoke-celery-flower.service` is started by `karaoke.target`. Task
 results are persisted in `~/.local/share/karaoke/celery-results.sqlite` by default,
-so completed/failed task metadata survives worker restarts.
+so completed/failed task metadata survives worker restarts, and detailed logs for
+each sub-task are visible.
 
 ### 4. Fill the queue
 Either **play songs in the TUI** (auto-enqueues anything missing assets), or backfill
