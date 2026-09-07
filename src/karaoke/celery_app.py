@@ -8,9 +8,12 @@ legacy pika worker cannot consume an incompatible protocol body.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import quote
 
 from celery import Celery
+
+from .config import settings
 
 POSTPROCESS_QUEUE = os.environ.get(
     "KARAOKE_CELERY_POSTPROCESS_QUEUE", "karaoke-postprocess-celery")
@@ -29,13 +32,21 @@ def broker_url() -> str:
 
 
 def result_backend_url() -> str | None:
-    """Return the configured result backend, if any.
+    """Return the Celery result backend URL.
 
-    Celery can publish and run fire-and-forget work with no result backend. That
-    keeps phase 1 from introducing Redis. If richer chains/chords need stored
-    results later, set CELERY_RESULT_BACKEND (for example to redis://...).
+    Results are persisted by default in a local SQLite database under the
+    karaoke data directory. That gives Flower/task debugging durable state
+    without adding Redis just for phase 1. Override with CELERY_RESULT_BACKEND
+    for another backend, or KARAOKE_CELERY_RESULT_DB for a different SQLite file.
     """
-    return os.environ.get("CELERY_RESULT_BACKEND") or None
+    if os.environ.get("CELERY_RESULT_BACKEND"):
+        return os.environ["CELERY_RESULT_BACKEND"]
+    path = Path(os.environ.get(
+        "KARAOKE_CELERY_RESULT_DB",
+        str(settings.data_dir / "celery-results.sqlite"),
+    )).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"db+sqlite:///{path}"
 
 
 app = Celery("karaoke", broker=broker_url(), backend=result_backend_url())
@@ -44,6 +55,9 @@ app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     task_track_started=True,
+    task_ignore_result=False,
+    result_extended=True,
+    result_expires=int(os.environ.get("KARAOKE_CELERY_RESULT_EXPIRES", "604800")),
     worker_prefetch_multiplier=1,
     task_routes={
         "karaoke.tasks.postprocess_track": {"queue": POSTPROCESS_QUEUE},

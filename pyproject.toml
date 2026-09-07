@@ -23,6 +23,7 @@ dependencies = [
     "pika",
     "celery>=5.4",
     "flower>=2.0",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]

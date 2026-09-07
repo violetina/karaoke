@@ -96,7 +96,7 @@ Key modules:
   name `karaoke-postprocess-celery`).
 - `src/karaoke/tasks.py` — Celery task wrapper. Phase 1 deliberately calls the proven
   `postprocess_worker.process_task()` so behaviour stays unchanged while Celery adds
-  retries, visibility and dashboard control.
+  retries, persisted task results, visibility and dashboard control.
 - `src/karaoke/postprocess_worker.py` — legacy pika consumer and the reusable processing
   implementation.
 - `scripts/enqueue_postprocess.py` — bulk backfill from SQLite.
@@ -142,7 +142,9 @@ make celery-flower
 ```
 
 Open http://127.0.0.1:5555 to watch tasks, worker status and failures. Under
-systemd, `karaoke-celery-flower.service` is started by `karaoke.target`.
+systemd, `karaoke-celery-flower.service` is started by `karaoke.target`. Task
+results are persisted in `~/.local/share/karaoke/celery-results.sqlite` by default,
+so completed/failed task metadata survives worker restarts.
 
 ### 4. Fill the queue
 Either **play songs in the TUI** (auto-enqueues anything missing assets), or backfill
@@ -201,7 +203,9 @@ forwarded alongside AMQP by `make mq-port-forward` / `karaoke-mq-forward.service
 | `KARAOKE_ORCHESTRATOR` | `celery` | `celery` (default) publishes Celery tasks; `legacy` uses the old pika queue. |
 | `KARAOKE_CELERY_POSTPROCESS_QUEUE` | `karaoke-postprocess-celery` | Celery queue name for post-processing tasks. |
 | `CELERY_BROKER_URL` | *(derived from RabbitMQ env)* | Full Celery broker URL override. |
-| `CELERY_RESULT_BACKEND` | *(unset)* | Optional result backend; phase 1 runs fire-and-forget without Redis. |
+| `CELERY_RESULT_BACKEND` | `db+sqlite:///$XDG_DATA_HOME/karaoke/celery-results.sqlite` | Persistent task result backend. Override for Redis/etc. |
+| `KARAOKE_CELERY_RESULT_DB` | `~/.local/share/karaoke/celery-results.sqlite` | SQLite result DB path when `CELERY_RESULT_BACKEND` is not set. |
+| `KARAOKE_CELERY_RESULT_EXPIRES` | `604800` | Result retention in seconds (default 7 days). |
 | `KARAOKE_COOKIES_FROM_BROWSER` | *(unset)* | Browser to pull YouTube cookies from (e.g. `firefox`) for Premium/age-restricted access. |
 | `KARAOKE_YTDLP_REMOTE_COMPONENTS` | `ejs:github` | yt-dlp EJS challenge-solver components (see below). Set empty to disable. |
 

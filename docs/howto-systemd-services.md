@@ -45,7 +45,8 @@ logged in, enable lingering once: `loginctl enable-linger $USER`.)
 `karaoke.target` starts `karaoke-celery-worker.service` and
 `karaoke-celery-flower.service`. Celery consumes the RabbitMQ-backed
 `karaoke-postprocess-celery` queue, gives every task retry/backoff/visibility,
-and Flower exposes the dashboard at http://127.0.0.1:5555.
+stores task results in `~/.local/share/karaoke/celery-results.sqlite`, and Flower
+exposes the dashboard at http://127.0.0.1:5555.
 
 The legacy `karaoke-postprocess@.service` template is still installed for
 rollback/manual debugging (`KARAOKE_ORCHESTRATOR=legacy`) but is no longer started
@@ -121,7 +122,9 @@ Units read the same env vars as the app; override per-unit with
 | `RABBITMQ_HOST` | `localhost` | worker, Flower |
 | `KARAOKE_ORCHESTRATOR` | `celery` | publisher/worker selection (`legacy` rolls back to pika) |
 | `KARAOKE_CELERY_POSTPROCESS_QUEUE` | `karaoke-postprocess-celery` | Celery worker queue |
-| `CELERY_RESULT_BACKEND` | *(unset)* | optional Celery backend; phase 1 works without Redis |
+| `CELERY_RESULT_BACKEND` | SQLite result DB | persistent Celery result backend override |
+| `KARAOKE_CELERY_RESULT_DB` | `~/.local/share/karaoke/celery-results.sqlite` | default SQLite result DB |
+| `KARAOKE_CELERY_RESULT_EXPIRES` | `604800` | result retention seconds |
 | `KARAOKE_COOKIES_FROM_BROWSER` | `firefox` | worker (YouTube auth) |
 | `KUBE_CONTEXT` | `kind-karaoke` | port-forward, health check |
 | `K8S_NAMESPACE` | `karaoke` | port-forward, health check |
