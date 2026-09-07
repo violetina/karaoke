@@ -13,7 +13,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Header, Footer, DataTable, Static, Button, Input, OptionList
+from textual.widgets import Header, Footer, DataTable, Static, Button, Input, RichLog
 from textual.containers import Vertical, Horizontal, Container
 from textual import log as textual_log
 
@@ -29,42 +29,63 @@ class KaraokeAdminApp(App):
     TITLE = "Karaoke Platform Operations & Worker Control"
     SUB_TITLE = "Manage Workers · Error Logs · Ingestion Pipeline"
 
-    # Every panel gets a bounded height and its own scroll region, so a long
-    # error traceback stays inside #log-container instead of spilling over the
-    # panels above and below it (the report that started this rework).
+    # Split layout: left column houses controls & workers; right column is a
+    # dedicated, full-height scrollable log & diagnostics viewer.
     CSS = """
-    #admin-workspace { layout: vertical; height: 1fr; overflow-y: auto; }
+    #admin-workspace {
+        layout: horizontal;
+        height: 1fr;
+    }
+
+    #controls-column {
+        width: 55%;
+        height: 1fr;
+        overflow-y: auto;
+        padding-right: 1;
+    }
+
+    #log-container {
+        width: 45%;
+        height: 1fr;
+        border: round $primary;
+        padding: 0 1;
+    }
+
+    #log-title {
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+
+    #error-log {
+        height: 1fr;
+        overflow-y: auto;
+        border: none;
+    }
 
     #worker-container, #pipeline-container, #align-container,
-    #ingest-container, #clients-container, #log-container {
-        border: round $primary; padding: 0 1; margin-bottom: 1;
+    #ingest-container, #clients-container {
+        border: round $primary;
+        padding: 0 1;
+        margin-bottom: 1;
         height: auto;
     }
 
-    #worker-title { text-style: bold; }
+    #worker-title, #clients-title { text-style: bold; }
     #worker-controls, #pipeline-controls { height: auto; margin-bottom: 1; }
-    #worker-controls Button, #pipeline-controls Button { margin-right: 2; }
+    #worker-controls Button, #pipeline-controls Button { margin-right: 1; }
 
-    /* Bounded so a long unit list cannot push the pipeline panel off-screen. */
     #worker-table { height: 5; margin-bottom: 1; }
     #worker-summary { height: auto; color: $text-muted; }
 
     #clients-container { height: auto; }
-    #clients-title { text-style: bold; }
-    #clients-table { height: 6; }
+    #clients-table { height: 5; }
     #clients-summary { height: 1; color: $text-muted; }
 
     #align-container Horizontal, #ingest-container Horizontal { height: auto; }
-    #align-container Input { margin-right: 2; }
-    #ingest-container Input { margin-right: 2; }
-
-    /* The error log lives in its own fixed-height, scrollable box. This is the
-       fix for the log spilling over/under neighbouring panels: overflow is
-       clipped to the container and #error-list scrolls inside it. */
-    #log-container { height: 1fr; min-height: 6; }
-    #log-title { text-style: bold; }
-    #error-list { height: 1fr; overflow-y: auto; border: none; }
+    #align-container Input, #ingest-container Input { margin-right: 1; }
     """
+
 
 
     BINDINGS = [
@@ -119,52 +140,54 @@ class KaraokeAdminApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="admin-workspace"):
-            # Top: Worker Pool Status & Scaling Controls
-            with Container(id="worker-container"):
-                yield Static("[bold cyan]Post-Processing Workers (Celery + Flower)[/bold cyan]", id="worker-title")
-                with Horizontal(id="worker-controls"):
-                    yield Button("Start Worker (+)", id="btn-scale-up", variant="success")
-                    yield Button("Stop Worker (-)", id="btn-scale-down", variant="warning")
-                    yield Button("Restart Workers (R)", id="btn-restart-workers", variant="primary")
-                    yield Button("Stop Web UI (X)", id="btn-stop-webui", variant="default")
-                    yield Button("Quit (q)", id="btn-quit", variant="error")
-                yield DataTable(id="worker-table", cursor_type="row")
-                yield Static("Worker Status: Loading...", id="worker-summary")
+        with Horizontal(id="admin-workspace"):
+            # Left column: Operations, Workers, Clients, Pipeline controls
+            with Vertical(id="controls-column"):
+                # Top: Worker Pool Status & Scaling Controls
+                with Container(id="worker-container"):
+                    yield Static("[bold cyan]Post-Processing Workers (Celery + Flower)[/bold cyan]", id="worker-title")
+                    with Horizontal(id="worker-controls"):
+                        yield Button("Start Worker (+)", id="btn-scale-up", variant="success")
+                        yield Button("Stop Worker (-)", id="btn-scale-down", variant="warning")
+                        yield Button("Restart Workers (R)", id="btn-restart-workers", variant="primary")
+                        yield Button("Stop Web UI (X)", id="btn-stop-webui", variant="default")
+                        yield Button("Quit (q)", id="btn-quit", variant="error")
+                    yield DataTable(id="worker-table", cursor_type="row")
+                    yield Static("Worker Status: Loading...", id="worker-summary")
 
-            # Connected clients: web-UI sessions and active playback sessions.
-            with Container(id="clients-container"):
-                yield Static("[bold cyan]Connected Clients (Web UI + Playback)[/bold cyan]", id="clients-title")
-                yield DataTable(id="clients-table", cursor_type="row")
-                yield Static("Clients: Loading...", id="clients-summary")
+                # Connected clients: web-UI sessions and active playback sessions.
+                with Container(id="clients-container"):
+                    yield Static("[bold cyan]Connected Clients (Web UI + Playback)[/bold cyan]", id="clients-title")
+                    yield DataTable(id="clients-table", cursor_type="row")
+                    yield Static("Clients: Loading...", id="clients-summary")
 
-            # Middle: Audio Processing & Vector Ingestion Controls
-            with Container(id="pipeline-container"):
-                yield Static("[bold cyan]Audio Processing & Vector Ingestion Pipeline[/bold cyan]")
-                with Horizontal(id="pipeline-controls"):
-                    yield Button("Run Audio Backfill (b)", id="btn-backfill", variant="success")
-                    yield Button("Rebuild Vectors (v)", id="btn-rebuild-vectors", variant="primary")
-                    yield Button("Analyse Recordings (a)", id="btn-recordings", variant="warning")
+                # Middle: Audio Processing & Vector Ingestion Controls
+                with Container(id="pipeline-container"):
+                    yield Static("[bold cyan]Audio Processing & Vector Ingestion Pipeline[/bold cyan]")
+                    with Horizontal(id="pipeline-controls"):
+                        yield Button("Run Audio Backfill (b)", id="btn-backfill", variant="success")
+                        yield Button("Rebuild Vectors (v)", id="btn-rebuild-vectors", variant="primary")
+                        yield Button("Analyse Recordings (a)", id="btn-recordings", variant="warning")
 
-            # Whisper Plain Lyrics Alignment Panel
-            with Container(id="align-container"):
-                yield Static("[bold cyan]Whisper Lyrics Alignment (Paste Text or Path to lyrics.txt)[/bold cyan]")
-                with Horizontal():
-                    yield Input(placeholder="Track ID or Artist - Title...", id="align-track-input")
-                    yield Input(placeholder="Plain lyrics text OR path to file.txt...", id="align-text-input")
-                    yield Button("Whisper Align (w)", id="btn-align", variant="success")
+                # Whisper Plain Lyrics Alignment Panel
+                with Container(id="align-container"):
+                    yield Static("[bold cyan]Whisper Lyrics Alignment (Paste Text or Path to lyrics.txt)[/bold cyan]")
+                    with Horizontal():
+                        yield Input(placeholder="Track ID or Artist - Title...", id="align-track-input")
+                        yield Input(placeholder="Plain lyrics text OR path to file.txt...", id="align-text-input")
+                        yield Button("Whisper Align (w)", id="btn-align", variant="success")
 
-            # File Upload / Ingestion Panel
-            with Container(id="ingest-container"):
-                yield Static("[bold cyan]File Ingestion & Folder Scan[/bold cyan]")
-                with Horizontal():
-                    yield Input(placeholder="Path to folder or audio file (e.g. ~/Music)...", id="ingest-input")
-                    yield Button("Scan Folder", id="btn-scan", variant="primary")
+                # File Upload / Ingestion Panel
+                with Container(id="ingest-container"):
+                    yield Static("[bold cyan]File Ingestion & Folder Scan[/bold cyan]")
+                    with Horizontal():
+                        yield Input(placeholder="Path to folder or audio file (e.g. ~/Music)...", id="ingest-input")
+                        yield Button("Scan Folder", id="btn-scan", variant="primary")
 
-            # Bottom: Live Error Log Diagnostics
-            with Container(id="log-container"):
+            # Right column: Dedicated Log & Diagnostics Viewer (full height, isolated)
+            with Vertical(id="log-container"):
                 yield Static("[bold red]Recent Error Logs & Diagnostics[/bold red]", id="log-title")
-                yield OptionList(id="error-list")
+                yield RichLog(id="error-log", highlight=True, markup=True, wrap=True)
 
         yield Footer()
 
@@ -245,14 +268,28 @@ class KaraokeAdminApp(App):
 
     def refresh_errors(self) -> None:
         try:
-            res = self.api._http_get(self.api.ctrl_url, "/api/logs/errors?lines=30")
-            error_list = self.query_one("#error-list", OptionList)
-            error_list.clear_options()
+            res = self.api._http_get(self.api.ctrl_url, "/api/logs/errors?lines=50")
+            error_log = self.query_one("#error-log", RichLog)
             if res and res.get("logs"):
-                for err in res["logs"]:
-                    error_list.add_option(str(err))
+                logs = res["logs"]
+                if getattr(self, "_last_logs_seen", None) != logs:
+                    self._last_logs_seen = list(logs)
+                    error_log.clear()
+                    for err in logs:
+                        line = str(err)
+                        if "ERROR" in line or "CRITICAL" in line:
+                            error_log.write(f"[bold red]{line}[/bold red]")
+                        elif "Traceback" in line or "Exception" in line:
+                            error_log.write(f"[bold yellow]{line}[/bold yellow]")
+                        elif "WARNING" in line:
+                            error_log.write(f"[yellow]{line}[/yellow]")
+                        else:
+                            error_log.write(f"[dim]{line}[/dim]")
             else:
-                error_list.add_option("[dim]No recent system errors found.[/dim]")
+                if getattr(self, "_last_logs_seen", None) != []:
+                    self._last_logs_seen = []
+                    error_log.clear()
+                    error_log.write("[dim]No recent system errors found.[/dim]")
         except Exception as exc:
             log.debug("refresh_errors failed", exc_info=True)
 
