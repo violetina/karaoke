@@ -2,8 +2,7 @@
 Description=Karaoke Celery Flower dashboard
 Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
 After=network-online.target karaoke-mq-forward.service
-Wants=network-online.target
-Requires=karaoke-mq-forward.service
+Wants=network-online.target karaoke-mq-forward.service
 PartOf=karaoke.target
 
 [Service]
