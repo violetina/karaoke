@@ -57,6 +57,7 @@ go stale. The ones worth knowing:
 - **Sort Selector**: Sort tracks by `Artist / Title (A-Z)`, `🌱 Priority: Least Played`, `⭐ Most Played`, `Energy (high→low)`, `Energy (low→high)`, `BPM (fast→slow)`, `BPM (slow→fast)`, or `Key`. Play counts are stored per track (`tracks.play_count`, incremented on every play/discover event) so "least played" surfaces undiscovered tracks first.
 - **Genre & Feeling Column**: Displays CLAP zero-shot genre label + acoustic feeling glyph (`Genre/Feel` e.g. `hip hop 🌙`, `rock 🔥`, `pop ⚡`). Feeling is derived from energy (arousal) and brightness (valence proxy): 🔥/☀/⚡/🌗/♡/🌙.
 - **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear queue (`C`), Play-once auto-advance (`o`).
+- **Keep the vibe going** (`G`): appends tracks that fit the *whole* current queue. Seeds on every queued track by audio similarity (CLAP embedding, with a per-seed spectral fallback), pools the neighbours, and adds the ones closest to the set — a track that fits several queued songs outranks one that only resembles a single outlier. Already-queued tracks are skipped and each artist is capped. Needs the OpenSearch audio/CLAP indexes; if no seed has a vector it reports that instead of adding anything.
 
 ## Operations & Admin Dashboard (`make admin`)
 

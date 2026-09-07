@@ -862,6 +862,7 @@ class KaraokeTui(App):
         ("a", "enqueue_selected", "Enqueue track"),
         ("C", "clear_queue", "Clear queue"),
         ("U", "shuffle_queue", "Shuffle queue"),
+        ("G", "suggest_queue", "Keep vibe going"),
         ("minus", "mood_down", "Mood-"),
         ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
@@ -1871,6 +1872,55 @@ class KaraokeTui(App):
         except Exception:
             pass
         self.notify("Queue cleared")
+
+    def action_suggest_queue(self) -> None:
+        """`G`: keep the vibe going — append tracks that fit the whole queue.
+
+        Seeds on every track in the queue by audio similarity (CLAP, spectral
+        fallback), pools the neighbours, and appends the ones that fit best,
+        skipping anything already queued.
+        """
+        seeds = [row.get("track_id") for row in self._queue
+                 if row.get("track_id")]
+        if not seeds:
+            self.notify("Queue is empty — nothing to seed suggestions on",
+                        severity="warning")
+            return
+        self.notify("Finding tracks that keep the vibe going…")
+
+        def _bg() -> None:
+            try:
+                picks = self.api.suggest_queue(list(seeds), limit=5)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.notify, f"Suggestions failed: {exc}", severity="error")
+                return
+            self.call_from_thread(self._apply_suggestions, picks)
+
+        self.run_worker(_bg, thread=True)
+
+    def _apply_suggestions(self, picks: list) -> None:
+        """Append suggested tracks to the queue (called on the UI thread)."""
+        if not picks:
+            self.notify("No suggestions — seed tracks may lack audio vectors",
+                        severity="warning")
+            return
+        for p in picks:
+            self._queue.append({
+                "track_id": p.get("track_id"),
+                "artist": str(p.get("artist") or ""),
+                "title": str(p.get("title") or ""),
+                "url": str(p.get("url") or ""),
+                "kind": "",
+            })
+        try:
+            self.query_one("#queue", DataTable).set_class(True, "-on")
+        except Exception:
+            pass
+        self._render_queue()
+        space = picks[0].get("space", "audio") if picks else "audio"
+        self.notify(f"Added {len(picks)} tracks to keep the vibe going "
+                    f"({space}); queue: {len(self._queue)}")
 
     def action_sample_key(self) -> None:
         """`k`: detect key/BPM by recording what is playing.

@@ -125,6 +125,29 @@ class ApiClient:
     def get_stats(self, limit: int = 10, days: Optional[float] = None) -> Optional[dict[str, Any]]:
         return self._http_get(self.lib_url, "/api/stats", {"limit": limit, "days": days})
 
+    def suggest_queue(self, track_ids: list[int], limit: int = 10,
+                      per_artist: int = 2) -> list[dict[str, Any]]:
+        """Tracks that keep the vibe of a whole queue going (audio similarity)."""
+        body = {"track_ids": track_ids, "limit": limit, "per_artist": per_artist}
+        res = self._http_post(self.lib_url, "/api/queue/suggest", body)
+        if res is not None and isinstance(res, list):
+            return res
+        if self.fallback_local:
+            from . import queue_suggest, localcache
+            try:
+                suggestions = queue_suggest.suggest_for_queue(
+                    track_ids, limit=limit, per_artist=per_artist)
+                with localcache.connect() as conn:
+                    return [{
+                        "track_id": s.track_id, "artist": s.artist,
+                        "title": s.title, "score": s.score,
+                        "seeds_matched": s.seeds_matched, "space": s.space,
+                        "url": queue_suggest.playable_url(s.track_id, conn),
+                    } for s in suggestions]
+            except Exception:
+                return []
+        return []
+
     def list_recordings(
         self,
         status: Optional[str] = None,

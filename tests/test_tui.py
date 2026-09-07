@@ -324,6 +324,43 @@ def test_playlist_queue_controls(monkeypatch):
     assert app._queue_at == -1
 
 
+def test_apply_suggestions_appends_to_queue(monkeypatch):
+    """Keep-the-vibe-going picks are appended to the queue."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._queue = [{"track_id": 1, "artist": "Seed", "title": "S", "url": "u", "kind": ""}]
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
+    monkeypatch.setattr(app, "_render_queue", lambda: None, raising=False)
+
+    class FakeTable:
+        def set_class(self, *a, **k): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable(), raising=False)
+
+    picks = [
+        {"track_id": 10, "artist": "A", "title": "x", "url": "ua", "space": "clap"},
+        {"track_id": 11, "artist": "B", "title": "y", "url": "ub", "space": "clap"},
+    ]
+    app._apply_suggestions(picks)
+    assert len(app._queue) == 3
+    assert [r["track_id"] for r in app._queue[1:]] == [10, 11]
+    assert any("keep the vibe going" in n for n in notifications)
+
+
+def test_apply_suggestions_empty_warns(monkeypatch):
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._queue = [{"track_id": 1, "artist": "Seed", "title": "S", "url": "u", "kind": ""}]
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda msg, **k: notifications.append(msg), raising=False)
+    app._apply_suggestions([])
+    assert len(app._queue) == 1
+    assert any("No suggestions" in n for n in notifications)
+
+
 def test_queue_filtering_on_mood_change(monkeypatch):
     """Test that changing mood filter or energy level filters the active queue."""
     from karaoke.tui import KaraokeTui

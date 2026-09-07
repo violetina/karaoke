@@ -57,6 +57,22 @@ class UpdateRecordingRequest(BaseModel):
     keep_audio: Optional[bool] = None
 
 
+class QueueSuggestRequest(BaseModel):
+    track_ids: list[int]
+    limit: int = 10
+    per_artist: int = 2
+
+
+class SuggestionResponse(BaseModel):
+    track_id: int
+    artist: str
+    title: str
+    score: float
+    seeds_matched: int
+    space: str
+    url: Optional[str] = None
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -502,6 +518,36 @@ def get_logs(lines: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
         return {"file": str(LOG_FILE), "lines": content[-lines:]}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
+
+
+@app.post("/api/queue/suggest", response_model=list[SuggestionResponse])
+def suggest_queue(req: QueueSuggestRequest) -> list[dict[str, Any]]:
+    """Suggest tracks that keep the vibe of a whole queue going.
+
+    Seeds on every track in ``track_ids`` (by audio similarity, CLAP with a
+    per-seed spectral fallback), pools their neighbours, and returns tracks
+    that fit the set. Needs the OpenSearch audio/CLAP indexes; returns an empty
+    list when no seed has a usable vector.
+    """
+    from . import queue_suggest
+
+    suggestions = queue_suggest.suggest_for_queue(
+        req.track_ids, limit=req.limit, per_artist=req.per_artist)
+    if not suggestions:
+        return []
+    with localcache.connect() as conn:
+        out: list[dict[str, Any]] = []
+        for s in suggestions:
+            out.append({
+                "track_id": s.track_id,
+                "artist": s.artist,
+                "title": s.title,
+                "score": s.score,
+                "seeds_matched": s.seeds_matched,
+                "space": s.space,
+                "url": queue_suggest.playable_url(s.track_id, conn),
+            })
+    return out
 
 
 def main() -> None:
