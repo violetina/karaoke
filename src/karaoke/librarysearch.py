@@ -127,6 +127,17 @@ def field_score(value: str, query: str) -> float:
         return PARTIAL
     if needle in haystack:
         return CONTAINS
+
+    # Fallback for multi-word search within a single field
+    words = [w for w in needle.split() if w]
+    if len(words) > 1:
+        meaningful_words = [w for w in words if len(w) > 2 or w not in ("of", "the", "a", "in", "and", "or", "to", "on", "at", "by", "for", "with", "is", "it")]
+        if not meaningful_words:
+            meaningful_words = words
+        matched_count = sum(1 for w in meaningful_words if re.search(rf"\b{re.escape(w)}\b", haystack))
+        if matched_count > 0:
+            return WORD * (matched_count / len(meaningful_words)) * 0.9
+
     return 0.0
 
 
@@ -141,7 +152,20 @@ def lyrics_score(text: str, query: str) -> float:
     needle = _normalise(query)
     if not haystack or not needle:
         return 0.0
-    return WORD if re.search(rf"\b{re.escape(needle)}\b", haystack) else 0.0
+    if re.search(rf"\b{re.escape(needle)}\b", haystack):
+        return WORD
+
+    # Fallback for multi-word search in lyrics
+    words = [w for w in needle.split() if w]
+    if len(words) > 1:
+        meaningful_words = [w for w in words if len(w) > 2 or w not in ("of", "the", "a", "in", "and", "or", "to", "on", "at", "by", "for", "with", "is", "it")]
+        if not meaningful_words:
+            meaningful_words = words
+        matched_count = sum(1 for w in meaningful_words if re.search(rf"\b{re.escape(w)}\b", haystack))
+        if matched_count > 0:
+            return WORD * (matched_count / len(meaningful_words)) * 0.8
+
+    return 0.0
 
 
 def score_row(row, query: str, *, search_lyrics: bool = True) -> tuple[float, tuple[str, ...]]:
@@ -166,6 +190,29 @@ def score_row(row, query: str, *, search_lyrics: bool = True) -> tuple[float, tu
             weight = W_LYRICS * (TRANSCRIBED_PENALTY if guessed else 1.0)
             parts.append((words * weight,
                           "lyrics?" if guessed else "lyrics"))
+
+    if not parts:
+        # Cross-field matching fallback for multi-word queries (e.g. matching "Led Zeppelin Houses Holy")
+        combined_meta = f"{row['artist'] or ''} {row['title'] or ''} {row['album'] or ''}"
+        combined_normalized = _normalise(combined_meta)
+        normalized_query = _normalise(query)
+        words = [w for w in normalized_query.split() if w]
+        if len(words) > 1:
+            meaningful_words = [w for w in words if len(w) > 2 or w not in ("of", "the", "a", "in", "and", "or", "to", "on", "at", "by", "for", "with", "is", "it")]
+            if not meaningful_words:
+                meaningful_words = words
+            matched_count = sum(1 for w in meaningful_words if re.search(rf"\b{re.escape(w)}\b", combined_normalized))
+            if matched_count > 0:
+                contributed_fields = []
+                if any(re.search(rf"\b{re.escape(w)}\b", _normalise(row["title"] or "")) for w in meaningful_words):
+                    contributed_fields.append("title")
+                if any(re.search(rf"\b{re.escape(w)}\b", _normalise(row["artist"] or "")) for w in meaningful_words):
+                    contributed_fields.append("artist")
+                if any(re.search(rf"\b{re.escape(w)}\b", _normalise(row["album"] or "")) for w in meaningful_words):
+                    contributed_fields.append("album")
+                ratio = matched_count / len(meaningful_words)
+                cross_score = WORD * ratio * W_TITLE * 0.85
+                return (cross_score, tuple(contributed_fields))
 
     if not parts:
         return (0.0, ())
