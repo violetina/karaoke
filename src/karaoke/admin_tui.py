@@ -12,6 +12,7 @@ from typing import Any
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import Header, Footer, DataTable, Static, Button, Input, OptionList
 from textual.containers import Vertical, Horizontal, Container
 from textual import log as textual_log
@@ -68,6 +69,9 @@ class KaraokeAdminApp(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("escape", "handle_escape", "Unfocus / Quit", show=False, priority=True),
         ("r", "refresh_all", "Refresh"),
         ("plus", "scale_up", "Worker +1"),
         ("minus", "scale_down", "Worker -1"),
@@ -121,7 +125,9 @@ class KaraokeAdminApp(App):
                 with Horizontal(id="worker-controls"):
                     yield Button("Start Worker (+)", id="btn-scale-up", variant="success")
                     yield Button("Stop Worker (-)", id="btn-scale-down", variant="warning")
-                    yield Button("Restart Workers", id="btn-restart-workers", variant="error")
+                    yield Button("Restart Workers (R)", id="btn-restart-workers", variant="primary")
+                    yield Button("Stop Web UI (X)", id="btn-stop-webui", variant="default")
+                    yield Button("Quit (q)", id="btn-quit", variant="error")
                 yield DataTable(id="worker-table", cursor_type="row")
                 yield Static("Worker Status: Loading...", id="worker-summary")
 
@@ -464,6 +470,23 @@ class KaraokeAdminApp(App):
             self.action_align_whisper()
         elif bid == "btn-scan":
             self.action_scan_folder()
+        elif bid == "btn-stop-webui":
+            self.action_shutdown_webui()
+        elif bid == "btn-quit":
+            self.exit()
+
+    def action_handle_escape(self) -> None:
+        """Escape: drop focus from an input first, otherwise quit.
+
+        A bare `q` cannot quit while a text Input (Whisper track / lyrics /
+        folder path) holds focus — it types the letter instead. Escape unfocuses
+        so `q` works again, and quits outright when nothing is focused.
+        """
+        focused = self.focused
+        if focused is not None and isinstance(focused, Input):
+            self.set_focus(None)
+            return
+        self.exit()
 
 
 def align_plain_text_for_track(track_identifier: str, lyrics_or_file_path: str) -> str:
