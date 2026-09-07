@@ -18,7 +18,7 @@ Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 Environment=NUMEXPR_NUM_THREADS=1
-ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-postprocess-celery --loglevel=INFO --concurrency=2
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-postprocess-celery --loglevel=INFO --concurrency=2 --events
 Restart=always
 RestartSec=5
 SyslogIdentifier=karaoke-celery-worker

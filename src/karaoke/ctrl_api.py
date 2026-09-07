@@ -513,7 +513,15 @@ def sample_now(req: SampleRequest) -> dict[str, Any]:
         log.exception("Control API sample failed")
         raise HTTPException(status_code=500, detail=f"Sample failed: {exc}")
 
-    return {"status": "accepted", "artist": req.artist, "title": req.title}
+    return {
+        "status": "analysed",
+        "artist": req.artist,
+        "title": req.title,
+        "seconds": seconds,
+        "key": result.key.name if result.key else None,
+        "bpm": result.bpm,
+        "stored": bool(req.artist and req.title),
+    }
 
 
 @app.get("/api/sample/stream")

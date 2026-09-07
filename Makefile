@@ -252,7 +252,8 @@ postprocess-worker: ## Run the host-side post-processing worker (analysis + word
 celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
 		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
-		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2}
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2} \
+		--events
 
 celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \

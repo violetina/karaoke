@@ -20,12 +20,12 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional
 
 QUEUE_NAME = os.environ.get("KARAOKE_POSTPROCESS_STATUS_QUEUE",
                             "karaoke-postprocess-celery")
-
 ORCHESTRATOR_ENV = "KARAOKE_ORCHESTRATOR"
+
 
 def orchestrator() -> str:
     """Selected background orchestrator (`celery` by default, `legacy` fallback)."""
@@ -34,15 +34,19 @@ def orchestrator() -> str:
 
 @dataclass
 class QueueDetails:
-    name: str
-    messages: int
-    messages_ready: int
-    messages_unacknowledged: int
-    consumers: int
+    """RabbitMQ queue fields exposed by the Control API worker-status schema."""
+
+    name: str = QUEUE_NAME
+    messages: int = 0
+    messages_ready: int = 0
+    messages_unacknowledged: int = 0
+    consumers: int = 0
 
 
 @dataclass
 class WorkerUnitDetails:
+    """Systemd-style worker unit status exposed by the Control API."""
+
     unit: str
     active: str
     running: bool
@@ -50,39 +54,38 @@ class WorkerUnitDetails:
 
 @dataclass
 class PostprocessStatus:
+    # API schema fields.
     orchestrator: str = "celery"
-    available: bool = False
-    reason: str = ""
-
     dashboard_url: Optional[str] = None
     workers_active: int = 0
     queue_depth: int = 0
-    queue_details: QueueDetails = field(default_factory=lambda: QueueDetails(name=QUEUE_NAME, messages=0, messages_ready=0, messages_unacknowledged=0, consumers=0))
-    worker_details: List[WorkerUnitDetails] = field(default_factory=list)
+    queue_details: QueueDetails = field(default_factory=QueueDetails)
+    worker_details: list[WorkerUnitDetails] = field(default_factory=list)
 
-    # Legacy fields, kept for TUI compatibility until the TUI moves to the new schema
-    # These are not directly exposed in the /api/workers/status endpoint
+    # Legacy/TUI fields kept as the stable status-helper surface.
+    available: bool = False
+    reason: str = ""
     ready: int = 0
     unacked: int = 0
     consumers: int = 0
     deliver_rate: float = 0.0
     publish_rate: float = 0.0
     worker_running: bool = False
-    workers: int = 0  # how many worker processes are up
+    workers: int = 0                     # how many worker processes are up
     worker_pids: tuple[int, ...] = ()
-    worker_cpu: Optional[float] = None  # summed percent of one core
+    worker_cpu: Optional[float] = None   # summed percent of one core
     worker_rss_mb: Optional[float] = None  # summed resident MB
-    cpu_sample: Optional[tuple] = None  # per-pid samples for the next delta
+    cpu_sample: Optional[tuple] = None   # per-pid samples for the next delta
 
     @property
     def queued(self) -> int:
         """Total queue length: waiting (ready) + in-flight (unacked)."""
-        return self.queue_details.messages_ready + self.queue_details.messages_unacknowledged
+        return self.ready + self.unacked
 
     @property
     def busy(self) -> bool:
         """True when there's outstanding work or a task is in flight."""
-        return self.queue_details.messages_unacknowledged > 0 or self.queue_details.messages_ready > 0
+        return self.unacked > 0 or self.ready > 0
 
 
 def _mgmt_url() -> str:
@@ -102,36 +105,198 @@ def _fetch_queue(timeout: float = 1.5) -> Optional[dict]:
         return json.loads(resp.read().decode())
 
 
-def get_status() -> PostprocessStatus:
+def find_worker_pids() -> list[int]:
+    """Every postprocess worker PID, by scanning /proc cmdlines (Linux).
+
+    Celery workers are the default now, but the legacy
+    ``karaoke.postprocess_worker`` service can still run for rollback/debugging.
+    Return all matching workers: reporting one worker's CPU while several are
+    running would understate the load by an order of magnitude.
+    """
+    proc = "/proc"
+    if not os.path.isdir(proc):
+        return []
+    pids = []
+    for name in os.listdir(proc):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"{proc}/{name}/cmdline", "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode(errors="ignore")
+        except OSError:
+            continue
+        # Match real worker invocations, not shells that merely mention them.
+        celery_worker = (
+            "celery" in cmd and "karaoke.celery_app" in cmd
+            and "worker" in cmd
+        )
+        legacy_worker = "postprocess_worker" in cmd and "python" in cmd
+        if celery_worker or legacy_worker:
+            pids.append(int(name))
+    return sorted(pids)
+
+
+def _find_worker_pid() -> Optional[int]:
+    """First worker PID, or None. Kept for single-worker callers."""
+    pids = find_worker_pids()
+    return pids[0] if pids else None
+
+
+def _proc_cpu_times(pid: int) -> Optional[tuple[int, int]]:
+    """Return (process_jiffies, total_system_jiffies) for a CPU% sample."""
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            parts = fh.read().split()
+        utime, stime = int(parts[13]), int(parts[14])
+        with open("/proc/stat") as fh:
+            cpu_line = fh.readline().split()[1:]
+        total = sum(int(x) for x in cpu_line)
+        return utime + stime, total
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _proc_rss_mb(pid: int) -> Optional[float]:
+    try:
+        with open(f"/proc/{pid}/statm") as fh:
+            pages = int(fh.read().split()[1])  # resident set size in pages
+        return pages * (os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _worker_cpu_percent(pid: int, interval: float = 0.15) -> Optional[float]:
+    """Sample CPU% (of one core) over a short blocking interval.
+
+    Prefer :func:`cpu_percent_delta` for repeated polling (no sleep); this is a
+    convenience for one-off callers.
+    """
+    s1 = _proc_cpu_times(pid)
+    if s1 is None:
+        return None
+    time.sleep(interval)
+    s2 = _proc_cpu_times(pid)
+    if s2 is None:
+        return None
+    return _cpu_from_samples((pid,) + s1, (pid,) + s2)
+
+
+def _workers_cpu_percent(pids: list[int],
+                         interval: float = 0.15) -> Optional[float]:
+    """Summed CPU% across workers over one short blocking interval.
+
+    Sampled together rather than per worker, so N workers still cost a single
+    `interval`, not N of them.
+    """
+    before = {p: _proc_cpu_times(p) for p in pids}
+    before = {p: s for p, s in before.items() if s is not None}
+    if not before:
+        return None
+    time.sleep(interval)
+    prev = tuple((p,) + s for p, s in sorted(before.items()))
+    after = {p: _proc_cpu_times(p) for p in before}
+    after = {p: s for p, s in after.items() if s is not None}
+    if not after:
+        return None
+    cur = tuple((p,) + s for p, s in sorted(after.items()))
+    return _cpu_from_multi(prev, cur)
+
+
+def _cpu_from_multi(prev, cur) -> Optional[float]:
+    """Summed CPU% from two multi-worker sample tuples.
+
+    Only PIDs present in BOTH samples contribute: a worker that started or was
+    restarted between polls has no meaningful delta, and counting it would show
+    a spike that never happened.
+    """
+    if not prev or not cur:
+        return None
+    prev_by_pid = {s[0]: s for s in prev}
+    total = 0.0
+    seen = False
+    for sample in cur:
+        old = prev_by_pid.get(sample[0])
+        if old is None:
+            continue
+        pct = _cpu_from_samples(old, sample)
+        if pct is not None:
+            total += pct
+            seen = True
+    return total if seen else None
+
+
+def _cpu_from_samples(prev, cur) -> Optional[float]:
+    """CPU% (of one core) from two (pid, proc_jiffies, total_jiffies) samples."""
+    if not prev or not cur:
+        return None
+    # A restarted worker (different pid) resets counters -> no valid delta yet.
+    if prev[0] != cur[0]:
+        return None
+    dproc = cur[1] - prev[1]
+    dtotal = cur[2] - prev[2]
+    if dtotal <= 0:
+        return 0.0
+    ncpu = os.cpu_count() or 1
+    return max(0.0, min(100.0 * ncpu, 100.0 * ncpu * dproc / dtotal))
+
+
+def _systemd_unit(unit: str) -> WorkerUnitDetails:
+    """Best-effort user-systemd active state for API status details."""
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        active = (res.stdout or "inactive").strip() or "inactive"
+    except Exception:
+        active = "unknown"
+    return WorkerUnitDetails(unit=unit, active=active, running=active == "active")
+
+
+def get_status(*, sample_cpu: bool = True, prev_cpu_sample=None) -> PostprocessStatus:
     """Best-effort snapshot of the post-processing pipeline.
 
-    This version checks systemd service status and RabbitMQ queue details.
+    ``prev_cpu_sample`` is an opaque tuple from a previous call. When provided,
+    worker CPU% is computed as a NON-blocking delta against it (no sleep) — ideal
+    for repeated polling from a UI timer. The fresh sample for the next call is
+    attached to the returned status as ``.cpu_sample``. When omitted and
+    ``sample_cpu`` is true, a short blocking sample is taken instead.
     """
     st = PostprocessStatus(orchestrator=orchestrator())
     st.dashboard_url = os.environ.get("KARAOKE_FLOWER_URL", "http://127.0.0.1:5555")
 
-    # Check Celery worker service status
-    celery_worker_unit = "karaoke-celery-worker.service"
-    cmd = ["systemctl", "--user", "is-active", celery_worker_unit]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, check=True)
-        worker_active = res.stdout.strip() == "active"
-    except Exception:
-        worker_active = False
+    # Worker processes (independent of RabbitMQ reachability). CPU and memory
+    # are summed across every worker: with a dozen running, one worker's usage
+    # would badly understate the real load.
+    pids = find_worker_pids()
+    st.workers = len(pids)
+    st.workers_active = len(pids)
+    if pids:
+        st.worker_running = True
+        st.worker_pids = tuple(pids)
+        samples = {p: _proc_cpu_times(p) for p in pids}
+        fresh = {p: s for p, s in samples.items() if s is not None}
+        if fresh:
+            st.cpu_sample = tuple((p,) + s for p, s in sorted(fresh.items()))
+        if prev_cpu_sample is not None and st.cpu_sample is not None:
+            st.worker_cpu = _cpu_from_multi(prev_cpu_sample, st.cpu_sample)
+        elif sample_cpu:
+            st.worker_cpu = _workers_cpu_percent(pids)
+        rss = [_proc_rss_mb(p) for p in pids]
+        rss = [r for r in rss if r is not None]
+        st.worker_rss_mb = sum(rss) if rss else None
 
-    st.worker_details.append(WorkerUnitDetails(unit=celery_worker_unit, active="active" if worker_active else "inactive", running=worker_active))
-    st.workers_active = 1 if worker_active else 0
-
-    # Check Flower service status (optional, for dashboard URL)
-    flower_unit = "karaoke-celery-flower.service"
-    cmd = ["systemctl", "--user", "is-active", flower_unit]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, check=True)
-        flower_active = res.stdout.strip() == "active"
-        if not flower_active:
-            st.dashboard_url = None # If flower is not active, dashboard is not available
-    except Exception:
-        st.dashboard_url = None
+    st.worker_details = [
+        _systemd_unit("karaoke-celery-worker.service"),
+        _systemd_unit("karaoke-celery-flower.service"),
+    ]
+    active_workers = [w for w in st.worker_details
+                      if w.unit == "karaoke-celery-worker.service" and w.running]
+    if active_workers and st.workers_active == 0:
+        st.workers_active = len(active_workers)
 
     # Queue via management API.
     try:
@@ -144,33 +309,49 @@ def get_status() -> PostprocessStatus:
         return st
 
     st.available = True
-    st.queue_details.name = QUEUE_NAME
-    st.queue_details.messages = int(data.get("messages", 0) or 0)
-    st.queue_details.messages_ready = int(data.get("messages_ready", 0) or 0)
-    st.queue_details.messages_unacknowledged = int(data.get("messages_unacknowledged", 0) or 0)
-    st.queue_details.consumers = int(data.get("consumers", 0) or 0)
-    st.queue_depth = st.queue_details.messages_ready + st.queue_details.messages_unacknowledged
+    st.ready = int(data.get("messages_ready", 0) or 0)
+    st.unacked = int(data.get("messages_unacknowledged", 0) or 0)
+    st.consumers = int(data.get("consumers", 0) or 0)
+    stats = data.get("message_stats", {}) or {}
+    st.deliver_rate = float(stats.get("deliver_get_details", {}).get("rate", 0.0) or 0.0)
+    st.publish_rate = float(stats.get("publish_details", {}).get("rate", 0.0) or 0.0)
+    st.queue_depth = st.queued
+    st.queue_details = QueueDetails(
+        name=QUEUE_NAME,
+        messages=int(data.get("messages", st.queued) or 0),
+        messages_ready=st.ready,
+        messages_unacknowledged=st.unacked,
+        consumers=st.consumers,
+    )
     return st
 
 
 def start_worker() -> bool:
-    """Starts the Celery worker systemd service."""
-    cmd = ["systemctl", "--user", "start", "karaoke-celery-worker.service"]
+    """Start the Celery worker systemd service."""
     try:
-        subprocess.run(cmd, check=True, timeout=5)
+        subprocess.run(["systemctl", "--user", "start", "karaoke-celery-worker.service"],
+                       check=True, timeout=5)
         return True
     except Exception:
         return False
 
 
 def stop_worker() -> bool:
-    """Stops the Celery worker systemd service."""
-    cmd = ["systemctl", "--user", "stop", "karaoke-celery-worker.service"]
+    """Stop the Celery worker systemd service."""
     try:
-        subprocess.run(cmd, check=True, timeout=5)
+        subprocess.run(["systemctl", "--user", "stop", "karaoke-celery-worker.service"],
+                       check=True, timeout=5)
         return True
     except Exception:
         return False
+
+
+def _cpu_bar(cpu: Optional[float], width: int = 10) -> str:
+    """ASCII meter for CPU% of one core (0..100)."""
+    if cpu is None:
+        return "─" * width
+    filled = max(0, min(width, round(cpu / 100.0 * width)))
+    return "█" * filled + "░" * (width - filled)
 
 
 def worker_load_line(st: PostprocessStatus, bar_width: int = 10) -> str:
@@ -182,18 +363,18 @@ def worker_load_line(st: PostprocessStatus, bar_width: int = 10) -> str:
         worker-load: worker down · broker unreachable
     """
     parts: list[str] = []
-    if st.workers_active > 0:
-        # For now, CPU bar is removed as we don't sample CPU directly in new schema
-        cpu_info = "-- cpu" # Placeholder
-        parts.append(f"[──────────] {cpu_info}")
+    if st.worker_running:
+        bar = _cpu_bar(st.worker_cpu, bar_width)
+        cpu = f"{st.worker_cpu:>3.0f}% cpu" if st.worker_cpu is not None else " -- cpu"
+        parts.append(f"[{bar}] {cpu}")
     else:
         parts.append("worker down")
 
     if st.available:
         # Total queue length (waiting + in-flight); call out in-flight separately.
-        q = f"queue {st.queue_depth}"
-        if st.queue_details.messages_unacknowledged:
-            q += f" ({st.queue_details.messages_unacknowledged} busy)"
+        q = f"queue {st.queued}"
+        if st.unacked:
+            q += f" ({st.unacked} busy)"
         parts.append(q)
         parts.append("working" if st.busy else "idle")
     else:
@@ -208,14 +389,6 @@ def worker_panel(st: PostprocessStatus, width: int = 30) -> str:
     Labels are ASCII and left-aligned in a fixed column so the values line up
     whatever the terminal does with symbol glyphs — the same rule that keeps the
     sentiment bars aligned.
-
-    Example::
-
-        workers   1 up
-        cpu       [####______]  --
-        mem       -- MB
-        queue     4  (1 busy)
-        rate      -- in / -- out
     """
     # One wider than the longest label ("consumers"), so a value never abuts it.
     label_w = 10
@@ -225,20 +398,24 @@ def worker_panel(st: PostprocessStatus, width: int = 30) -> str:
         return f"{label:<{label_w}s}{value}"
 
     lines = []
-    if st.workers_active > 0:
-        lines.append(row("workers", f"{st.workers_active} up"))
-        lines.append(row("cpu", f"[──────────] --")) # CPU info removed from new schema
-        lines.append(row("mem", f"-- MB")) # Memory info removed from new schema
+    if st.worker_running:
+        lines.append(row("workers", f"{st.workers} up"))
+        cpu = f"{st.worker_cpu:.0f}%" if st.worker_cpu is not None else "--"
+        lines.append(row("cpu", f"[{_cpu_bar(st.worker_cpu, bar_w)}] {cpu}"))
+        if st.worker_rss_mb is not None:
+            lines.append(row("mem", f"{st.worker_rss_mb:.0f} MB"))
     else:
         lines.append(row("workers", "none running"))
 
     if st.available:
-        q = str(st.queue_depth)
-        if st.queue_details.messages_unacknowledged:
-            q += f"  ({st.queue_details.messages_unacknowledged} busy)"
+        q = str(st.queued)
+        if st.unacked:
+            q += f"  ({st.unacked} busy)"
         lines.append(row("queue", q))
-        lines.append(row("consumers", str(st.queue_details.consumers)))
-        lines.append(row("rate", f"-- in / -- out")) # Rate info removed from new schema
+        lines.append(row("consumers", str(st.consumers)))
+        if st.deliver_rate or st.publish_rate:
+            lines.append(row("rate", f"{st.publish_rate:.1f} in / "
+                                     f"{st.deliver_rate:.1f} out"))
         lines.append(row("state", "working" if st.busy else "idle"))
     else:
         lines.append(row("broker", "unreachable"))

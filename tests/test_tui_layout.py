@@ -31,6 +31,8 @@ def app(tmp_path, monkeypatch):
     db = tmp_path / "karaoke.db"
     monkeypatch.setattr(localcache, "connect", lambda *a, **k: real_connect(db))
     monkeypatch.setattr(tui, "stream_logs", lambda *a, **k: iter(()))
+    monkeypatch.setattr(tui.detect, "detect_active",
+                        lambda *a, **k: tui.detect.Detection(mode="browse"))
     return tui.KaraokeTui()
 
 

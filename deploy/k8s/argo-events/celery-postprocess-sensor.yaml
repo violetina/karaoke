@@ -1,0 +1,52 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: celery-postprocess-sensor
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: argo-events-sensor-sa
+  dependencies:
+    - name: celery-task-event
+      eventSourceName: amqp-celery-eventsource
+      eventName: taskEvents
+      filters:
+        data:
+          - path: body.name
+            type: string
+            value:
+              - "karaoke.tasks.*"
+  triggers:
+    - template:
+        name: log-celery-task-event
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                generateName: log-celery-task-event-
+                namespace: argo-events
+              spec:
+                ttlSecondsAfterFinished: 300
+                template:
+                  spec:
+                    restartPolicy: Never
+                    containers:
+                      - name: log-event
+                        image: busybox:1.36
+                        env:
+                          - name: EVENT_PAYLOAD
+                            value: "{}"
+                        command:
+                          - sh
+                          - -c
+                          - |
+                            echo "received Celery task event"
+                            echo "payload: ${EVENT_PAYLOAD}"
+          parameters:
+            - src:
+                dependencyName: celery-task-event
+                dataKey: body
+              dest: spec.template.spec.containers.0.env.0.value

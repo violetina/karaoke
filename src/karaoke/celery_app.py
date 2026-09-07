@@ -55,6 +55,8 @@ app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     task_track_started=True,
+    worker_send_task_events=True,
+    task_send_sent_event=True,
     task_ignore_result=False,
     result_extended=True,
     result_expires=int(os.environ.get("KARAOKE_CELERY_RESULT_EXPIRES", "604800")),

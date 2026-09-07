@@ -169,10 +169,10 @@ def publish_postprocess_task(artist: str, title: str, url: str = "") -> bool:
             task_id = enqueue_postprocess(payload)
             log.info("Published post-processing Celery task %s: %s - %s",
                      task_id, artist, title)
-            return True
+            return task_id
         except Exception as exc:
             log.debug("Celery publish skipped (unreachable/failed): %s", exc)
-            return False
+            return None
 
     host = os.environ.get("RABBITMQ_HOST", "localhost")
     user = os.environ.get("RABBITMQ_USER", "guest")
