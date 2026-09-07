@@ -54,6 +54,7 @@ go stale. The ones worth knowing:
 ## Library, Mood Slider & Playlist Controls
 
 - **Interactive Mood Slider (`-` / `+` / `m`)**: Sidebar slider `energy ≥ 30% [███░░░░░░░] -/+` dynamically sets the energy floor and filters both the library list and search results in real time.
+- **Genre Filter**: A genre selector sits directly below the mood preset selector and is populated from the current CLAP `track_genre` classifications (for example `hip hop`, `punk rock`, `soul`, `techno`). It filters the library and the active search/queue results in real time, and combines with the mood energy slider/presets.
 - **Sort Selector**: Sort tracks by `Artist / Title (A-Z)`, `🌱 Priority: Least Played`, `⭐ Most Played`, `Energy (high→low)`, `Energy (low→high)`, `BPM (fast→slow)`, `BPM (slow→fast)`, or `Key`. Play counts are stored per track (`tracks.play_count`, incremented on every play/discover event) so "least played" surfaces undiscovered tracks first.
 - **Genre & Feeling Column**: Displays CLAP zero-shot genre label + acoustic feeling glyph (`Genre/Feel` e.g. `hip hop 🌙`, `rock 🔥`, `pop ⚡`). Feeling is derived from energy (arousal) and brightness (valence proxy): 🔥/☀/⚡/🌗/♡/🌙.
 - **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear queue (`C`), Play-once auto-advance (`o`).

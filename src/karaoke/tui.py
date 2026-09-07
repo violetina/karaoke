@@ -96,6 +96,32 @@ MOOD_FILTER_OPTIONS = [
     ("🌙 Chill / Mellow (<40%)", "mellow"),
 ]
 
+
+def genre_filter_options() -> list[tuple[str, str]]:
+    """Build the genre filter from the current CLAP classifications."""
+    options = [("All Genres", "all")]
+    try:
+        with localcache.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT genre FROM track_genre
+                WHERE genre IS NOT NULL AND length(trim(genre)) > 0
+                ORDER BY lower(genre)
+                """
+            ).fetchall()
+    except Exception:
+        return options
+    seen = set()
+    for row in rows:
+        genre = str(row[0] or "").strip()
+        key = genre.casefold()
+        if not genre or key in seen:
+            continue
+        seen.add(key)
+        options.append((genre.title(), genre))
+    return options
+
+
 SORT_OPTIONS = [
     ("Artist / Title (A-Z)", "artist"),
     ("🌱 Priority: Least Played", "least_played"),
@@ -771,7 +797,7 @@ class KaraokeTui(App):
     }
     #search-input { height: 3; margin-bottom: 1; border: round $accent; }
     #mood-slider { height: 1; color: $accent; margin-bottom: 1; }
-    #mood-select { margin-bottom: 1; }
+    #mood-select, #genre-select { margin-bottom: 1; }
     #sort-select { margin-bottom: 1; }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
@@ -847,7 +873,7 @@ class KaraokeTui(App):
     Screen.-focus Header { display: none; }
     #browse-head { height: auto; margin-bottom: 1; }
     #browse-head Static { width: 8; content-align: left middle; }
-    #filter-select, #mood-select, #sort-select { width: 34; }
+    #filter-select, #mood-select, #genre-select, #sort-select { width: 34; }
     #library { height: 1fr; }
     #log-label, #log-path { color: $text-muted; height: 1; }
     """
@@ -955,8 +981,9 @@ class KaraokeTui(App):
         self._last_finished_url = ""
         self._idle_since = 0.0     # when the player last held nothing
         self._mood_filter = "all"
+        self._genre_filter = "all"
         self._mood_level = 0.0  # slider floor: show tracks with energy >= this
-        self._sort = "artist"
+        self._sort = "key"
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -985,9 +1012,11 @@ class KaraokeTui(App):
                 # slider ([ / ] adjust) is the fine control; the select is
                 # quick presets.
                 yield Static("", id="mood-slider")
+                yield Select(genre_filter_options(), value="all", id="genre-select",
+                             allow_blank=False)
                 yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
                              allow_blank=False)
-                yield Select(SORT_OPTIONS, value="artist", id="sort-select",
+                yield Select(SORT_OPTIONS, value="key", id="sort-select",
                              allow_blank=False)
                 # Key and tempo sit with the rest of the facts about this
                 # track rather than in the visuals column, which is for the
@@ -1070,6 +1099,9 @@ class KaraokeTui(App):
             elif self._mood_filter in ("mellow", "all"):
                 self._mood_level = 0.0
             self._apply_mood_change()
+        elif event.select.id == "genre-select":
+            self._genre_filter = str(event.value)
+            self._apply_mood_change()
         elif event.select.id == "sort-select":
             self._sort = str(event.value)
             self._apply_mood_change()
@@ -1143,6 +1175,8 @@ class KaraokeTui(App):
             if self._mood_filter == "groovy" and not (0.40 <= energy <= 0.75):
                 continue
             if self._mood_filter == "mellow" and energy > 0.40:
+                continue
+            if not self._genre_matches(song.get("genre")):
                 continue
             filtered.append(song)
 
@@ -1608,16 +1642,28 @@ class KaraokeTui(App):
         """`/`: jump to the search box."""
         self.query_one("#search-input", Input).focus()
 
+    def _genre_matches(self, genre: object) -> bool:
+        selected = str(getattr(self, "_genre_filter", "all") or "all").strip()
+        if selected == "all":
+            return True
+        return str(genre or "").strip().casefold() == selected.casefold()
+
     def _apply_mood_filter(self, rows: list, conn) -> list:
         """Filter search-result rows by the current mood/energy band and the
         slider floor (self._mood_level)."""
-        if (self._mood_filter == "all" and self._mood_level <= 0.0) or not rows:
+        genre_filter = str(getattr(self, "_genre_filter", "all") or "all")
+        if (
+            self._mood_filter == "all"
+            and self._mood_level <= 0.0
+            and genre_filter == "all"
+        ) or not rows:
             return rows
         ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
         if not ids:
             return rows
         placeholders = ",".join("?" * len(ids))
         energies: dict = {}
+        genres: dict = {}
         try:
             cur = conn.execute(
                 f"SELECT track_id, energy, bpm FROM track_analysis "
@@ -1629,6 +1675,13 @@ class KaraokeTui(App):
                 if e is None and row["bpm"] is not None:
                     e = min(1.0, max(0.2, (float(row["bpm"]) - 60.0) / 100.0))
                 energies[row["track_id"]] = e
+            cur = conn.execute(
+                f"SELECT track_id, genre FROM track_genre "
+                f"WHERE track_id IN ({placeholders})",
+                ids,
+            )
+            for row in cur.fetchall():
+                genres[row["track_id"]] = row["genre"]
         except Exception:
             return rows
 
@@ -1646,6 +1699,11 @@ class KaraokeTui(App):
             if self._mood_filter == "groovy" and not (0.40 <= e <= 0.75):
                 continue
             if self._mood_filter == "mellow" and e > 0.40:
+                continue
+            genre = r.get("genre")
+            if genre is None:
+                genre = genres.get(r.get("track_id"))
+            if not self._genre_matches(genre):
                 continue
             kept.append(r)
         return kept
@@ -2679,10 +2737,13 @@ class KaraokeTui(App):
         return detect.Detection(mode="browse")
 
     def _poll_detection(self) -> None:
+        try:
+            mode_label = self.query_one("#mode-label", Static)
+            now = self.query_one("#now-playing", Static)
+        except Exception:
+            return
         det = self._effective_detection()
         self._det = det
-        mode_label = self.query_one("#mode-label", Static)
-        now = self.query_one("#now-playing", Static)
         override = f" (forced {self._mode_override})" if self._mode_override else " (auto)"
         # The mic identified the song but a player is supplying the position.
         # Say so, or it looks like the mic quietly switched itself off.
@@ -2812,6 +2873,11 @@ class KaraokeTui(App):
                                    size.width or 0, (size.height or 0) - 1)
         if state == "synced":
             self._timeline = timeline_from_lyrics(lyrics)
+            try:
+                lyrics_widget = self.query_one("#lyrics", Static)
+                lyrics_widget.border_subtitle = f"synced · {lyrics.source if lyrics else ''}"
+            except Exception:
+                pass
             now.update(
                 f"{banner}\n"
                 f"{det.mode} · {det.player or '—'} · {keybpm_line} · "

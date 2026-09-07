@@ -185,5 +185,38 @@ def find_sources_main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+def resolve_and_save_source(track_id: int, conn: sqlite3.Connection) -> Optional[str]:
+    """Find and save a YouTube source for a specific track by its track_id."""
+    row = conn.execute(
+        """
+        SELECT t.track_id, t.artist, t.title, t.duration,
+               (SELECT l.synced_lyrics FROM lyrics l
+                 WHERE l.track_id = t.track_id AND l.kind = 'approved'
+                 LIMIT 1) AS synced
+        FROM tracks t
+        WHERE t.track_id = ?
+        """,
+        (track_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    from .lyrics import parse_lrc
+    lines = parse_lrc(row["synced"] or "")
+    cand = Candidate(
+        track_id=int(row["track_id"]),
+        artist=row["artist"], title=row["title"],
+        duration=row["duration"] if row["duration"] else None,
+        lyric_end=lines[-1][0] if lines else None,
+    )
+    best = find_for(cand)
+    if best and best.get("url"):
+        localcache.add_track_source(
+            cand.artist, cand.title, url=best["url"],
+            kind="youtube", conn=conn)
+        return best["url"]
+    return None
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(find_sources_main())

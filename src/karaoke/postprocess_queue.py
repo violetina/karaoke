@@ -121,8 +121,7 @@ def enqueue_if_needed(
         track_id = localcache.find_track_id(artist, title, c)
         if track_id is None:
             # Unknown track: still enqueue so the worker can resolve+download
-            # it -- but only if there is something to download. A Spotify URL
-            # would just fail on every retry.
+            # it -- but only if there is something to download.
             if url and not is_downloadable(url):
                 log.debug("not enqueuing %s - %s: no downloadable source",
                           artist, title)
@@ -131,14 +130,14 @@ def enqueue_if_needed(
         pending = needs_postprocessing(track_id, c)
         if not pending:
             return False
-        # The worker cannot analyse what it cannot fetch. Without this, every
-        # Spotify-only track is enqueued, fails "no watchable URL", is retried
-        # and dropped -- on every track change, forever. Those tracks need a
-        # recording instead (karaoke-sample, or record mode).
+        # The worker cannot analyse what it cannot fetch. However, if the track
+        # has plain lyrics needing sync or timing upgrades, we allow enqueuing
+        # because Celery will automatically search YouTube to find a source!
         if not (is_downloadable(url) or has_downloadable_source(track_id, c)):
-            log.info("skipping post-process for %s - %s: no downloadable audio"
-                     " (sample it instead)", artist, title)
-            return False
+            if "sync" not in pending and "timings" not in pending:
+                log.info("skipping post-process for %s - %s: no downloadable audio"
+                         " (sample it instead)", artist, title)
+                return False
         return publish_postprocess_task(artist, title, url)
     except Exception as exc:
         log.debug("enqueue_if_needed skipped: %s", exc)

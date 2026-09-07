@@ -367,6 +367,7 @@ def test_queue_filtering_on_mood_change(monkeypatch):
 
     app = KaraokeTui.__new__(KaraokeTui)
     app._mood_filter = "all"
+    app._genre_filter = "all"
     app._mood_level = 0.0
     app._unfiltered_queue = [
         {"track_id": 1, "artist": "Soft", "title": "Quiet", "energy": 0.2},
@@ -390,6 +391,32 @@ def test_queue_filtering_on_mood_change(monkeypatch):
     app._filter_and_set_queue()
     assert len(app._queue) == 1
     assert app._queue[0]["title"] == "Anthem"
+
+
+def test_queue_filtering_on_genre_change(monkeypatch):
+    """Changing the genre filter also filters the active queue."""
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._mood_filter = "all"
+    app._genre_filter = "punk rock"
+    app._mood_level = 0.0
+    app._unfiltered_queue = [
+        {"track_id": 1, "artist": "A", "title": "Fast", "genre": "punk rock"},
+        {"track_id": 2, "artist": "B", "title": "Smooth", "genre": "soul"},
+    ]
+    app._queue = list(app._unfiltered_queue)
+    app._queue_at = -1
+
+    class FakeTable:
+        def set_class(self, *a, **k): pass
+        def clear(self): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable(), raising=False)
+    monkeypatch.setattr(app, "_render_queue", lambda: None, raising=False)
+
+    app._filter_and_set_queue()
+    assert [row["title"] for row in app._queue] == ["Fast"]
 
 
 def test_play_count_migration_and_increment(tmp_path):

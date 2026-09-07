@@ -115,6 +115,35 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
             if found:
                 track_id = found[0]
         if track_id is None:
+            if url and localcache.extract_youtube_id(url):
+                kind = "youtube" if "youtube.com" in url or "youtu.be" in url else "player"
+                track_id = localcache.add_track_source(artist, title, url=url, kind=kind, conn=conn)
+                log.info("postprocess: created unknown track %s - %s with source %s", artist, title, url)
+        if track_id is None:
+            if artist.lower() == "unknown" and title.lower() == "unknown":
+                log.warning("postprocess: refusing to search YouTube for Unknown - Unknown")
+            else:
+                # Let's search YouTube for a source and create the track!
+                try:
+                    from . import youtube
+                    log.info("postprocess: track not found, searching youtube for %s - %s", artist, title)
+                    results = youtube.search(f"{artist} - {title}", limit=3)
+                    if results:
+                        best_url = results[0]["url"]
+                        # Create the track and source!
+                        track_id = localcache.add_track_source(
+                            artist,
+                            title,
+                            url=best_url,
+                            kind="youtube",
+                            conn=conn,
+                        )
+                        url = best_url
+                        log.info("postprocess: created missing track %s - %s with resolved source %s",
+                                 artist, title, best_url)
+                except Exception as e:
+                    log.debug("postprocess: automatic track creation failed: %s", e)
+        if track_id is None:
             log.warning("postprocess: track not found for %s - %s; skipping", artist, title)
             # This is a terminal failure, no need to retry or continue.
             raise ValueError(f"Track not found: {artist} - {title}")
@@ -135,6 +164,30 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
             ).fetchone()
             if row:
                 context.url = row[0]
+            else:
+                # No youtube source found! Let's do an automatic search to find one.
+                # Only if this track actually needs postprocessing (sync or analysis).
+                pending_temp = needs_postprocessing(track_id, conn)
+                if "analysis" in pending_temp or "sync" in pending_temp:
+                    try:
+                        from . import youtube
+                        log.info("postprocess: searching youtube for %s - %s", artist, title)
+                        results = youtube.search(f"{artist} - {title}", limit=3)
+                        if results:
+                            best_url = results[0]["url"]
+                            # Add this source to the database so it's cached for future use!
+                            localcache.add_track_source(
+                                artist,
+                                title,
+                                url=best_url,
+                                kind="youtube",
+                                conn=conn,
+                            )
+                            context.url = best_url
+                            log.info("postprocess: resolved youtube source for %s - %s -> %s",
+                                     artist, title, best_url)
+                    except Exception as e:
+                        log.debug("postprocess: youtube search failed: %s", e)
         context.pending = needs_postprocessing(track_id, conn)
 
     return context.to_dict() # Return dict for serialization

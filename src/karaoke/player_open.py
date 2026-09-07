@@ -219,9 +219,10 @@ def try_chrome_cdp_navigate(url: str) -> bool:
         _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
         return True
 
+    escaped_url = url.replace("'", "\\'")
     reply_js = _cdp_send(
         "Runtime.evaluate",
-        {"expression": f"window.onbeforeunload = null; window.location.href = '{url}';"}
+        {"expression": f"window.onbeforeunload = null; window.location.href = '{escaped_url}';"}
     )
     return reply_js is not None
 

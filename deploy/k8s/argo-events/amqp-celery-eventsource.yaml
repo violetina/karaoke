@@ -10,7 +10,7 @@ spec:
       jsonBody: true
       exchangeName: celeryev
       exchangeType: topic
-      routingKey: task.succeeded
+      routingKey: "task.#"
       connectionBackoff:
         duration: 10s
         steps: 5

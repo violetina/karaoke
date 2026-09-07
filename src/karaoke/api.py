@@ -550,6 +550,21 @@ def suggest_queue(req: QueueSuggestRequest) -> list[dict[str, Any]]:
     return out
 
 
+class FindSourceRequest(BaseModel):
+    track_id: int
+
+
+@app.post("/api/sources/find")
+def api_find_sources(req: FindSourceRequest) -> dict[str, Any]:
+    """Find and save a playable YouTube source for a specific track."""
+    with localcache.connect() as conn:
+        from .find_sources import resolve_and_save_source
+        url = resolve_and_save_source(req.track_id, conn)
+        if url:
+            return {"status": "success", "url": url}
+        raise HTTPException(status_code=404, detail="No matching source found on YouTube")
+
+
 def main() -> None:
     """Entrypoint for starting the library API server.
 
