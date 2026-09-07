@@ -92,6 +92,7 @@ class KaraokeAdminApp(App):
         self._target_workers = 1
         self._bg_busy = False
         self._bg_lock = None
+        self._last_event_ts: float | None = None
 
     def _acquire_bg_lock(self) -> bool:
         # In-process guard first (fast path), then a cross-process lockfile so a
@@ -175,6 +176,7 @@ class KaraokeAdminApp(App):
         self.refresh_all()
         self.set_interval(3.0, self.refresh_workers)
         self.set_interval(5.0, self.refresh_clients)
+        self.set_interval(2.5, self._poll_events)
 
     def refresh_all(self) -> None:
         self.refresh_workers()
@@ -195,7 +197,7 @@ class KaraokeAdminApp(App):
 
         table = self.query_one("#worker-table", DataTable)
         table.clear()
-        units = res.get("units", [])
+        units = res.get("worker_details") or res.get("units", [])
         active_count = 0
         worker_active = False
         for u in units:
@@ -253,6 +255,32 @@ class KaraokeAdminApp(App):
                 error_list.add_option("[dim]No recent system errors found.[/dim]")
         except Exception as exc:
             log.debug("refresh_errors failed", exc_info=True)
+
+    def _poll_events(self) -> None:
+        """Poll the platform event ledger. Refresh worker status if new events arrived."""
+        last_ts = self._last_event_ts
+
+        def _work() -> None:
+            try:
+                res = self.api.recent_events(since_ts=last_ts, limit=5)
+                items = res.get("events", [])
+            except Exception:
+                return
+
+            if not items:
+                return
+
+            newest_ts = max((e.get("ts") for e in items if e.get("ts") is not None), default=last_ts)
+            if newest_ts:
+                self._last_event_ts = float(newest_ts)
+
+            # If any postprocess / task event completed, refresh worker table immediately
+            self.call_from_thread(self.refresh_workers)
+
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            pass
 
     # -- connected clients ------------------------------------------------
     WEBUI_PORT = int(os.environ.get("PORT", "8001"))

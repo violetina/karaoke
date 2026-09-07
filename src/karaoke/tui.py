@@ -33,6 +33,7 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote_plus
 
 from rich.text import Text
@@ -937,6 +938,7 @@ class KaraokeTui(App):
         # Set to stop that capture early: ctrl+c, or the app exiting. The
         # worker polls it, terminates ffmpeg and deletes the partial file.
         self._cancel_sample = False
+        self._last_event_ts: float | None = time.time()
         self._recording_id: int | None = None
         self._record_tick = 0
         self._record_marks: tuple[int, int] | None = None
@@ -1029,6 +1031,7 @@ class KaraokeTui(App):
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
         self.set_interval(1.0, self._refresh_record_status)
+        self.set_interval(2.5, self._poll_events)
         # 2s: fast enough to catch the end before the site starts
         # its own next track, slow enough not to spam CDP.
         self.set_interval(2.0, self._watch_queue)
@@ -2419,6 +2422,71 @@ class KaraokeTui(App):
             self.run_worker(_work, exclusive=False, thread=True)
         except Exception:
             log.debug("worker-load dispatch failed", exc_info=True)
+
+    def _poll_events(self) -> None:
+        """Poll the platform event ledger (Argo Events -> OpenSearch) off the UI thread.
+
+        When Celery post-processing, playback queue hooks, or metadata harvesters
+        emit completion events, refresh the active track info, lyrics, and library
+        in place — without a destructive page reload.
+        """
+        last_ts = self._last_event_ts
+
+        def _work() -> None:
+            try:
+                res = self.api.recent_events(since_ts=last_ts, limit=10)
+                items = res.get("events", [])
+            except Exception:
+                log.debug("poll events failed", exc_info=True)
+                return
+
+            if not items:
+                return
+
+            newest_ts = max((e.get("ts") for e in items if e.get("ts") is not None), default=last_ts)
+            if newest_ts:
+                self._last_event_ts = float(newest_ts)
+
+            self.call_from_thread(self._handle_platform_events, items)
+
+        try:
+            self.run_worker(_work, exclusive=False, thread=True)
+        except Exception:
+            log.debug("event worker dispatch failed", exc_info=True)
+
+    def _handle_platform_events(self, events: list[dict[str, Any]]) -> None:
+        """Process incoming platform events and update UI components reactively."""
+        has_postprocess = False
+        has_metadata = False
+
+        for ev in events:
+            name = str(ev.get("task_name") or "")
+            state = str(ev.get("state") or "").upper()
+            if state != "SUCCESS":
+                continue
+
+            # 1. Post-processing task completed (analysis, word-sync, vectors)
+            if name.startswith("karaoke.tasks."):
+                has_postprocess = True
+
+            # 2. Metadata harvesting (Wikibase/Wikimedia entity links, extra tags)
+            elif name.startswith("karaoke.metadata.") or "wikibase" in name:
+                has_metadata = True
+
+            # 3. Playback queue events (e.g. queue mutated, auto-next queued)
+            elif name.startswith("karaoke.playback.") or name.startswith("karaoke.queue."):
+                self._render_queue()
+
+        if has_postprocess or has_metadata:
+            # Re-read active track lyrics & analysis in-place
+            self._sync_key = None
+            self._poll_detection()
+            if not self._det.is_active:
+                try:
+                    self.load_songs()
+                except Exception:
+                    pass
+            self.notify("Track data updated from background event", severity="information")
 
     def _selected_song(self) -> SongRow | None:
         table = self.query_one("#library", DataTable)
