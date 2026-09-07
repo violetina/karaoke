@@ -11,8 +11,8 @@ Type=simple
 WorkingDirectory=/home/tina/karaoke
 Environment=PYTHONPATH=/home/tina/karaoke/src
 Environment=RABBITMQ_HOST=localhost
-# Pull YouTube cookies from Firefox so downloads/captions authenticate as you.
-Environment=KARAOKE_COOKIES_FROM_BROWSER=firefox
+# Pull YouTube cookies from Chrome so downloads/captions authenticate as you.
+Environment=KARAOKE_COOKIES_FROM_BROWSER=chrome
 # The broker forward may take a moment to establish; retry rather than fail hard.
 ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.postprocess_worker
 Restart=always
