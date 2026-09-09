@@ -27,11 +27,17 @@ def scan_and_ingest_folder(
     resolve_streaming: bool = True,
     dry_run: bool = False,
     limit: Optional[int] = None,
+    only_paths: Optional[set[str]] = None,
     conn: Optional[Any] = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Scan a directory of audio files, enrich with fingerprinting, audio analysis,
     Spotify/YouTube links, and ingest into SQLite + OpenSearch.
+
+    ``only_paths`` restricts processing to that explicit set of absolute file
+    paths (still discovered under ``music_dir``). This powers a resumable retry
+    pass that re-ingests only the files a previous run skipped, without
+    re-touching everything already in the database.
     """
     def emit(event: str, **payload: Any) -> None:
         payload.setdefault("event", event)
@@ -45,6 +51,9 @@ def scan_and_ingest_folder(
         raise FileNotFoundError(f"Directory not found: {root}")
 
     audio_files = [p for p in sorted(root.rglob("*")) if p.is_file() and tags.is_audio(p)]
+    if only_paths is not None:
+        wanted = {str(Path(p)) for p in only_paths}
+        audio_files = [p for p in audio_files if str(p) in wanted]
     if limit:
         audio_files = audio_files[:limit]
     emit("found", root=str(root), total=len(audio_files), dry_run=dry_run)
