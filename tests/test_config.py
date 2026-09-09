@@ -44,3 +44,53 @@ def test_data_dir_is_env_overridable(tmp_path, monkeypatch):
     settings = Settings.load()
     assert settings.data_dir == tmp_path / "data"
     assert settings.local_db == tmp_path / "data" / "karaoke.db"
+
+
+def test_db_backend_defaults_to_sqlite(monkeypatch):
+    """Without configuration the backend is SQLite, not Postgres."""
+    monkeypatch.delenv("KARAOKE_DB_BACKEND", raising=False)
+    from karaoke.config import Settings
+
+    settings = Settings.load()
+    assert settings.db_backend == "sqlite"
+    assert settings.uses_postgres is False
+
+
+def test_db_backend_postgres_is_recognised(monkeypatch):
+    """Selecting postgres flips uses_postgres; url is carried through."""
+    monkeypatch.setenv("KARAOKE_DB_BACKEND", "postgres")
+    monkeypatch.setenv("KARAOKE_DB_URL", "postgresql://karaoke@localhost/karaoke")
+    from karaoke.config import Settings
+
+    settings = Settings.load()
+    assert settings.uses_postgres is True
+    assert settings.db_url == "postgresql://karaoke@localhost/karaoke"
+
+
+def test_connect_rejects_unimplemented_postgres(monkeypatch):
+    """connect() must fail loudly, never silently fall back to SQLite."""
+    import karaoke.localcache as localcache
+    from karaoke.config import Settings
+
+    monkeypatch.setenv("KARAOKE_DB_BACKEND", "postgres")
+    monkeypatch.setattr(localcache, "settings", Settings.load())
+    try:
+        localcache.connect()
+    except NotImplementedError as exc:
+        assert "postgres" in str(exc).lower()
+    else:  # pragma: no cover - guard regressed
+        raise AssertionError("connect() should reject the postgres backend")
+
+
+def test_connect_with_explicit_path_ignores_backend(tmp_path, monkeypatch):
+    """An explicit db_path (tests, tools) always opens SQLite regardless."""
+    import karaoke.localcache as localcache
+    from karaoke.config import Settings
+
+    monkeypatch.setenv("KARAOKE_DB_BACKEND", "postgres")
+    monkeypatch.setattr(localcache, "settings", Settings.load())
+    conn = localcache.connect(tmp_path / "explicit.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        conn.close()

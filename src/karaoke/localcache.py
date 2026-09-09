@@ -937,8 +937,61 @@ def set_sync_offset(track_id: int, offset_s: float, conn: sqlite3.Connection,
     conn.commit()
 
 
+def _tune_connection(conn: sqlite3.Connection) -> None:
+    """Apply performance PRAGMAs. Best-effort: never fail opening the DB.
+
+    WAL is the important one for a large collection being scanned while the
+    TUI browses it: readers no longer block behind the importer's writer.
+    ``KARAOKE_SQLITE_JOURNAL`` can force a different mode (e.g. ``DELETE``) if
+    the DB lives on a filesystem where WAL is unsupported (some network mounts).
+    """
+    import os
+
+    journal = os.environ.get("KARAOKE_SQLITE_JOURNAL", "WAL")
+    try:
+        conn.execute(f"PRAGMA journal_mode = {journal}")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA cache_size = -16000")  # ~16 MB page cache
+    except sqlite3.Error as exc:
+        log.debug("sqlite tuning skipped: %s", exc)
+
+
+def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
+    """Index the foreign-key/join columns the library and search hit constantly.
+
+    ``sources.track_id`` and ``lyrics.track_id`` back the JOINs behind every
+    library load and ``*`` browse; without an index each becomes a full scan of
+    a table that grows with the whole collection. Idempotent and cheap.
+    """
+    try:
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sources_track ON sources (track_id);
+            CREATE INDEX IF NOT EXISTS idx_sources_kind ON sources (kind);
+            CREATE INDEX IF NOT EXISTS idx_lyrics_track ON lyrics (track_id);
+            CREATE INDEX IF NOT EXISTS idx_lyrics_track_kind ON lyrics (track_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist);
+            CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks (title);
+            """
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        log.debug("sqlite index creation skipped: %s", exc)
+
+
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and lazily initialize) the local SQLite database."""
+    if db_path is None and settings.uses_postgres:
+        # Fail loudly rather than pretend: the Postgres backend is selected but
+        # not yet wired. Silently falling back to SQLite would split the
+        # library across two stores. See docs/database.md for the roadmap.
+        raise NotImplementedError(
+            "KARAOKE_DB_BACKEND=postgres is not implemented yet; the Postgres "
+            "backend is a planned phase (see docs/database.md). Unset "
+            "KARAOKE_DB_BACKEND (or set it to 'sqlite') to use the default "
+            "SQLite backend."
+        )
     path = Path(db_path or settings.local_db)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30.0)
@@ -946,6 +999,11 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     # The overnight importer and the Web TUI legitimately overlap. Wait for
     # the writer instead of raising immediately and crashing the TUI screen.
     conn.execute("PRAGMA busy_timeout = 30000")
+    # WAL lets readers (library browse, search) run concurrently with the
+    # importer's writes instead of blocking on a single global lock, and
+    # synchronous=NORMAL is the safe, much faster pairing for WAL. This is the
+    # single biggest win for large collections on the SQLite backend.
+    _tune_connection(conn)
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)
@@ -959,6 +1017,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ensure_genre_table(conn)
     ensure_tone_table(conn)
     ensure_alignment_support_table(conn)
+    ensure_performance_indexes(conn)
     from .cover_store import ensure_table as _ensure_cover_art
     _ensure_cover_art(conn)
     return conn
