@@ -1,6 +1,6 @@
 # OpenSearch Search & Query How-To
 
-This guide covers how to perform keyword, semantic vector (kNN), and sentiment/mood searches against the Karaoke platform's OpenSearch indices (`tracks` and `lyric_lines`).
+This guide covers how to perform keyword, semantic vector (kNN), and sentiment/mood searches against the Karaoke platform's OpenSearch indices (`tracks` and `tracks-lines`).
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ curl -X POST "http://localhost:9200/tracks/_search?pretty" \
 Query lyric lines by sentiment score, mood tags, or thematic keywords combined with filters (e.g., release year or artist).
 
 ```bash
-curl -X POST "http://localhost:9200/lyric_lines/_search?pretty" \
+curl -X POST "http://localhost:9200/tracks-lines/_search?pretty" \
   -H "Content-Type: application/json" \
   -d '{
     "size": 10,

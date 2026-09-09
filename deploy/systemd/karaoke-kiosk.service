@@ -1,0 +1,16 @@
+[Unit]
+Description=Karaoke Kiosk Chrome Window
+Documentation=file:///home/tina/karaoke/docs/howto-systemd-services.md
+After=graphical-session.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/google-chrome-stable --app=https://music.youtube.com --remote-debugging-port=9222 --user-data-dir=%h/.config/google-chrome-kiosk
+Restart=on-failure
+RestartSec=3
+SyslogIdentifier=karaoke-kiosk
+
+[Install]
+WantedBy=karaoke.target

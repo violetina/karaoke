@@ -25,7 +25,7 @@ permanently. The fix is to record what's playing:
 
 - `k` — [Sample mode](sample.md): record ~45s of the output and analyse it once,
   in real time. The result is stored with a `+sample` method suffix.
-- `O` — [Record mode](record.md): capture unattended and decompile later.
+- `O` (`make admin`) — [Record mode](record.md): capture unattended and decompile later.
 
 Both read the PipeWire sink monitor, not Spotify, so they work regardless of how
 Spotify exposes its audio.

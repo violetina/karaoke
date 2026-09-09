@@ -304,6 +304,248 @@ def cartwheel_frame(bpm: float | None, elapsed: float, max_width: int = 24) -> s
     return "\n".join(lines)
 
 
+def duet_cartwheel_frame(
+    bpm: float | None,
+    elapsed: float,
+    *,
+    mood: str = "neutral",
+    genre: str = "",
+    energy: float | None = None,
+    brightness: float | None = None,
+    width: int = 32,
+) -> str:
+    """Two mirrored cartwheel dancers with a shared musical interaction.
+
+    The choreography is a 32-beat phrase: approach for two bars, stay together
+    for two bars, retreat for two bars, then dance apart for two bars. The left
+    dancer travels right and the mirrored dancer travels left. The figures hop
+    only at 100 BPM or above, while their cartwheel motion continues at slower
+    tempos without vertical jumping.
+    """
+    safe_bpm = float(bpm or 90.0)
+    beat_duration = 60.0 / max(safe_bpm, 1.0)
+    beats = elapsed / beat_duration
+    phrase_beats = 32.0
+    phrase = beats % phrase_beats
+
+    # Approach, together, retreat, apart. Smoothstep makes the meeting feel
+    # intentional rather than like two sprites snapping to a new coordinate.
+    def smoothstep(value: float) -> float:
+        value = max(0.0, min(1.0, value))
+        return value * value * (3.0 - 2.0 * value)
+
+    # Bass proxy: loudness/energy drives the left dancer's weight. High-tone
+    # proxy: spectral brightness drives the right dancer's quickness.
+    e = max(0.0, min(1.0, float(energy if energy is not None else 0.5)))
+    high = max(0.0, min(1.0, float(brightness if brightness is not None else 0.5)))
+    bass_drive = 0.55 * e + 0.45 * (1.0 - high)
+    treble_drive = 0.55 * high + 0.45 * e
+
+    apart_gap = max(4, int((1.0 - e) * 7) + 5)
+    if phrase < 8.0:
+        meeting = False
+        progress = smoothstep(phrase / 8.0)
+        gap = round(apart_gap + (1 - apart_gap) * progress)
+    elif phrase < 16.0:
+        meeting = True
+        gap = 1
+    elif phrase < 24.0:
+        meeting = False
+        progress = smoothstep((phrase - 16.0) / 8.0)
+        gap = round(1 + (apart_gap - 1) * progress)
+    else:
+        meeting = False
+        gap = apart_gap
+
+    # Different genres get different cartwheel cadence and pose emphasis while
+    # preserving the same two-person interaction choreography.
+    genre_text = (genre or "").casefold()
+    if any(word in genre_text for word in ("metal", "hardcore", "punk", "rock")):
+        genre_factor = 1.5
+        label = "angular duet"
+    elif any(word in genre_text for word in ("electronic", "techno", "dance", "house", "edm")):
+        genre_factor = 2.0
+        label = "electric duet"
+    elif any(word in genre_text for word in ("hip hop", "hip-hop", "rap", "soul")):
+        genre_factor = 1.0
+        label = "groove duet"
+    else:
+        genre_factor = 1.0
+        label = "duet"
+
+    left_frame_index = int(beats * (genre_factor + 0.8 * bass_drive)) % len(_CARTWHEEL_FRAMES)
+    right_frame_index = int(beats * (genre_factor + 0.8 * treble_drive) + 1.0) % len(_CARTWHEEL_FRAMES)
+    left_frame = _CARTWHEEL_FRAMES[left_frame_index]
+    right_frame = tuple(_mirror_ascii_pose(line) for line in _CARTWHEEL_FRAMES[right_frame_index])
+
+    figure_width = max(max(len(line) for line in left_frame),
+                       max(len(line) for line in right_frame))
+
+    # Never compose two figures when the panel cannot hold two complete poses.
+    # Overlapping two 7-cell cartwheels makes limbs overwrite each other and
+    # creates the "half a person on each edge" artifact. A single centered
+    # dancer is clearer and remains entirely inside the panel.
+    narrow_duet = width < (figure_width * 2 + 2)
+    if narrow_duet:
+        slash = chr(92)
+        # Compact three-column pose: a whole dancer still fits in a tight
+        # visual panel instead of showing clipped limbs.
+        narrow_frame = (" o ", f"/|{slash}", f"/ {slash}")
+        narrow_width = min(3, width)
+        narrow_x = max(0, (width - narrow_width) // 2)
+        rows: list[str] = []
+        airborne = safe_bpm >= 100.0 and (beats % 1.0) < HOP_FRACTION
+        for source_line in narrow_frame:
+            line = source_line[:narrow_width]
+            rows.append((" " * narrow_x + line)[:width].rstrip())
+        rows.append((" " * max(0, width // 2 - 1) + "· solo")[:width].rstrip())
+        rows.append("")
+        if airborne:
+            rows.insert(0, "")
+        return "\n".join(rows)
+
+    centre = width // 2
+    # Both x positions are chosen from complete figure boxes. This keeps every
+    # head, arm, and wheel inside its own half of the panel.
+    max_safe_gap = max(0, (width - 2 * figure_width) // 2)
+    gap = min(max(0, gap), max_safe_gap)
+    left_x = max(0, centre - gap - figure_width)
+    right_x = min(width - figure_width, centre + gap)
+
+    rows: list[str] = []
+    airborne = safe_bpm >= 100.0 and (beats % 1.0) < HOP_FRACTION
+    for left_line, right_line in zip(left_frame, right_frame):
+        line = [" "] * width
+        # Hard ownership boundaries: the left dancer may only draw in the
+        # left half, and the mirrored dancer only in the right half. Even if a
+        # pose overlaps at the meeting point, characters are dropped rather
+        # than merged, wrapped, or drawn on the other side.
+        for col, char in enumerate(left_line):
+            target = left_x + col
+            if 0 <= target < centre and char != " ":
+                line[target] = char
+        for col, char in enumerate(right_line):
+            target = right_x + col
+            if centre <= target < width and char != " ":
+                line[target] = char
+        rows.append("".join(line).rstrip())
+
+    if meeting:
+        rows.append(" " * max(0, centre - 2) + "♡   ♥ together")
+        label = "♥ together"
+    else:
+        rows.append(" " * max(0, centre - 1) + "·  " + label)
+
+    # Keep a constant number of rows. The blank line moves inside the frame,
+    # rather than changing the widget height and making the UI jump.
+    if airborne:
+        rows = [""] + rows
+    else:
+        rows.append("")
+    return "\n".join(rows)
+
+
+def duet_dance_frame(
+    bpm: float | None,
+    elapsed: float,
+    *,
+    mood: str = "neutral",
+    genre: str = "",
+    energy: float | None = None,
+    width: int = 28,
+) -> str:
+    """Render two mirrored ASCII dancers whose relationship follows the song.
+
+    The dancers keep a respectful distance for ordinary songs, occasionally
+    meet for tender/love lyrics, and become more angular or chaotic for
+    aggressive genres. Hops are deliberately disabled below 100 BPM: slow
+    songs sway and pulse instead of looking like the figures are jumping.
+    """
+    import math
+
+    safe_bpm = float(bpm or 90.0)
+    beat = 60.0 / max(safe_bpm, 1.0)
+    beats = elapsed / beat
+    pulse = math.sin(beats * math.tau)
+    half = max(10, width // 2)
+    genre_text = (genre or "").casefold()
+
+    if any(word in genre_text for word in ("metal", "hardcore", "punk", "rock")):
+        style = "angular"
+    elif any(word in genre_text for word in ("electronic", "techno", "dance", "house", "edm")):
+        style = "wave"
+    elif any(word in genre_text for word in ("hip hop", "hip-hop", "rap", "soul")):
+        style = "groove"
+    elif mood == "tender":
+        style = "tender"
+    else:
+        style = "sway"
+
+    # The mean song energy influences how far apart they dance. Tender songs
+    # pull them together; high-energy songs give them room for independent
+    # movement. They meet only during occasional musical phrases.
+    e = max(0.0, min(1.0, float(energy if energy is not None else 0.5)))
+    tender = mood == "tender" or any(word in genre_text for word in ("love", "romance"))
+    phrase = (beats / 8.0) % 1.0
+    meet = tender and phrase > 0.70
+    max_gap = max(2, int((1.0 - e) * (half * 0.45)))
+    gap = 1 if meet else max_gap + int(abs(pulse) * 2)
+    gap = min(gap, half - 8)
+
+    # Below 100 BPM they stay grounded. At 100+ BPM a short first-beat lift
+    # adds a hop, never changing the total block height.
+    airborne = safe_bpm >= 100.0 and (beats % 1.0) < HOP_FRACTION
+    lift = 1 if airborne else 0
+
+    slash = chr(92)
+    if style == "angular":
+        left = [(" o ", f"{slash}|/", f"/ {slash}"), (" o ", f"/|{slash}", f" {slash}/ ")]
+    elif style == "wave":
+        left = [(" ~o ", f" /|", f" / {slash}"), ("o~  ", f"|{slash} ", f"/ {slash}")]
+    elif style == "groove":
+        left = [(" o ", f"_/{slash}", " /| "), (" o ", f"{slash}_|", " |/ ")]
+    elif style == "tender":
+        left = [(" o ", " /|", f" / {slash}"), (" o ", f" /{slash}", " /| ")]
+    else:
+        left = [(" o ", " /|", f" / {slash}"), (" o ", f"{slash}|/", " /| ")]
+
+    pose = left[int(beats * 2) % len(left)]
+    right = tuple(_mirror_ascii_pose(line) for line in pose)
+    center = max(1, half - gap - 4)
+    left_x = max(0, center - len(pose[0]))
+    right_x = min(width - len(right[0]), half + gap)
+
+    rows = []
+    for line_left, line_right in zip(pose, right):
+        line = [" "] * width
+        for i, char in enumerate(line_left):
+            if left_x + i < width:
+                line[left_x + i] = char
+        for i, char in enumerate(line_right):
+            if right_x + i < width:
+                line[right_x + i] = char
+        rows.append("".join(line).rstrip())
+
+    if meet:
+        rows.append(" " * max(0, half - 3) + "♡")
+    else:
+        rows.append(" " * max(0, half - 1) + ("·" if style != "angular" else "✷"))
+    if lift:
+        rows.insert(0, "")
+    else:
+        rows.append("")
+
+    label = "♥ together" if meet else style
+    return "\n".join(rows) + f"  {label}"
+
+
+def _mirror_ascii_pose(line: str) -> str:
+    """Mirror a tiny ASCII dancer pose without disturbing its width."""
+    table = str.maketrans("/\\|_", "\\/|_")
+    return line.translate(table)[::-1]
+
+
+
 def animate_mood_pixels(pixels: list[list[tuple[int, int, int]]], elapsed: float, bpm: float | None):
     if not pixels or not bpm or bpm <= 0:
         return pixels

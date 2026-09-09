@@ -1,0 +1,22 @@
+[Unit]
+Description=Karaoke Web TUI (textual-serve)
+Documentation=file:///home/tina/karaoke/docs/howto-systemd-services.md
+After=karaoke-api.service karaoke-ctrl-api.service
+Wants=karaoke-api.service karaoke-ctrl-api.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=HOST=127.0.0.1
+Environment=PORT=8001
+ExecStart=/home/tina/karaoke/.venv/bin/python /home/tina/karaoke/scripts/web_serve.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+SyslogIdentifier=karaoke-webtui
+
+[Install]
+WantedBy=karaoke.target

@@ -362,6 +362,15 @@ class ApiClient:
             return player_open.set_window_bounds(state=state, left=left, top=top, width=width, height=height)
         return False
 
+    def restart_player_window(self) -> bool:
+        res = self._http_post(self.ctrl_url, "/api/players/window/restart")
+        if res is not None and res.get("status") == "ok":
+            return True
+        if self.fallback_local:
+            from . import player_open
+            return player_open.restart_kiosk_browser()
+        return False
+
     def record_start(self, source: Optional[str] = None, keep_audio: bool = False, note: Optional[str] = None) -> dict[str, Any]:
         body = {"source": source, "keep_audio": keep_audio, "note": note}
         res = self._http_post(self.ctrl_url, "/api/record/start", body)

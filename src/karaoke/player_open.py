@@ -208,6 +208,78 @@ _BYPASS_BEFOREUNLOAD_JS = """(() => {
   } catch (e) {}
 })()"""
 
+_DISMISS_DIALOGS_JS = """(() => {
+  let clickedCount = 0;
+  const keywords = [
+    'understand', 'proceed', 'exit app', 'play anyway', 'confirm', 'dismiss', 'continue', 'got it', 'accept',
+    'begrijp', 'doorgaan', 'verdergaan', 'app afsluiten', 'app sluiten', 'toch afspelen', 'toch bekijken',
+    'afspelen', 'bevestigen', 'akkoord', 'sluiten', 'weergeven', 'bekijken', 'begrepen', 'ik begrijp het',
+    'openen', 'ja'
+  ];
+
+  function tryClick() {
+    let clickedThisRound = false;
+    const selectors = [
+      'button[aria-label*="proceed" i]', 'button[aria-label*="understand" i]',
+      'button[aria-label*="doorgaan" i]', 'button[aria-label*="begrijp" i]',
+      'button[aria-label*="sluiten" i]', 'button[aria-label*="afsluiten" i]',
+      'yt-button-renderer#confirm-button button', '#confirm-button button',
+      'ytmusic-dialog-renderer button', 'tp-yt-paper-dialog button',
+      '[role="dialog"] button', 'ytmusic-you-there-renderer button',
+      'button.yt-spec-button-shape-next--filled',
+      'button.yt-spec-button-shape-next--call-to-action'
+    ];
+    for (const sel of selectors) {
+      const elms = document.querySelectorAll(sel);
+      for (const el of elms) {
+        if (el && el.offsetParent !== null) {
+          const txt = (el.textContent || '').trim().toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          if (keywords.some(k => txt.includes(k) || aria.includes(k))) {
+            el.click();
+            clickedThisRound = true;
+            clickedCount++;
+          }
+        }
+      }
+    }
+
+    const allBtns = document.querySelectorAll('button, .yt-spec-button-shape-next, a.yt-spec-button-shape-next');
+    for (const b of allBtns) {
+      if (b && b.offsetParent !== null) {
+        const txt = (b.textContent || '').trim().toLowerCase();
+        if (keywords.some(k => txt.includes(k))) {
+          b.click();
+          clickedThisRound = true;
+          clickedCount++;
+        }
+      }
+    }
+    return clickedThisRound;
+  }
+
+  // Attempt up to 3 passes to handle chained/nested confirmations (e.g. exit app -> proceed)
+  for (let i = 0; i < 3; i++) {
+    if (!tryClick()) break;
+  }
+
+  const v = document.querySelector('video');
+  if (clickedCount > 0 && v && v.paused) {
+    v.play().catch(() => {});
+  }
+  return clickedCount;
+})()"""
+
+
+def dismiss_kiosk_dialogs() -> bool:
+    """Dismiss parental advisories, content warnings, and confirmation modals over CDP."""
+    _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+    reply = _cdp_send("Runtime.evaluate", {"expression": _DISMISS_DIALOGS_JS, "returnByValue": True})
+    if reply and "result" in reply:
+        val = reply["result"].get("result", {}).get("value")
+        return bool(val)
+    return False
+
 
 def try_chrome_cdp_navigate(url: str) -> bool:
     """Navigate the existing kiosk window to a URL, bypassing beforeunload prompts."""
@@ -217,6 +289,7 @@ def try_chrome_cdp_navigate(url: str) -> bool:
     reply = _cdp_send("Page.navigate", {"url": url})
     if reply is not None:
         _cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+        dismiss_kiosk_dialogs()
         return True
 
     escaped_url = url.replace("'", "\\'")
@@ -224,7 +297,100 @@ def try_chrome_cdp_navigate(url: str) -> bool:
         "Runtime.evaluate",
         {"expression": f"window.onbeforeunload = null; window.location.href = '{escaped_url}';"}
     )
-    return reply_js is not None
+    if reply_js is not None:
+        dismiss_kiosk_dialogs()
+        return True
+    return False
+
+
+def cdp_play_pause() -> bool:
+    """Toggle play/pause on the kiosk browser over CDP."""
+    js = """(() => {
+      const v = document.querySelector('video');
+      if (v) {
+        if (v.paused) v.play().catch(() => {});
+        else v.pause();
+        return true;
+      }
+      const btn = document.querySelector('#play-pause-button, .play-pause-button, button[aria-label*="Play" i], button[aria-label*="Pause" i], button[aria-label*="Afspelen" i], button[aria-label*="Onderbreken" i]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_next_track() -> bool:
+    """Trigger next track on the kiosk browser over CDP."""
+    js = """(() => {
+      const btn = document.querySelector('.next-button, button[aria-label*="Next" i], button[aria-label*="Volgende" i]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_previous_track() -> bool:
+    """Trigger previous track on the kiosk browser over CDP."""
+    js = """(() => {
+      const btn = document.querySelector('.previous-button, button[aria-label*="Previous" i], button[aria-label*="Vorige" i]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_toggle_av(mode: str | None = None) -> str:
+    """Toggle or set Audio (Song) vs Video mode on YouTube Music over CDP."""
+    target_mode = mode or ""
+    js = f"""(() => {{
+      const songBtn = document.querySelector('ytmusic-av-toggle .song-button, button.song-button');
+      const videoBtn = document.querySelector('ytmusic-av-toggle .video-button, button.video-button');
+      if (!songBtn || !videoBtn) return "no_av_toggle";
+      const target = '{target_mode}';
+      if (target === "audio") {{
+        songBtn.click();
+        return "audio";
+      }} else if (target === "video") {{
+        videoBtn.click();
+        return "video";
+      }}
+      const isSongActive = songBtn.classList.contains('selected') || songBtn.getAttribute('aria-selected') === 'true';
+      if (isSongActive) {{
+        videoBtn.click();
+        return "video";
+      }} else {{
+        songBtn.click();
+        return "audio";
+      }}
+    }})()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    val = reply.get("result", {}).get("result", {}).get("value") if reply else None
+    return str(val or "unsupported")
+
+
+def cdp_toggle_shuffle() -> bool:
+    """Toggle shuffle mode on YouTube Music over CDP."""
+    js = """(() => {
+      const btn = document.querySelector('.shuffle, button[aria-label*="shuffle" i], button[aria-label*="shuffelen" i]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_toggle_repeat() -> bool:
+    """Toggle repeat mode on YouTube Music over CDP."""
+    js = """(() => {
+      const btn = document.querySelector('.repeat, button[aria-label*="repeat" i], button[aria-label*="herhalen" i]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
 
 
 # Reads the page's own <video> element. MPRIS reports a position but not
@@ -260,7 +426,11 @@ def browser_playback() -> "dict | None":
         return None
     try:
         raw = reply["result"]["result"]["value"]
-        return json.loads(raw)
+        data = json.loads(raw)
+        # If the player is stalled or paused on an unhandled warning, attempt dismiss
+        if data.get("paused") or int(data.get("readyState") or 0) == 0:
+            dismiss_kiosk_dialogs()
+        return data
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -368,13 +538,32 @@ def launch_kiosk_browser(url: str = "https://music.youtube.com") -> bool:
     if _cdp_page_socket() is not None:
         return True
 
-    chrome = os.environ.get("CHROME", "google-chrome-stable")
-    if not shutil.which(chrome):
-        chrome = "google-chrome"
-        if not shutil.which(chrome):
-            return False
+    # 1. Try starting the systemd kiosk unit first
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "start", "karaoke-kiosk.service"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0:
+            time.sleep(1.2)
+            if _cdp_page_socket() is not None:
+                return True
+    except Exception:
+        pass
 
-    profile = os.path.expanduser("~/.local/share/karaoke/kiosk-chrome")
+    # 2. Manual fallback with exact profile path
+    chrome = os.environ.get("CHROME", "/usr/bin/google-chrome-stable")
+    if not shutil.which(chrome):
+        chrome = "google-chrome-stable"
+        if not shutil.which(chrome):
+            chrome = "google-chrome"
+            if not shutil.which(chrome):
+                return False
+
+    profile = os.path.expanduser("~/.config/google-chrome-kiosk")
     cmd = [
         chrome,
         f"--app={url}",
@@ -387,6 +576,47 @@ def launch_kiosk_browser(url: str = "https://music.youtube.com") -> bool:
         return _cdp_page_socket() is not None
     except Exception:
         return False
+
+
+def restart_kiosk_browser() -> bool:
+    """Restart the Google Chrome kiosk window via systemd or manual fallback."""
+    import os
+    import time
+
+    # 1. Try systemd first
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "restart", "karaoke-kiosk.service"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0:
+            time.sleep(1.2)
+            return _cdp_page_socket() is not None
+    except Exception:
+        pass
+
+    # 2. Fallback to manual kill and launch
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", f"remote-debugging-port={CDP_PORT}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        ).stdout
+        for pid in (out or "").split():
+            try:
+                os.kill(int(pid), 9)  # SIGKILL
+            except (ProcessLookupError, ValueError, PermissionError):
+                pass
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    return launch_kiosk_browser()
 
 
 def open_song_url(url: str, kind: str | None, *, artist: str = "",

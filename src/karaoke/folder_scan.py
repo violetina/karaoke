@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 from . import (
     analyze, clap_vector, genre, localcache,
@@ -26,10 +28,18 @@ def scan_and_ingest_folder(
     dry_run: bool = False,
     limit: Optional[int] = None,
     conn: Optional[Any] = None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Scan a directory of audio files, enrich with fingerprinting, audio analysis,
     Spotify/YouTube links, and ingest into SQLite + OpenSearch.
     """
+    def emit(event: str, **payload: Any) -> None:
+        payload.setdefault("event", event)
+        try:
+            progress and progress(event, payload)
+        except Exception:
+            log.debug("folder-scan progress callback failed", exc_info=True)
+
     root = Path(music_dir).expanduser()
     if not root.is_dir():
         raise FileNotFoundError(f"Directory not found: {root}")
@@ -37,6 +47,8 @@ def scan_and_ingest_folder(
     audio_files = [p for p in sorted(root.rglob("*")) if p.is_file() and tags.is_audio(p)]
     if limit:
         audio_files = audio_files[:limit]
+    emit("found", root=str(root), total=len(audio_files), dry_run=dry_run)
+    log.info("Folder scan found %s audio file(s) under %s", len(audio_files), root)
 
     own_conn = conn is None
     c = conn or (None if dry_run else localcache.connect())
@@ -53,12 +65,16 @@ def scan_and_ingest_folder(
 
     labels = genre.label_vectors() if (classify_audio and clap_vector.available()) else {}
 
-    for path in audio_files:
+    for index, path in enumerate(audio_files, start=1):
+        emit("item_start", index=index, total=len(audio_files), path=str(path), name=path.name)
+        log.info("Folder scan %s/%s: %s", index, len(audio_files), path)
         try:
             # 1. Tags, YouTube ID lookup, Shazam Fingerprint, and Recording Markers
             t = tags.extract_tags(path)
             artist, title, album = t.artist, t.title, t.album
             duration = t.duration
+            emit("tagged", index=index, total=len(audio_files), path=str(path), name=path.name,
+                 artist=artist, title=title, album=album, duration=duration)
 
             # 1a. Fallback: YouTube Video ID lookup (e.g. -1jPUB7gRyg.webm in cache)
             if not artist or not title or artist.lower() in ("unknown", "track"):
@@ -107,28 +123,43 @@ def scan_and_ingest_folder(
 
             if not artist or not title:
                 log.warning("Skipping %s: missing artist/title after tags & fingerprint", path.name)
+                emit("skip", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     reason="missing artist/title after tags & fingerprint")
                 stats["errors"] += 1
                 continue
 
             # 2. Audio Analysis (Key/BPM/Energy/Brightness)
             analysis_res = None
             if classify_audio:
+                emit("analysis_start", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title)
                 analysis_res = analyze.analyze_audio(str(path))
                 if analysis_res and (analysis_res.key or analysis_res.bpm):
                     stats["classified"] += 1
+                emit("analysis_done", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title,
+                     key=getattr(getattr(analysis_res, "key", None), "name", None),
+                     bpm=getattr(analysis_res, "bpm", None))
 
             # 3. CLAP Vector & Zero-Shot Genre
             clap_vec = None
             genre_verdict = None
             if classify_audio and clap_vector.available():
+                emit("clap_start", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title)
                 clap_vec = clap_vector.embed_audio(str(path))
                 if clap_vec and labels:
                     genre_verdict = genre.classify(clap_vec, labels)
+                emit("clap_done", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title,
+                     genre=getattr(genre_verdict, "genre", None))
 
             # 4. Streaming platform resolution (Spotify & YT Music)
             yt_url = None
             spotify_uri = None
             if resolve_streaming:
+                emit("source_start", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title)
                 vid = localcache.extract_youtube_id(path.name) or localcache.extract_youtube_id(str(path))
                 if vid:
                     yt_url = f"https://www.youtube.com/watch?v={vid}"
@@ -150,6 +181,8 @@ def scan_and_ingest_folder(
 
                 if yt_url or spotify_uri:
                     stats["sourced"] += 1
+                emit("source_done", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title, yt_url=yt_url, spotify_uri=spotify_uri)
 
             item_summary = {
                 "path": str(path),
@@ -167,9 +200,13 @@ def scan_and_ingest_folder(
 
             if dry_run:
                 stats["processed"] += 1
+                emit("item_done", index=index, total=len(audio_files), path=str(path), name=path.name,
+                     artist=artist, title=title, processed=stats["processed"], dry_run=True)
                 continue
 
             # 5. SQLite Ingestion
+            emit("ingest_start", index=index, total=len(audio_files), path=str(path), name=path.name,
+                 artist=artist, title=title)
             assert c is not None
             ly = lyrics.fetch_lrclib(artist, title, album, duration)
             # Register the local file as the primary source and get the track id.
@@ -216,12 +253,22 @@ def scan_and_ingest_folder(
                 localcache.record_genre(track_id, genre_verdict, c)
 
             stats["processed"] += 1
+            emit("item_done", index=index, total=len(audio_files), path=str(path), name=path.name,
+                 artist=artist, title=title, track_id=track_id, processed=stats["processed"],
+                 errors=stats["errors"])
 
         except Exception as exc:
             log.exception("Error processing %s", path)
+            emit("error", index=index, total=len(audio_files), path=str(path), name=path.name,
+                 error=str(exc))
             stats["errors"] += 1
 
     if own_conn and c:
         c.close()
 
+    emit("done", root=str(root), **stats)
+    log.info(
+        "Folder scan done for %s: seen=%s processed=%s classified=%s sourced=%s errors=%s",
+        root, stats["seen"], stats["processed"], stats["classified"], stats["sourced"], stats["errors"],
+    )
     return stats

@@ -328,3 +328,50 @@ def test_the_cartwheel_fits_a_narrow_panel():
 def test_the_same_instant_renders_the_same_wheel():
     assert (visuals.cartwheel_frame(137, 9.87, 24)
             == visuals.cartwheel_frame(137, 9.87, 24))
+
+
+def test_duet_dance_stays_grounded_below_100_bpm():
+    frame = visuals.duet_dance_frame(90, 0.1, mood="neutral", genre="rock", energy=0.8)
+    lines = frame.splitlines()
+    assert "angular" in frame
+    assert lines[0].strip()
+    assert "o" in frame
+
+
+def test_duet_dance_tender_song_meets_sometimes():
+    frame = visuals.duet_dance_frame(120, 3.0, mood="tender", energy=0.4)
+    assert "together" in frame
+    assert "♡" in frame
+
+
+def test_duet_dance_uses_genre_styles():
+    assert "wave" in visuals.duet_dance_frame(120, 0.1, genre="electronic", energy=0.5)
+    assert "groove" in visuals.duet_dance_frame(120, 0.1, genre="hip hop", energy=0.5)
+
+
+def test_duet_cartwheel_is_mirrored_and_changes_distance():
+    apart = visuals.duet_cartwheel_frame(120, 0.0, energy=0.5, width=32)
+    together = visuals.duet_cartwheel_frame(120, 4.0, mood="tender", energy=0.5, width=32)
+    assert apart != together
+    assert "♥ together" in together
+    assert "♡" in together
+
+
+def test_duet_cartwheel_stays_grounded_below_100_bpm():
+    frame = visuals.duet_cartwheel_frame(99, 0.01, width=32)
+    # Grounded frames have no leading airborne row.
+    assert frame.splitlines()[0].strip()
+
+
+def test_duet_cartwheel_bass_and_treble_drive_independent_motion():
+    bass_heavy = visuals.duet_cartwheel_frame(120, 2.25, energy=1.0, brightness=0.0)
+    treble_heavy = visuals.duet_cartwheel_frame(120, 2.25, energy=0.0, brightness=1.0)
+    assert bass_heavy != treble_heavy
+    assert all(len(line) <= 32 for line in bass_heavy.splitlines())
+    assert all(len(line) <= 32 for line in treble_heavy.splitlines())
+
+
+def test_duet_cartwheel_uses_one_compact_dancer_when_narrow():
+    frame = visuals.duet_cartwheel_frame(120, 0.0, width=12)
+    assert "solo" in frame
+    assert all(len(line) <= 12 for line in frame.splitlines())

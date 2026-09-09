@@ -941,8 +941,11 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and lazily initialize) the local SQLite database."""
     path = Path(db_path or settings.local_db)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # The overnight importer and the Web TUI legitimately overlap. Wait for
+    # the writer instead of raising immediately and crashing the TUI screen.
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.executescript(_NEW_SCHEMA)
     conn.executescript(_SCHEMA)
     ensure_gap_columns(conn)

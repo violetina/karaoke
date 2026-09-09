@@ -137,11 +137,6 @@ browse: ## Launch the interactive song browser TUI
 	$(PYTHON) -m karaoke.browse
 
 tui: ## Launch the clean karaoke control-surface TUI prototype
-	@if ! ss -lnt | grep -q :9222; then \
-		echo "Launching Google Chrome in kiosk debugging mode..."; \
-		$(CHROME) --app="https://music.youtube.com" --remote-debugging-port=9222 --user-data-dir=$(KIOSK_PROFILE) >/dev/null 2>&1 & \
-		sleep 1.5; \
-	fi
 	$(PYTHON) -m karaoke.tui
 
 sample: ## Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
@@ -290,6 +285,8 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-kiosk.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-webtui.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess@.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.slice $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
@@ -301,7 +298,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower karaoke-kiosk karaoke-webtui 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \

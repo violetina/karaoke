@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karaoke"
-version = "0.6.0"
+version = "0.7.0"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,7 @@ dependencies = [
     "celery>=5.4",
     "flower>=2.0",
     "sqlalchemy>=2.0",
+    "ytmusicapi>=1.12.0",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +59,7 @@ karaoke-recording = "karaoke.recording_worker:recording_main"
 karaoke-align-review = "karaoke.lyric_align:review_main"
 karaoke-similar = "karaoke.search:similar_main"
 karaoke-sounds-like = "karaoke.search:describe_main"
+karaoke-ytmusic-playlist = "karaoke.ytmusic_playlist:ytmusic_playlist_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

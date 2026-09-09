@@ -262,13 +262,18 @@ def test_open_selected_hides_overlay_on_success(monkeypatch):
                                  "artist": "A", "title": "B"}, raising=False)
     monkeypatch.setattr(tui, "open_song_url", lambda url, kind, **kwargs: 123)
     monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
+    # Run the background open worker inline so the test stays synchronous.
+    monkeypatch.setattr(app, "run_worker", lambda fn, **k: fn(), raising=False)
+    monkeypatch.setattr(app, "call_from_thread", lambda fn, *a, **k: fn(*a, **k), raising=False)
 
     app._open_selected()
     assert not overlay.has_class("-visible")
 
 
-def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
-    """The failure reason lands in #now-playing, which sits behind the overlay."""
+def test_open_selected_hides_overlay_even_when_opening_fails(monkeypatch):
+    """The overlay closes immediately; the open runs off the UI thread so a
+    slow/failing CDP call can no longer freeze the event loop and swallow keys.
+    """
     from karaoke import tui
 
     app, overlay, _ = _app_with_fakes(monkeypatch, open_=True)
@@ -276,8 +281,10 @@ def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
                         lambda: {"url": "https://youtu.be/x", "kind": "youtube",
                                  "artist": "A", "title": "B"}, raising=False)
     monkeypatch.setattr(tui, "open_song_url",
-                        lambda url, kind: (_ for _ in ()).throw(RuntimeError("nope")))
+                        lambda url, kind, **kwargs: (_ for _ in ()).throw(RuntimeError("nope")))
     monkeypatch.setattr(app, "notify", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(app, "run_worker", lambda fn, **k: fn(), raising=False)
+    monkeypatch.setattr(app, "call_from_thread", lambda fn, *a, **k: fn(*a, **k), raising=False)
 
     class _NP:
         def update(self, _): pass
@@ -287,7 +294,52 @@ def test_open_selected_keeps_overlay_when_opening_fails(monkeypatch):
                         raising=False)
 
     app._open_selected()
-    assert overlay.has_class("-visible")
+    assert not overlay.has_class("-visible")
+
+
+def test_sort_rows_defaults_to_mood_energy(monkeypatch):
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._sort = "energy_desc"
+    rows = [
+        {"artist": "Low", "title": "Song", "energy": 0.2},
+        {"artist": "High", "title": "Song", "energy": 0.9},
+    ]
+    assert [row["artist"] for row in app._sort_rows(rows)] == ["High", "Low"]
+
+
+def test_wildcard_queue_is_shuffled_after_filtering(monkeypatch):
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui.__new__(KaraokeTui)
+    app._queue_is_wildcard = True
+    app._unfiltered_queue = [
+        {"track_id": 1, "artist": "A", "title": "One", "energy": 0.5},
+        {"track_id": 2, "artist": "B", "title": "Two", "energy": 0.5},
+        {"track_id": 3, "artist": "C", "title": "Three", "energy": 0.5},
+    ]
+    app._queue_at = -1
+    app._sort = "artist"
+    app._mood_filter = "all"
+    app._genre_filter = "all"
+    app._mood_level = 0.0
+
+    class FakeTable:
+        def set_class(self, *a, **k): pass
+        def clear(self): pass
+        def add_columns(self, *a): pass
+        def add_row(self, *a): pass
+
+    monkeypatch.setattr(app, "query_one", lambda *a, **k: FakeTable(), raising=False)
+    monkeypatch.setattr(app, "_render_queue", lambda: None, raising=False)
+    monkeypatch.setattr(app, "play_queue_index", lambda *a: None, raising=False)
+
+    import random
+    monkeypatch.setattr(random.SystemRandom, "shuffle", lambda self, values: values.reverse())
+    app._filter_and_set_queue()
+
+    assert [row["artist"] for row in app._queue] == ["C", "B", "A"]
 
 
 def test_playlist_queue_controls(monkeypatch):

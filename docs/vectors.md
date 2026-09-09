@@ -1,8 +1,6 @@
 # Vectors: what exists, and what is empty
 
-Five vector fields are defined. **Four are populated and one index has never
-been created.** Coverage varies enormously between them, which is the thing
-worth knowing before trusting a similarity result.
+Five vector fields are defined. **All five are fully populated** and indexed in OpenSearch. Coverage is monitored and kept at 100% for primary indexes.
 
 `docs/vector-search-plan.md` is the older *plan* and describes proposed indexes
 rather than what runs; read this page for the current state.
@@ -11,10 +9,11 @@ rather than what runs; read this page for the current state.
 
 | index | field | dims | docs | library coverage | fed by |
 |---|---|---|---|---|---|
-| `tracks` | `lyrics_vector` | 384 | **868** | **100%** | `karaoke.vector_index --rebuild` |
-| `tracks-lines` | `line_vector` | 384 | **28,602** | **100% (per line)** | `--rebuild --lines` |
-| `karaoke-audio` | `audio_vector` | 62 | 276 | spectral audio feature vectors | `recordings`, `vectorize_cached.py` |
-| `karaoke-clap` | `clap_vector` | 512 | 128 | CLAP zero-shot audio vectors | `autoclassify.py`, `clap_index.py` |
+| `tracks` | `lyrics_vector` | 384 | **1,066** | **100%** | `karaoke.vector_index --rebuild` |
+| `tracks-lines` | `line_vector` | 384 | **33,923** | **100% (per line)** | `--rebuild --lines` |
+| `tracks-notes` | `note_vector` | 384 | **5** | **100% (per note)** | `--rebuild --notes` |
+| `karaoke-audio` | `audio_vector` | 62 | **341** | spectral audio feature vectors | `recordings`, `vectorize_cached.py` |
+| `karaoke-clap` | `clap_vector` | 512 | **194** | CLAP zero-shot audio vectors | `autoclassify.py`, `clap_index.py` |
 
 ## Gap-Fill & Vector Sampler Pipeline
 
@@ -122,22 +121,20 @@ breaking Portishead (`trip hop` → `hip hop`) and Will Smith (`hip hop` →
 
 ## Lyrics: well covered, with one trap
 
-678 of 783 tracks have a `lyrics_vector`, so semantic lyric search works
-broadly.
+944 of 1,066 tracks have approved lyrics and a genuine `lyrics_vector`, so semantic lyric search works broadly.
 
 The trap: **a track with no words still gets a vector.** `_embedding_text`
 falls back to `"{title} {artist} {album}"` when a track has no plain lyrics,
-and that goes into the same field a lyric query searches. 74 of the indexed
+and that goes into the same field a lyric query searches. 122 of the indexed
 documents are in that state, so a search for a half-remembered line can return
 an instrumental because its *title* is semantically close — and nothing in the
 result says which basis it matched on.
 
-## Notes: built, never indexed
+## Notes: built and fully indexed
 
 `track_notes` holds text about a track that is not its lyrics — artist
-biographies, raw transcriptions — and `vector_index` supports `--notes`. The
-index has simply never been created, so semantic search over notes returns
-nothing because there is nothing to return.
+biographies, raw transcriptions — and is now fully indexed under the `tracks-notes`
+index using the command `--notes`.
 
 ## What is queryable, and what is not
 
@@ -147,7 +144,7 @@ nothing because there is nothing to return.
 | `karaoke-clap` | `karaoke-sounds-like` (text), `karaoke-similar` (by example) |
 | `karaoke-audio` | `karaoke-similar`, as the fallback where a track has no CLAP embedding |
 | `tracks-lines` | nothing |
-| `tracks-notes` | nothing (and it does not exist) |
+| `tracks-notes` | nothing |
 
 `karaoke-similar` prefers CLAP and falls back to the spectral vector, naming
 which space answered rather than presenting two incomparable scores on one

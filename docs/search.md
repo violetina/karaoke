@@ -100,31 +100,26 @@ query "skeletons"
 
 ---
 
-## Known limitation: multi-word queries
+## Smart Tokenized Multi-Word and Cross-Field Matching Fallbacks
 
-**A query is matched as one whole string, not as separate words.** There is no
-per-term handling anywhere in `field_score`, so a query only matches if the
-entire phrase appears in a single field.
+Rather than matching only raw, exact query strings, the library search implements **smart tokenized and cross-field matching fallbacks** for multi-word queries. This allows typing combinations like artist and title (e.g., "Led Zeppelin Houses Holy") or entering words in a different order.
 
-The consequence is easy to hit:
+### 1. Multi-Word Single-Field Fallback
+If the exact query string is not matched in a field (e.g., title, lyrics, artist), the algorithm:
+1. Splits the query into lowercase tokens.
+2. Filters out common stop words (e.g., `"the"`, `"and"`, `"with"`, `"for"`) to isolate meaningful words.
+3. Performs word-boundary (`\b`) matching for each meaningful word in the field.
+4. Scales the match score based on the ratio of words found:
+   * **Metadata fields**: `WORD * (matched_count / total_meaningful) * 0.9`
+   * **Lyrics**: `WORD * (matched_count / total_meaningful) * 0.8`
 
-```
-"glory box"                -> 1 hit    the whole phrase is the title
-"portishead glory"         -> 0 hits   artist and title, so no single field has it
-"dinosaur start choppin"   -> 0 hits   likewise
-"sonic youth dirty"        -> 0 hits   likewise
-```
+### 2. Cross-Field Matching Fallback
+If no single-field match is scored, a global cross-field fallback evaluates the multi-word query across the combined metadata string (`artist + title + album`):
+1. Matches the isolated meaningful tokens against the combined metadata string.
+2. If any words match, it computes a unified score: `WORD * (matched_count / total_meaningful) * W_TITLE * 0.85`.
+3. Displays the exact fields that contributed to the match (e.g., matching on both `artist` and `title` fields).
 
-Typing an artist *and* a title — the most natural way to search for a specific
-song — cannot work today. Nor can typing title words in a different order from
-the stored title.
-
-This is a design gap rather than a bug in the scoring: the weights and tiers do
-what they say, but they are only ever applied to one string. Fixing it means
-scoring per term and combining, which changes what "EXACT" means and needs the
-tiers re-thought rather than reused.
-
-Tracked as an issue; see the repository issue list.
+This eliminates the limitation where queries like `"portishead glory"` or `"sonic youth dirty"` yielded 0 hits.
 
 ---
 
@@ -153,6 +148,17 @@ Keyword search demotes transcribed lyrics with a `boosting` query rather than
 a filter, for the same reason the library search does: they are the only text
 some tracks have.
 
+### Synonym-Backed Search Analyzer (BM25 Optimizations)
+Full-text keyword queries on `title`, `artist`, `album`, `plain_lyrics`, `text`, and `context` fields in OpenSearch leverage a custom **synonym expansion analyzer** (`synonym_analyzer`). Six pre-defined mapping buckets expand vocabulary at query time to catch conceptually identical terms:
+* **Rock/Metal:** `rock, stoner rock, psychedelic rock, punk rock, post-punk, grunge, hard rock, heavy metal, metal`
+* **Sad/Melancholy:** `sad, depressed, melancholy, blue, sorrow, gloom, tearful, crying, weeping, lonely, dark, tender`
+* **Happy/Energetic:** `happy, glad, joyful, upbeat, cheerful, bright, high energy, energetic`
+* **Chill/Calm:** `chill, mellow, relax, relaxing, calm, slow, down, ambient`
+* **Hip-Hop/Soul:** `hip hop, rap, trap, r and b, rnb, soul, funk`
+* **Electronic/Dance:** `techno, electronic, electronica, electro, synth, synthesizer, beats, drum and bass, dnb, dance, house, rave, club, party, EDM`
+
+This expands search coverage automatically (e.g., searching for `"sad"` matches lyrics containing `"melancholy"` or `"gloom"`).
+
 ### Two things worth knowing about the vectors
 
 **A track with no words still has a lyric vector.** `_embedding_text` falls
@@ -171,8 +177,7 @@ on almost nothing.
 ## What is *not* searched
 
 - **Track notes** (artist biographies, raw transcriptions) live in
-  `track_notes` and index into `<index>-notes`, which no search path queries
-  yet.
+  `track_notes` and index into `<index>-notes` (fully bootstrapped with the synonym analyzer), which no search path queries yet.
 - **Line-level lyrics** are indexed into `<index>-lines` for timing
   experiments, not used by either search above.
 

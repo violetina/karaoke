@@ -44,3 +44,29 @@ def test_scan_uses_fingerprint_when_tags_missing(tmp_path):
         assert stats["fingerprinted"] == 1
         assert stats["items"][0]["artist"] == "Radiohead"
         assert stats["items"][0]["title"] == "Creep"
+
+
+def test_scan_reports_progress_events(tmp_path):
+    test_file = tmp_path / "song.mp3"
+    test_file.write_bytes(b"dummy")
+
+    fake_tags = MagicMock(artist="Portishead", title="Glory Box", album="Dummy",
+                          duration=300.0, path=str(test_file))
+    events = []
+
+    with patch("karaoke.tags.is_audio", return_value=True), \
+         patch("karaoke.tags.extract_tags", return_value=fake_tags), \
+         patch("karaoke.identify.identify_file_fingerprint", return_value=None), \
+         patch("karaoke.analyze.analyze_audio", return_value=MagicMock(key=None, bpm=None)), \
+         patch("karaoke.clap_vector.available", return_value=False):
+        stats = scan_and_ingest_folder(
+            tmp_path,
+            dry_run=True,
+            resolve_streaming=False,
+            progress=lambda event, payload: events.append((event, payload.copy())),
+        )
+
+    names = [event for event, _ in events]
+    assert names == ["found", "item_start", "tagged", "analysis_start", "analysis_done", "item_done", "done"]
+    assert events[0][1]["total"] == 1
+    assert events[-1][1]["processed"] == stats["processed"] == 1

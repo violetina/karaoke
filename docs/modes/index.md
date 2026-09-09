@@ -10,7 +10,7 @@ Three of the modes are chosen for you; the rest are things you turn on.
 | [Spotify](spotify.md) | auto — Spotify is the active player | Spotify `progress_ms` | spotify.md |
 | [Browse](browse.md) | auto — nothing is playing | none (library-driven) | browse.md |
 | [Radio](radio.md) | `R` — mic identification | dead-reckoned from songrec | radio.md |
-| [Record](record.md) | `O` — unattended capture | n/a (offline decompile) | record.md |
+| [Record](record.md) | `O` (`make admin`) — unattended capture | n/a (offline decompile) | record.md |
 | [Sample](sample.md) | `k` — one-shot key/BPM | n/a (real-time capture) | sample.md |
 
 Scan, Spotify and Radio are the "active" modes (`Detection.is_active`) — there

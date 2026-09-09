@@ -169,3 +169,29 @@ def test_admin_format_event_line_includes_state_task_and_id():
     assert "SUCCESS" in line
     assert "karaoke.tasks.postprocess_track" in line
     assert "abcdef123456" in line
+
+
+def test_admin_folder_scan_progress_formatter_escapes_paths():
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    line = app._folder_scan_progress_line("item_start", {
+        "index": 1,
+        "total": 5,
+        "name": "Die_Antwoord -2010 - 5 [EP]/01. Enter The Ninja.mp3",
+    })
+    assert "[1/5]" in line
+    assert "Scanning" in line
+    assert "\\[EP]" in line
+
+
+def test_admin_folder_scan_done_formatter_reports_counts():
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
+    line = app._folder_scan_progress_line("done", {
+        "seen": 5,
+        "processed": 5,
+        "classified": 4,
+        "sourced": 3,
+        "errors": 0,
+    })
+    assert "seen=5" in line
+    assert "processed=5" in line
+    assert "errors=0" in line

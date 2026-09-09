@@ -417,6 +417,14 @@ def set_player_window(req: WindowRequest) -> dict[str, Any]:
     return {"status": "ok", "state": req.state}
 
 
+@app.post("/api/players/window/restart")
+def restart_kiosk_player() -> dict[str, Any]:
+    """Restart the Chrome kiosk window service or processes."""
+    from .player_open import restart_kiosk_browser
+    ok = restart_kiosk_browser()
+    return {"status": "ok" if ok else "failed", "restarted": ok}
+
+
 # Deliberately plain. This page exists to hold one <audio> element and to
 # declare what is playing; anything more would be a second UI competing with
 # the TUI, which is where browsing actually happens.

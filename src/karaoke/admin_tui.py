@@ -24,6 +24,11 @@ from .logger import LOG_FILE, log
 __all__ = ["KaraokeAdminApp", "admin_main"]
 
 
+def markup_text(value: Any) -> str:
+    """Escape dynamic text written to RichLog/Static with markup enabled."""
+    return str(value).replace("[", r"\[")
+
+
 class KaraokeAdminApp(App):
     """Admin and Operations Dashboard for Karaoke Backend."""
 
@@ -100,6 +105,34 @@ class KaraokeAdminApp(App):
 
     #align-container Horizontal, #ingest-container Horizontal { height: auto; }
     #align-container Input, #ingest-container Input { margin-right: 1; }
+
+    #recordings-container {
+        border: round $primary;
+        padding: 0 1;
+        margin-bottom: 1;
+        height: auto;
+    }
+
+    #recordings-table {
+        height: 5;
+    }
+
+    #recordings-summary {
+        height: 1;
+        color: $text-muted;
+    }
+
+    #record-panel {
+        display: none;
+        height: auto;
+        border: round red;
+        padding: 0 1;
+        margin-bottom: 1;
+        color: $error;
+    }
+    #record-panel.-on {
+        display: block;
+    }
     """
 
 
@@ -121,6 +154,8 @@ class KaraokeAdminApp(App):
         ("e", "fetch_errors", "Error Logs"),
         ("c", "refresh_clients", "Refresh Clients"),
         ("X", "shutdown_webui", "Stop Web UI"),
+        ("K", "restart_kiosk", "Restart Kiosk Chrome"),
+        ("O", "toggle_record", "Toggle Live Recording"),
     ]
 
     def __init__(self):
@@ -129,6 +164,9 @@ class KaraokeAdminApp(App):
         self._target_workers = 1
         self._bg_busy = False
         self._bg_lock = None
+        self._recording_id = None
+        self._record_tick = 0
+        self._recording_rows = {}
         self._last_event_ts: float | None = None
         self._last_event_ids: tuple[str, ...] = ()
         self._last_logs_seen: list[str] = []
@@ -200,6 +238,15 @@ class KaraokeAdminApp(App):
                     yield DataTable(id="clients-table", cursor_type="row")
                     yield Static("Clients: Loading...", id="clients-summary")
 
+                # Live Recording Panel Indicator
+                yield Static("", id="record-panel")
+
+                # Recordings Management Panel
+                with Container(id="recordings-container"):
+                    yield Static("[bold cyan]Recent Audio Recordings (Press Enter to process)[/bold cyan]")
+                    yield DataTable(id="recordings-table", cursor_type="row")
+                    yield Static("Recordings: Loading...", id="recordings-summary")
+
                 # Middle: Audio Processing & Vector Ingestion Controls
                 with Container(id="pipeline-container"):
                     yield Static("[bold cyan]Audio Processing & Vector Ingestion Pipeline[/bold cyan]")
@@ -207,6 +254,7 @@ class KaraokeAdminApp(App):
                         yield Button("Run Audio Backfill (b)", id="btn-backfill", variant="success")
                         yield Button("Rebuild Vectors (v)", id="btn-rebuild-vectors", variant="primary")
                         yield Button("Analyse Recordings (a)", id="btn-recordings", variant="warning")
+                        yield Button("Toggle Record (O)", id="btn-record", variant="error")
 
                 # Whisper Plain Lyrics Alignment Panel
                 with Container(id="align-container"):
@@ -221,7 +269,7 @@ class KaraokeAdminApp(App):
                     yield Static("[bold cyan]File Ingestion & Folder Scan[/bold cyan]")
                     with Horizontal():
                         yield Input(placeholder="Path to folder or audio file (e.g. ~/Music)...", id="ingest-input")
-                        yield Button("Scan Folder", id="btn-scan", variant="primary")
+                        yield Button("Scan Folder (s)", id="btn-scan", variant="primary")
 
             # Right column: live task status, latest platform events, diagnostics.
             with Vertical(id="log-container"):
@@ -237,16 +285,24 @@ class KaraokeAdminApp(App):
         table.add_columns("Worker Unit", "State", "Worker ID")
         clients = self.query_one("#clients-table", DataTable)
         clients.add_columns("Kind", "Client / Session", "Detail", "Status")
+
+        recordings = self.query_one("#recordings-table", DataTable)
+        recordings.add_columns("ID", "Date/Time", "Status", "Identified / Total Marks", "Source")
+
         self.refresh_all()
         self.set_interval(3.0, self.refresh_workers)
         self.set_interval(5.0, self.refresh_clients)
         self.set_interval(2.5, self._poll_events)
+        self.set_interval(3.0, self.refresh_record_status)
+        self.set_interval(4.0, self.refresh_recordings)
 
     def refresh_all(self) -> None:
         self.refresh_workers()
         self.refresh_clients()
         self.refresh_events()
         self.refresh_errors()
+        self.refresh_record_status()
+        self.refresh_recordings()
 
 
     def refresh_workers(self) -> None:
@@ -476,6 +532,97 @@ class KaraokeAdminApp(App):
             self.notify("No running web UI server found", severity="warning")
         self.refresh_clients()
 
+    def action_restart_kiosk(self) -> None:
+        """`K`: Restart the kiosk Chrome window via control API."""
+        self.notify("Signalling kiosk Chrome restart...")
+        ok = self.api.restart_player_window()
+        if ok:
+            self.notify("Kiosk Chrome window restarted successfully")
+        else:
+            self.notify("Failed to restart kiosk Chrome window", severity="error")
+        self.refresh_clients()
+
+    def refresh_record_status(self) -> None:
+        """Update the Record button and state based on active recording."""
+        self._record_tick += 1
+        try:
+            st = self.api.record_status()
+            sessions = st.get("sessions", []) if isinstance(st, dict) else []
+            active_id = None
+            active_item = None
+            for s in sessions:
+                if s.get("recording_id") and s.get("status") == "recording":
+                    active_id = int(s["recording_id"])
+                    active_item = s
+                    break
+            self._recording_id = active_id
+
+            btn = self.query_one("#btn-record", Button)
+            if active_id is not None:
+                btn.label = f"Stop Record #{active_id} (O)"
+                btn.variant = "error"
+            else:
+                btn.label = "Toggle Record (O)"
+                btn.variant = "success"
+
+            panel = self.query_one("#record-panel", Static)
+            if active_id is not None and active_item is not None:
+                panel.set_class(True, "-on")
+                panel.update(record_panel(
+                    recording_id=active_id,
+                    elapsed_s=float(active_item.get("elapsed_s") or 0.0),
+                    marks_ok=int(active_item.get("identified") or 0),
+                    marks_total=int(active_item.get("marks") or 0),
+                    size_bytes=int(active_item.get("audio_bytes") or 0),
+                    source=str(active_item.get("source") or ""),
+                    blink=self._record_tick % 2 == 1,
+                ))
+            else:
+                panel.set_class(False, "-on")
+                panel.update("")
+        except Exception:
+            pass
+
+    def action_toggle_record(self) -> None:
+        """`O`: record the output continuously, marking what plays on it."""
+        if self._recording_id is None:
+            try:
+                st = self.api.record_status()
+                sessions = st.get("sessions", []) if isinstance(st, dict) else []
+                for s in sessions:
+                    if s.get("recording_id"):
+                        self._recording_id = int(s["recording_id"])
+                        break
+            except Exception:
+                pass
+
+        if self._recording_id is not None:
+            stopped_id = self._recording_id
+            try:
+                from . import recorder
+                recorded, total = recorder.mark_count(stopped_id)
+            except Exception:
+                recorded, total = 0, 0
+            self.api.record_stop(stopped_id)
+            self.notify(f"Recording {stopped_id} stopped ({recorded}/{total} tracks identified)")
+            self._recording_id = None
+            self.refresh_record_status()
+            return
+
+        result = self.api.record_start()
+        if result.get("status") != "recording":
+            detail = result.get("detail", "unknown error")
+            self.notify(f"Cannot record: {detail}", severity="error")
+            return
+        self._recording_id = result["recording_id"]
+        from pathlib import Path
+        directory = Path(result.get("dir", "")).name
+        if result.get("reused"):
+            self.notify(f"Reattached to active recording {self._recording_id}")
+        else:
+            self.notify(f"Recording {self._recording_id} to {directory}")
+        self.refresh_record_status()
+
     def action_scale_up(self) -> None:
         self._target_workers = 1
         self._scale_workers(self._target_workers)
@@ -499,14 +646,125 @@ class KaraokeAdminApp(App):
         self._scale_workers(self._target_workers or 1)
         self.notify("Restarted Celery postprocess worker")
 
+    def _append_event_log(self, line: str) -> None:
+        try:
+            self.query_one("#event-log", RichLog).write(line)
+        except Exception:
+            log.debug("Could not append admin event log line", exc_info=True)
+
+    def _folder_scan_progress_line(self, event: str, payload: dict[str, Any]) -> str:
+        index = payload.get("index")
+        total = payload.get("total")
+        prefix = f"[{index}/{total}] " if index and total else ""
+        name = markup_text(payload.get("name") or payload.get("root") or "")
+        artist = markup_text(payload.get("artist") or "")
+        title = markup_text(payload.get("title") or "")
+        track = f" — {artist} - {title}" if artist or title else ""
+        if event == "found":
+            return f"[bold cyan]Folder scan[/] found {payload.get('total', 0)} audio file(s) in {name}"
+        if event == "item_start":
+            return f"[bold yellow]{prefix}Scanning[/] {name}"
+        if event == "tagged":
+            return f"[dim]{prefix}Tags[/dim] {name}{track}"
+        if event == "analysis_start":
+            return f"[yellow]{prefix}Analysing key/BPM[/] {name}"
+        if event == "analysis_done":
+            key = payload.get("key") or "?"
+            bpm = payload.get("bpm") or "?"
+            return f"[green]{prefix}Audio analysis[/] key={markup_text(key)} bpm={markup_text(bpm)}{track}"
+        if event == "clap_start":
+            return f"[yellow]{prefix}Embedding/classifying audio[/] {name}"
+        if event == "clap_done":
+            genre = payload.get("genre") or "?"
+            return f"[green]{prefix}Genre[/] {markup_text(genre)}{track}"
+        if event == "source_start":
+            return f"[yellow]{prefix}Resolving YouTube/Spotify sources[/]{track}"
+        if event == "source_done":
+            sources = []
+            if payload.get("yt_url"):
+                sources.append("YouTube")
+            if payload.get("spotify_uri"):
+                sources.append("Spotify")
+            source_text = ", ".join(sources) or "no streaming source"
+            return f"[green]{prefix}Sources[/] {source_text}{track}"
+        if event == "ingest_start":
+            return f"[yellow]{prefix}Ingesting into SQLite[/]{track}"
+        if event == "item_done":
+            processed = payload.get("processed")
+            errors = payload.get("errors", 0)
+            return f"[bold green]{prefix}Done[/] track_id={payload.get('track_id', '?')} processed={processed} errors={errors}{track}"
+        if event == "skip":
+            return f"[bold yellow]{prefix}Skipped[/] {name}: {markup_text(payload.get('reason') or 'unknown')}"
+        if event == "error":
+            return f"[bold red]{prefix}Error[/] {name}: {markup_text(payload.get('error') or 'unknown')}"
+        if event == "done":
+            return (f"[bold green]Folder scan done[/] seen={payload.get('seen', 0)} "
+                    f"processed={payload.get('processed', 0)} classified={payload.get('classified', 0)} "
+                    f"sourced={payload.get('sourced', 0)} errors={payload.get('errors', 0)}")
+        return f"[dim]Folder scan {markup_text(event)}[/dim] {markup_text(payload)}"
+
+    def _folder_scan_progress(self, event: str, payload: dict[str, Any]) -> None:
+        line = self._folder_scan_progress_line(event, payload)
+        self.call_from_thread(self._append_event_log, line)
+        if event in {"found", "item_start", "analysis_start", "clap_start", "source_start", "ingest_start"}:
+            root_or_name = payload.get("name") or payload.get("root") or ""
+            index = payload.get("index")
+            total = payload.get("total")
+            step = event.replace("_", " ")
+            suffix = f" ({index}/{total})" if index and total else ""
+            self.call_from_thread(
+                self._set_job_status,
+                f"[bold yellow]RUNNING[/bold yellow] Folder scan{suffix}: {markup_text(root_or_name)}\n[dim]{markup_text(step)}[/dim]",
+            )
+
     def action_scan_folder(self) -> None:
+        """Scan a folder directly inside the TUI with visual progress and lock."""
         inp = self.query_one("#ingest-input", Input)
         folder = inp.value.strip() or "~/Music"
-        res = self.api._http_post(self.api.ctrl_url, "/api/scan/folder", {"dir": folder})
-        if res and res.get("status") in ("accepted", "ok"):
-            self.notify(f"Triggered folder scan for {folder}")
-        else:
-            self.notify(f"Folder scan failed for {folder}", severity="error")
+
+        if not self._acquire_bg_lock():
+            return
+
+        label = f"Folder scan: {folder}"
+        self._mark_task_started(label)
+        self.notify(f"Scanning folder {folder}...")
+
+        def _bg():
+            try:
+                from . import folder_scan, vector_index
+                from pathlib import Path
+                root = Path(folder).expanduser()
+                if not root.is_dir():
+                    raise ValueError(f"Directory not found: {root}")
+
+                stats = folder_scan.scan_and_ingest_folder(
+                    root,
+                    use_fingerprint=True,
+                    classify_audio=True,
+                    resolve_streaming=True,
+                    dry_run=False,
+                    progress=self._folder_scan_progress,
+                )
+
+                self.call_from_thread(self._append_event_log, "[bold yellow]Rebuilding OpenSearch vectors for scanned files...[/]")
+                # Rebuild vectors for newly ingested files
+                vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+
+                msg = (f"Scan complete. Seen: {stats.get('seen', 0)}, "
+                       f"Processed: {stats.get('processed', 0)}, "
+                       f"Classified: {stats.get('classified', 0)}, "
+                       f"Sourced: {stats.get('sourced', 0)}, "
+                       f"Errors: {stats.get('errors', 0)}")
+                self.call_from_thread(self.notify, msg)
+                self.call_from_thread(self._mark_task_finished, label, msg)
+            except Exception as exc:
+                msg = f"Scan failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
+
+        self.run_worker(_bg, thread=True)
 
     def action_run_backfill(self) -> None:
         """`b`: Trigger audio gap-fill and zero-shot genre backfill."""
@@ -625,6 +883,8 @@ class KaraokeAdminApp(App):
             self.action_rebuild_vectors()
         elif bid == "btn-recordings":
             self.action_analyse_recordings()
+        elif bid == "btn-record":
+            self.action_toggle_record()
         elif bid == "btn-align":
             self.action_align_whisper()
         elif bid == "btn-scan":
@@ -646,6 +906,145 @@ class KaraokeAdminApp(App):
             self.set_focus(None)
             return
         self.exit()
+
+    def refresh_recordings(self) -> None:
+        """Fetch the last 15 recordings from SQLite and update recordings-table."""
+        try:
+            table = self.query_one("#recordings-table", DataTable)
+        except Exception:
+            return
+
+        try:
+            from . import localcache
+            import datetime
+
+            with localcache.connect() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT r.recording_id, r.started_at, r.ended_at, r.source, r.status, r.note,
+                           COUNT(m.mark_id) AS total_marks,
+                           SUM(CASE WHEN m.ok = 1 THEN 1 ELSE 0 END) AS ok_marks
+                    FROM recordings r
+                    LEFT JOIN recording_marks m ON m.recording_id = r.recording_id
+                    GROUP BY r.recording_id
+                    ORDER BY r.recording_id DESC
+                    LIMIT 15
+                """)
+                rows = cur.fetchall()
+
+            table.clear()
+            active_count = 0
+            complete_count = 0
+            analysed_count = 0
+
+            self._recording_rows = {}
+
+            for row in rows:
+                rid = row["recording_id"]
+                status = row["status"]
+
+                try:
+                    dt = datetime.datetime.fromtimestamp(row["started_at"])
+                    started_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    started_str = str(row["started_at"])
+
+                if status == "recording":
+                    status_fmt = "[bold red]RECORDING[/bold red]"
+                    active_count += 1
+                elif status == "complete":
+                    status_fmt = "[bold yellow]complete[/bold yellow]"
+                    complete_count += 1
+                elif status == "analysed":
+                    status_fmt = "[dim green]analysed[/dim green]"
+                    analysed_count += 1
+                else:
+                    status_fmt = status
+
+                marks_fmt = f"{row['ok_marks'] or 0} / {row['total_marks'] or 0}"
+                src_fmt = short_source(row["source"]) if row["source"] else ""
+
+                row_key = table.add_row(
+                    str(rid),
+                    started_str,
+                    status_fmt,
+                    marks_fmt,
+                    src_fmt
+                )
+                self._recording_rows[row_key] = rid
+
+            summary = (
+                f"[bold cyan]Recordings:[/bold cyan] {active_count} active | "
+                f"[bold yellow]{complete_count} complete (ready to process)[/bold yellow] | "
+                f"[dim]{analysed_count} analysed[/dim]"
+            )
+            self.query_one("#recordings-summary", Static).update(summary)
+        except Exception as exc:
+            log.debug("refresh_recordings failed", exc_info=True)
+
+    def _process_selected_recording(self, rid: int) -> None:
+        """Process, decompile, and ingest detected song vectors for a single recording ID."""
+        if not self._acquire_bg_lock():
+            return
+        label = f"Decompile & analyse recording #{rid}"
+        self._mark_task_started(label)
+        self.notify(f"Analysing captured audio recording #{rid}...")
+
+        def _bg():
+            try:
+                from . import recording_worker, vector_index
+                res = recording_worker.analyse(rid)
+                msg = f"Successfully analysed recording #{rid} and ingested song vectors"
+                self.call_from_thread(self.notify, msg)
+                self.call_from_thread(self._mark_task_finished, label, msg)
+                # Rebuild vectors to make sure OpenSearch is refreshed
+                vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                self.call_from_thread(self.refresh_recordings)
+            except Exception as exc:
+                msg = f"Analysis of recording #{rid} failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
+        self.run_worker(_bg, thread=True)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle row selection inside any DataTable."""
+        table_id = event.data_table.id
+        if table_id == "recordings-table":
+            row_key = event.row_key
+            rid = getattr(self, "_recording_rows", {}).get(row_key)
+            if rid is not None:
+                self._process_selected_recording(rid)
+
+
+def short_source(name: str, width: int = 26) -> str:
+    name = (name or "").strip()
+    if len(name) <= width:
+        return name
+    tail = ".monitor" if name.endswith(".monitor") else name[-8:]
+    head = name[:max(1, width - len(tail) - 1)]
+    return f"{head}…{tail}"
+
+
+def record_panel(*, recording_id: int, elapsed_s: float = 0.0,
+                 marks_ok: int = 0, marks_total: int = 0,
+                 size_bytes: int = 0, source: str = "",
+                 blink: bool = True) -> str:
+    dot = "●" if blink else "○"
+    mins, secs = divmod(int(max(0.0, elapsed_s)), 60)
+    hours, mins = divmod(mins, 60)
+    clock = (f"{hours}:{mins:02d}:{secs:02d}" if hours
+             else f"{mins:02d}:{secs:02d}")
+    rows = [
+        ("marks", f"{marks_ok}/{marks_total}"),
+        ("size", f"{size_bytes / 1e6:.0f} MB"),
+    ]
+    if source:
+        rows.append(("src", short_source(source)))
+    width = max(len(label) for label, _ in rows) + 2
+    body = "\n".join(f"{label:<{width}s}{value}" for label, value in rows)
+    return f"{dot} REC {recording_id}  {clock}\n{body}"
 
 
 def align_plain_text_for_track(track_identifier: str, lyrics_or_file_path: str) -> str:

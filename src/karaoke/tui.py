@@ -122,11 +122,14 @@ def genre_filter_options() -> list[tuple[str, str]]:
     return options
 
 
+INITIAL_BROWSE_LIMIT = 70
+
+
 SORT_OPTIONS = [
     ("Artist / Title (A-Z)", "artist"),
     ("🌱 Priority: Least Played", "least_played"),
     ("⭐ Most Played", "most_played"),
-    ("🔥 Energy (high→low)", "energy_desc"),
+    ("🔥 Mood / Energy (high→low)", "energy_desc"),
     ("🌙 Energy (low→high)", "energy_asc"),
     ("🥁 BPM (fast→slow)", "bpm_desc"),
     ("🎹 BPM (slow→fast)", "bpm_asc"),
@@ -761,6 +764,34 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+def _plays_of(song: dict) -> int:
+    v = song.get("play_count")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def _bpm_of(song: dict) -> float:
+    v = song.get("bpm")
+    if isinstance(v, (int, float, str)):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+    return 0.0
+
+
+def _energy_of(song: dict) -> float:
+    e = song.get("energy") if song.get("energy") is not None else song.get("_energy")
+    if isinstance(e, (int, float)):
+        return float(e)
+    b = song.get("bpm")
+    if isinstance(b, (int, float, str)):
+        try:
+            return min(1.0, max(0.2, (float(b) - 60.0) / 100.0))
+        except Exception:
+            pass
+    return 0.5
+
+
 class KaraokeTui(App):
     """A player-aware Textual shell for the karaoke experience."""
 
@@ -799,6 +830,22 @@ class KaraokeTui(App):
     #mood-slider { height: 1; color: $accent; margin-bottom: 1; }
     #mood-select, #genre-select { margin-bottom: 1; }
     #sort-select { margin-bottom: 1; }
+    #transport-bar {
+        height: 3;
+        margin-bottom: 1;
+        layout: horizontal;
+    }
+    #transport-bar Button {
+        min-width: 8;
+        height: 3;
+        margin-right: 1;
+        padding: 0 1;
+    }
+    .browse-label {
+        width: 6;
+        margin-left: 2;
+        content-align: left middle;
+    }
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
@@ -862,13 +909,16 @@ class KaraokeTui(App):
        lyrics got 28% of the screen. These classes are applied on resize. */
     Screen.-narrow #visuals { display: none; }
     Screen.-narrow #sidebar { display: none; }
+    Screen.-narrow #transport-bar { display: none; }
     Screen.-short #now-playing { height: 3; padding: 0 1; margin-bottom: 0; }
+    Screen.-short #transport-bar { display: none; }
     Screen.-short Header { display: none; }
 
     /* Focus mode: nothing but the lyrics, at any size. */
     Screen.-focus #visuals { display: none; }
     Screen.-focus #sidebar { display: none; }
     Screen.-focus #now-playing { display: none; }
+    Screen.-focus #transport-bar { display: none; }
     Screen.-focus #statusbar { display: none; }
     Screen.-focus Header { display: none; }
     #browse-head { height: auto; margin-bottom: 1; }
@@ -896,8 +946,7 @@ class KaraokeTui(App):
         ("k", "sample_key", "Sample key/BPM"),
         ("slash", "focus_search", "Search"),
         ("greater_than_sign", "queue_next", "Queue next"),
-        ("o", "toggle_play_once", "Play-once"),
-        ("O", "toggle_record", "Record"),
+        ("o", "toggle_play_once", "Follow Queue (o)"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
         ("B", "browse_recordings", "Recordings"),
@@ -920,6 +969,8 @@ class KaraokeTui(App):
         ("space", "play_pause", "Play/Pause"),
         ("n", "next_track", "Next"),
         ("p", "previous_track", "Prev"),
+        ("V", "toggle_av", "Audio/Video"),
+        ("Z", "cycle_sort", "Sort mode"),
         ("left_square_bracket", "seek_back", "Seek -5s"),
         ("right_square_bracket", "seek_fwd", "Seek +5s"),
         ("l", "cycle_log", "Log level"),
@@ -983,7 +1034,8 @@ class KaraokeTui(App):
         self._mood_filter = "all"
         self._genre_filter = "all"
         self._mood_level = 0.0  # slider floor: show tracks with energy >= this
-        self._sort = "key"
+        self._sort = "energy_desc"
+        self._queue_is_wildcard = False
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1016,7 +1068,7 @@ class KaraokeTui(App):
                              allow_blank=False)
                 yield Select(MOOD_FILTER_OPTIONS, value="all", id="mood-select",
                              allow_blank=False)
-                yield Select(SORT_OPTIONS, value="key", id="sort-select",
+                yield Select(SORT_OPTIONS, value="energy_desc", id="sort-select",
                              allow_blank=False)
                 # Key and tempo sit with the rest of the facts about this
                 # track rather than in the visuals column, which is for the
@@ -1027,6 +1079,13 @@ class KaraokeTui(App):
                 yield Static("", id="record-panel")
             with Vertical(id="main"):
                 yield Static("Detecting player…", id="now-playing")
+                with Horizontal(id="transport-bar"):
+                    yield Button("⏮ Prev", id="btn-prev", variant="default")
+                    yield Button("⏯ Play/Pause", id="btn-play-pause", variant="primary")
+                    yield Button("⏭ Next", id="btn-next", variant="default")
+                    yield Button("🎵 Audio/Video", id="btn-av", variant="default")
+                    yield Button("🔀 Shuffle", id="btn-shuffle", variant="default")
+                    yield Button("🔁 Repeat", id="btn-repeat", variant="default")
                 yield Static("Lyrics will render here.", id="lyrics")
                 yield DataTable(id="queue", cursor_type="row")
                 with Horizontal(id="statusbar"):
@@ -1045,6 +1104,9 @@ class KaraokeTui(App):
                 yield Static("Filter")
                 yield Select(FILTER_OPTIONS, value="working", id="filter-select",
                              allow_blank=False)
+                yield Static("Sort", classes="browse-label")
+                yield Select(SORT_OPTIONS, value="energy_desc", id="browse-sort-select",
+                             allow_blank=False)
             yield DataTable(id="library", cursor_type="row")
             yield Static(f"log: {self._log_level}", id="log-label")
             yield Static(f"logs: {LOG_FILE}", id="log-path")
@@ -1056,6 +1118,13 @@ class KaraokeTui(App):
         self.load_songs()
         self._render_mood_slider()
         self._show_selected_song()
+        # Default search to '*' so the entire playable library loads into the queue
+        try:
+            self.query_one("#search-input", Input).value = "*"
+            self._queue_is_wildcard = True
+            self.run_worker(lambda: self._background_search("*", start_playing=False), thread=True)
+        except Exception:
+            pass
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
@@ -1102,8 +1171,16 @@ class KaraokeTui(App):
         elif event.select.id == "genre-select":
             self._genre_filter = str(event.value)
             self._apply_mood_change()
-        elif event.select.id == "sort-select":
+        elif event.select.id in ("sort-select", "browse-sort-select"):
             self._sort = str(event.value)
+            try:
+                self.query_one("#sort-select", Select).value = self._sort
+            except Exception:
+                pass
+            try:
+                self.query_one("#browse-sort-select", Select).value = self._sort
+            except Exception:
+                pass
             self._apply_mood_change()
 
     def _render_mood_slider(self) -> None:
@@ -1126,12 +1203,16 @@ class KaraokeTui(App):
         self._apply_mood_change()
 
     def _apply_mood_change(self) -> None:
-        """Apply mood/energy filtering to both the library table and the active queue."""
+        """Apply mood/energy filtering without letting a busy DB kill the TUI."""
         self._render_mood_slider()
-        self.load_songs()
-        self._show_selected_song()
-        if hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
-            self._filter_and_set_queue()
+        try:
+            self.load_songs()
+            self._show_selected_song()
+            if hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
+                self._filter_and_set_queue()
+        except Exception as exc:
+            log.warning("mood/filter refresh deferred: %s", exc)
+            self.notify("Library is busy importing; filter refresh will retry", severity="warning")
 
 
     def load_songs(self) -> None:
@@ -1180,34 +1261,7 @@ class KaraokeTui(App):
                 continue
             filtered.append(song)
 
-        def _bpm_of(song: dict) -> float:
-            v = song.get("bpm")
-            if isinstance(v, (int, float, str)):
-                try:
-                    return float(v)
-                except (ValueError, TypeError):
-                    return 0.0
-            return 0.0
-
-        def _plays_of(song: dict) -> int:
-            v = song.get("play_count")
-            return int(v) if isinstance(v, (int, float)) else 0
-
-        if self._sort == "energy_desc":
-            filtered.sort(key=lambda s: s["_energy"], reverse=True)
-        elif self._sort == "energy_asc":
-            filtered.sort(key=lambda s: s["_energy"])
-        elif self._sort == "bpm_desc":
-            filtered.sort(key=_bpm_of, reverse=True)
-        elif self._sort == "bpm_asc":
-            filtered.sort(key=_bpm_of)
-        elif self._sort == "key":
-            filtered.sort(key=lambda s: str(s.get("key") or "~"))
-        elif self._sort == "least_played":
-            filtered.sort(key=lambda s: (_plays_of(s), str(s.get("artist") or "")))
-        elif self._sort == "most_played":
-            filtered.sort(key=_plays_of, reverse=True)
-        # "artist" keeps the SQL ORDER BY t.artist, t.title.
+        filtered = self._sort_rows(filtered)
 
         for song in filtered:
             energy = song["_energy"]
@@ -1270,7 +1324,9 @@ class KaraokeTui(App):
               ON t.track_id = l.track_id AND l.kind = 'approved'
             GROUP BY t.track_id
             ORDER BY t.artist, t.title
-            """
+            LIMIT :browse_limit
+            """,
+            {"browse_limit": INITIAL_BROWSE_LIMIT},
         )
         for row in cur.fetchall():
             self._song_data.append({
@@ -1321,7 +1377,9 @@ class KaraokeTui(App):
               ON g.track_id = t.track_id
             GROUP BY t.track_id
             ORDER BY t.artist, t.title
-            """
+            LIMIT :browse_limit
+            """,
+            {"browse_limit": INITIAL_BROWSE_LIMIT},
         )
         for row in cur.fetchall():
             has_lyrics = bool(row["synced_lyrics"] or row["plain_lyrics"])
@@ -1648,65 +1706,108 @@ class KaraokeTui(App):
             return True
         return str(genre or "").strip().casefold() == selected.casefold()
 
+    def _sort_rows(self, rows: list) -> list:
+        """Sort library or queue rows by the active sort setting (self._sort)."""
+        sort_mode = getattr(self, "_sort", "key")
+        res = list(rows)
+        if sort_mode == "energy_desc":
+            res.sort(key=_energy_of, reverse=True)
+        elif sort_mode == "energy_asc":
+            res.sort(key=_energy_of)
+        elif sort_mode == "bpm_desc":
+            res.sort(key=_bpm_of, reverse=True)
+        elif sort_mode == "bpm_asc":
+            res.sort(key=_bpm_of)
+        elif sort_mode == "key":
+            res.sort(key=lambda s: (str(s.get("key") or "~"), str(s.get("artist") or "")))
+        elif sort_mode == "least_played":
+            res.sort(key=lambda s: (_plays_of(s), str(s.get("artist") or "")))
+        elif sort_mode == "most_played":
+            res.sort(key=_plays_of, reverse=True)
+        elif sort_mode == "artist":
+            res.sort(key=lambda s: (str(s.get("artist") or "").lower(), str(s.get("title") or "").lower()))
+
+        return res
+
     def _apply_mood_filter(self, rows: list, conn) -> list:
-        """Filter search-result rows by the current mood/energy band and the
-        slider floor (self._mood_level)."""
-        genre_filter = str(getattr(self, "_genre_filter", "all") or "all")
-        if (
-            self._mood_filter == "all"
-            and self._mood_level <= 0.0
-            and genre_filter == "all"
-        ) or not rows:
+        """Filter and sort search-result rows by current mood/genre/sort setting."""
+        if not rows:
             return rows
         ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
-        if not ids:
-            return rows
-        placeholders = ",".join("?" * len(ids))
+        placeholders = ",".join("?" * len(ids)) if ids else ""
         energies: dict = {}
         genres: dict = {}
-        try:
-            cur = conn.execute(
-                f"SELECT track_id, energy, bpm FROM track_analysis "
-                f"WHERE track_id IN ({placeholders})",
-                ids,
-            )
-            for row in cur.fetchall():
-                e = row["energy"]
-                if e is None and row["bpm"] is not None:
-                    e = min(1.0, max(0.2, (float(row["bpm"]) - 60.0) / 100.0))
-                energies[row["track_id"]] = e
-            cur = conn.execute(
-                f"SELECT track_id, genre FROM track_genre "
-                f"WHERE track_id IN ({placeholders})",
-                ids,
-            )
-            for row in cur.fetchall():
-                genres[row["track_id"]] = row["genre"]
-        except Exception:
-            return rows
+        keys: dict = {}
+        bpms: dict = {}
+        plays: dict = {}
+        if placeholders:
+            try:
+                cur = conn.execute(
+                    f"SELECT track_id, energy, bpm, detected_key FROM track_analysis "
+                    f"WHERE track_id IN ({placeholders})",
+                    ids,
+                )
+                for row in cur.fetchall():
+                    e = row["energy"]
+                    if e is None and row["bpm"] is not None:
+                        e = min(1.0, max(0.2, (float(row["bpm"]) - 60.0) / 100.0))
+                    energies[row["track_id"]] = e
+                    keys[row["track_id"]] = row["detected_key"]
+                    bpms[row["track_id"]] = row["bpm"]
+                cur = conn.execute(
+                    f"SELECT track_id, genre FROM track_genre "
+                    f"WHERE track_id IN ({placeholders})",
+                    ids,
+                )
+                for row in cur.fetchall():
+                    genres[row["track_id"]] = row["genre"]
+                cur = conn.execute(
+                    f"SELECT track_id, play_count FROM tracks "
+                    f"WHERE track_id IN ({placeholders})",
+                    ids,
+                )
+                for row in cur.fetchall():
+                    plays[row["track_id"]] = row["play_count"]
+            except Exception:
+                pass
+
+        genre_filter = str(getattr(self, "_genre_filter", "all") or "all")
+        mood_filter = getattr(self, "_mood_filter", "all")
+        mood_level = getattr(self, "_mood_level", 0.0)
 
         kept = []
         for r in rows:
+            tid = r.get("track_id")
             e = r.get("energy")
             if e is None:
-                e = energies.get(r.get("track_id"))
+                e = energies.get(tid)
             if e is None:
                 e = 0.5
-            if e < self._mood_level:
+            r["energy"] = e
+            r["_energy"] = e
+
+            if r.get("key") is None and tid in keys:
+                r["key"] = keys.get(tid)
+            if r.get("bpm") is None and tid in bpms:
+                r["bpm"] = bpms.get(tid)
+            if r.get("genre") is None and tid in genres:
+                r["genre"] = genres.get(tid)
+            if r.get("play_count") is None and tid in plays:
+                r["play_count"] = plays.get(tid, 0)
+
+            if e < mood_level:
                 continue
-            if self._mood_filter == "high_energy" and e < 0.75:
+            if mood_filter == "high_energy" and e < 0.75:
                 continue
-            if self._mood_filter == "groovy" and not (0.40 <= e <= 0.75):
+            if mood_filter == "groovy" and not (0.40 <= e <= 0.75):
                 continue
-            if self._mood_filter == "mellow" and e > 0.40:
+            if mood_filter == "mellow" and e > 0.40:
                 continue
-            genre = r.get("genre")
-            if genre is None:
-                genre = genres.get(r.get("track_id"))
-            if not self._genre_matches(genre):
+            if genre_filter != "all" and not self._genre_matches(r.get("genre")):
                 continue
             kept.append(r)
-        return kept
+
+        return self._sort_rows(kept)
 
     def on_input_submitted(self, event) -> None:
         """Enter in the search box: build a list and start playing it."""
@@ -1720,12 +1821,14 @@ class KaraokeTui(App):
         self.set_focus(None)
         query = (event.value or "").strip()
         if not query:
+            self._queue_is_wildcard = False
             self._set_queue([])
             return
+        self._queue_is_wildcard = query == "*"
         self.run_worker(lambda q=query: self._background_search(q),
                         exclusive=False, thread=True)
 
-    def _background_search(self, query: str) -> None:
+    def _background_search(self, query: str, *, start_playing: bool = True) -> None:
         """Search off the UI thread; scoring reads every track's lyrics."""
         from . import librarysearch
 
@@ -1746,7 +1849,7 @@ class KaraokeTui(App):
             self.call_from_thread(self.notify, f"Search failed: {exc}",
                                   severity="error")
             return
-        self.call_from_thread(self._set_queue, rows, query)
+        self.call_from_thread(self._set_queue, rows, query, start_playing=start_playing)
 
     def _all_queue_rows(self, conn) -> list[dict]:
         """Playable library rows for `*` search, before mood/genre filters."""
@@ -1758,10 +1861,12 @@ class KaraokeTui(App):
             pass
         cur.execute(
             """
-            SELECT t.track_id, t.artist, t.title,
+            SELECT t.track_id, t.artist, t.title, t.play_count,
                    COALESCE(s.url, '') AS url,
                    g.genre AS genre,
-                   a.energy
+                   a.energy,
+                   a.detected_key AS key,
+                   a.bpm
             FROM tracks t
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
@@ -1787,19 +1892,31 @@ class KaraokeTui(App):
               AND (COALESCE(l.synced_lyrics, '') != ''
                    OR COALESCE(l.plain_lyrics, '') != '')
             GROUP BY t.track_id
-            ORDER BY t.artist, t.title
+            ORDER BY RANDOM()
+            LIMIT :wildcard_limit
             """,
-            {"album_seconds": localcache.ALBUM_UPLOAD_SECONDS},
+            {
+                "album_seconds": localcache.ALBUM_UPLOAD_SECONDS,
+                "wildcard_limit": INITIAL_BROWSE_LIMIT,
+            },
         )
         return [{"track_id": row["track_id"], "artist": row["artist"] or "",
                  "title": row["title"] or "", "url": row["url"] or "",
-                 "genre": row["genre"], "energy": row["energy"]}
+                 "genre": row["genre"], "energy": row["energy"],
+                 "key": row["key"], "bpm": row["bpm"],
+                 "play_count": row["play_count"] or 0}
                 for row in cur.fetchall()]
 
-    def _set_queue(self, rows: list, query: str = "") -> None:
-        """Show the result list and start it playing."""
+    def _set_queue(self, rows: list, query: str = "", *, start_playing: bool = True) -> None:
+        """Show the result list and start it playing.
+
+        A populated local queue always becomes authoritative. This prevents a
+        stale YouTube Music temporary queue from taking over after a search.
+        """
+        if rows:
+            self._play_once = True
         self._unfiltered_queue = list(rows)
-        self._filter_and_set_queue(query=query, start_playing=True)
+        self._filter_and_set_queue(query=query, start_playing=start_playing)
 
     def _filter_and_set_queue(self, query: str = "", start_playing: bool = False) -> None:
         rows = list(getattr(self, "_unfiltered_queue", []))
@@ -1809,6 +1926,12 @@ class KaraokeTui(App):
                     rows = self._apply_mood_filter(rows, conn)
             except Exception:
                 pass
+        if getattr(self, "_queue_is_wildcard", False):
+            # Wildcard means "browse everything", not "repeat the database
+            # order". Shuffle after filtering so every reload/session gets a
+            # fresh playable order while genre/mood constraints still apply.
+            import random
+            random.SystemRandom().shuffle(rows)
         self._queue = rows
         table = self.query_one("#queue", DataTable)
         try:
@@ -1838,16 +1961,18 @@ class KaraokeTui(App):
         table = self.query_one("#queue", DataTable)
         table.clear()
         if not table.columns:
-            table.add_columns(" ", "Artist", "Title", "")
+            table.add_columns(" ", "Artist", "Title", "Key", "")
         for i, row in enumerate(self._queue):
             playing = i == self._queue_at
             # A row with no source cannot be played; say so rather than
             # skipping silently when it is reached.
             note = "" if row.get("url") else "no source"
+            key_val = str(row.get("key") or "—")
             table.add_row(">" if playing else str(i + 1),
-                          row["artist"][:18], row["title"][:28], note)
+                          row["artist"][:18], row["title"][:28], key_val, note)
         table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
-                              f"{'  (play-once)' if self._play_once else ''}")
+                              f"{'  (follow queue)' if self._play_once else ''}"
+                              f"  [sort: {self._sort}]")
 
     def action_toggle_play_once(self) -> None:
         """`o`: play the queue through once, or let the player carry on.
@@ -1857,10 +1982,15 @@ class KaraokeTui(App):
         from taking over -- opening a watch URL makes it attach an RD… station,
         so the "next" song is its suggestion rather than the list you built.
         """
+        if self._queue:
+            self._play_once = True
+            self._render_queue()
+            self.notify("Follow Karaoke Queue is locked on while the local queue is active")
+            return
         self._play_once = not self._play_once
         self._render_queue()
-        self.notify("Play-once: queue decides what plays next" if self._play_once
-                    else "Play-once off: the player picks its own next track")
+        self.notify("Follow Karaoke Queue: local queue decides what plays next" if self._play_once
+                    else "Follow off: YouTube Music chooses what plays next")
 
     def _watch_queue(self) -> None:
         """Advance the queue when the browser finishes a track.
@@ -1951,8 +2081,10 @@ class KaraokeTui(App):
             "kind": str(song.get("kind") or ""),
         }
         if not self._queue:
+            self._play_once = True
             self._set_queue([row])
             return
+        self._play_once = True
         self._queue.append(row)
         try:
             self.query_one("#queue", DataTable).set_class(True, "-on")
@@ -2017,6 +2149,7 @@ class KaraokeTui(App):
             self.notify("No suggestions — seed tracks may lack audio vectors",
                         severity="warning")
             return
+        self._play_once = True
         for p in picks:
             self._queue.append({
                 "track_id": p.get("track_id"),
@@ -2193,54 +2326,6 @@ class KaraokeTui(App):
             close_cdp()
         except Exception:
             log.debug("closing the CDP channel on exit failed", exc_info=True)
-
-    def action_toggle_record(self) -> None:
-        """`O`: record the output continuously, marking what plays on it.
-
-        Unlike `k`, which samples one track in real time, this runs unattended:
-        songrec is asked what is playing every so often and each answer is
-        stored as a marker, so the session can be cut back into tracks and
-        analysed afterwards.
-        """
-        if self._recording_id is None:
-            try:
-                st = self.api.record_status()
-                sessions = st.get("sessions", []) if isinstance(st, dict) else []
-                for s in sessions:
-                    if s.get("recording_id"):
-                        self._recording_id = int(s["recording_id"])
-                        break
-            except Exception:
-                pass
-
-        if self._recording_id is not None:
-            try:
-                recorded, total = recorder.mark_count(self._recording_id)
-            except Exception:
-                recorded, total = 0, 0
-            stopped_id = self._recording_id
-            self.api.record_stop(stopped_id)
-            self.notify(f"Recording {stopped_id} stopped "
-                        f"({recorded}/{total} tracks identified)")
-            self._recording_id = None
-            self._record_marks = None
-            self._refresh_record_status()
-            if recorded:
-                self._analyse_recording(stopped_id)
-            return
-        result = self.api.record_start()
-        if result.get("status") != "recording":
-            detail = result.get("detail", "unknown error")
-            severity = "error"
-            self.notify(f"Cannot record: {detail}", severity=severity)
-            return
-        self._recording_id = result["recording_id"]
-        directory = Path(result.get("dir", "")).name
-        if result.get("reused"):
-            self.notify(f"Reattached to active recording {self._recording_id}")
-        else:
-            self.notify(f"Recording {self._recording_id} to {directory}")
-        self._refresh_record_status()
 
     def _analyse_recording(self, recording_id: int) -> None:
         """Decompile a finished recording, in a worker thread.
@@ -2675,21 +2760,30 @@ class KaraokeTui(App):
                 return
             url = f"https://www.youtube.com/results?search_query={query}"
             kind = "youtube_search"
-        try:
-            pid = open_song_url(
-                url, kind, artist=artist, title=title, prefer_audio=True)
-        except Exception as exc:
-            log.exception("KaraokeTui failed to open %s", url)
-            self.notify(f"Open failed; see {LOG_FILE}", severity="error")
-            self.query_one("#now-playing", Static).update(f"Open failed: {exc}")
-            return
-        # Close the overlay only once the song actually opened. On the failure
-        # path above we deliberately stay open: the reason is written into
-        # #now-playing, which sits *behind* the overlay, and the user most
-        # likely wants to pick a different row.
+
+        # Close the overlay immediately and open in a background thread. The
+        # open goes through CDP, whose calls can block for several seconds each
+        # when the kiosk socket is stale (see the TimeoutErrors in the log).
+        # Running it on the UI thread froze the whole event loop, so the next
+        # `H` (and every other key) was silently dropped until it returned.
         self._hide_browse()
-        suffix = f" (pid {pid})" if pid is not None else ""
-        self.notify(f"Opening {artist} - {title}{suffix}")
+        self.notify(f"Opening {artist} - {title}…")
+
+        def _bg() -> None:
+            try:
+                pid = open_song_url(
+                    url, kind, artist=artist, title=title, prefer_audio=True)
+            except Exception as exc:
+                log.exception("KaraokeTui failed to open %s", url)
+                self.call_from_thread(
+                    self.notify, f"Open failed; see {LOG_FILE}", severity="error")
+                self.call_from_thread(
+                    lambda: self.query_one("#now-playing", Static).update(f"Open failed: {exc}"))
+                return
+            suffix = f" (pid {pid})" if pid is not None else ""
+            self.call_from_thread(self.notify, f"Opened {artist} - {title}{suffix}")
+
+        self.run_worker(_bg, thread=True)
 
     def action_cycle_mode(self) -> None:
         idx = MODE_CYCLE.index(self._mode_override)
@@ -2721,21 +2815,108 @@ class KaraokeTui(App):
         return None
 
     def action_play_pause(self) -> None:
-        if self._det.is_active:
-            ok = self.api.player_play_pause(self._control_player())
-            if not ok:
-                self.notify("control failed", severity="warning")
+        """Toggle play/pause via CDP first or fallback to MPRIS."""
+        from . import player_open
+        if not player_open.cdp_play_pause():
+            if self._det.is_active:
+                ok = self.api.player_play_pause(self._control_player())
+                if not ok:
+                    self.notify("control failed", severity="warning")
 
     def action_next_track(self) -> None:
+        """Skip to next track (via active queue or CDP/MPRIS)."""
         if self._queue and self._queue_at >= 0:
             self.action_queue_next()
             return
-        if self._det.is_active:
-            self.api.player_next(self._control_player())
+        from . import player_open
+        if not player_open.cdp_next_track():
+            if self._det.is_active:
+                self.api.player_next(self._control_player())
+        self.notify("Next track")
 
     def action_previous_track(self) -> None:
-        if self._det.is_active:
-            self.api.player_previous(self._control_player())
+        """Skip to previous track (via active queue or CDP/MPRIS)."""
+        if self._play_once and self._queue and self._queue_at > 0:
+            self.play_queue_index(self._queue_at - 1)
+            return
+        from . import player_open
+        if not player_open.cdp_previous_track():
+            if self._det.is_active:
+                self.api.player_previous(self._control_player())
+        self.notify("Previous track")
+
+    def action_cycle_sort(self) -> None:
+        """`Z`: Cycle through available sort modes."""
+        sort_keys = [k for k, _ in SORT_OPTIONS]
+        try:
+            cur_idx = sort_keys.index(self._sort)
+        except ValueError:
+            cur_idx = 0
+        next_idx = (cur_idx + 1) % len(sort_keys)
+        self._sort = sort_keys[next_idx]
+        try:
+            self.query_one("#sort-select", Select).value = self._sort
+        except Exception:
+            pass
+        try:
+            self.query_one("#browse-sort-select", Select).value = self._sort
+        except Exception:
+            pass
+        sort_label = dict(SORT_OPTIONS).get(self._sort, self._sort)
+        self.notify(f"Sort mode: {sort_label}")
+        self._apply_mood_change()
+
+    def action_toggle_av(self) -> None:
+        """`V`: Toggle YouTube Music Audio (Song) mode vs Video mode."""
+        from . import player_open
+        res = player_open.cdp_toggle_av()
+        if res == "audio":
+            self.notify("Switched to Audio (Song) mode")
+            try:
+                self.query_one("#btn-av", Button).label = "🎵 Audio"
+            except Exception:
+                pass
+        elif res == "video":
+            self.notify("Switched to Video mode")
+            try:
+                self.query_one("#btn-av", Button).label = "🎬 Video"
+            except Exception:
+                pass
+        elif res == "no_av_toggle":
+            self.notify("No Audio/Video toggle on current track", severity="warning")
+        else:
+            self.notify(f"A/V toggle: {res}")
+
+    def action_toggle_shuffle(self) -> None:
+        """Toggle shuffle mode on YouTube Music."""
+        from . import player_open
+        if player_open.cdp_toggle_shuffle():
+            self.notify("Toggled Shuffle")
+        else:
+            self.notify("Shuffle control unavailable", severity="warning")
+
+    def action_toggle_repeat(self) -> None:
+        """Toggle repeat mode on YouTube Music."""
+        from . import player_open
+        if player_open.cdp_toggle_repeat():
+            self.notify("Toggled Repeat")
+        else:
+            self.notify("Repeat control unavailable", severity="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn-play-pause":
+            self.action_play_pause()
+        elif bid == "btn-next":
+            self.action_next_track()
+        elif bid == "btn-prev":
+            self.action_previous_track()
+        elif bid == "btn-av":
+            self.action_toggle_av()
+        elif bid == "btn-shuffle":
+            self.action_toggle_shuffle()
+        elif bid == "btn-repeat":
+            self.action_toggle_repeat()
 
     def action_seek_back(self) -> None:
         if self._det.is_active:
@@ -3154,6 +3335,17 @@ class KaraokeTui(App):
         self._update_keybpm(song)
         analysis = self._lookup_analysis(song) if song else None
         bpm = analysis.bpm if analysis else None
+        energy = analysis.energy if analysis else None
+        brightness = analysis.brightness if analysis else None
+        genre = ""
+        if song:
+            genre = str(song.get("genre") or "")
+        if not genre and self._current_track_id is not None:
+            try:
+                with localcache.connect() as conn:
+                    genre = str(localcache.genre_for(self._current_track_id, conn) or "")
+            except Exception:
+                pass
 
         if getattr(self, "_mood_pixels", None):
             try:
@@ -3176,10 +3368,24 @@ class KaraokeTui(App):
         arc = visuals.sentiment_arc(profile)
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)
-        cartwheel = visuals.cartwheel_frame(bpm, elapsed)
+        duet_width = 32
+        try:
+            visual_panel = self.query_one("#ascii-visual", Static)
+            duet_width = max(12, min(32, visual_panel.content_size.width or visual_panel.region.width))
+        except Exception:
+            pass
+        duet = visuals.duet_cartwheel_frame(
+            bpm,
+            elapsed,
+            mood=profile.dominant,
+            genre=genre,
+            energy=energy,
+            brightness=brightness,
+            width=duet_width,
+        )
         try:
             self.query_one("#ascii-visual", Static).update(
-                f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{cartwheel}"
+                f"sentiment arc\n{arc}\n\n{bars}\n\nrhythm\n{rhythm}\n\n{duet}"
             )
         except Exception:
             pass

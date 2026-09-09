@@ -57,7 +57,7 @@ for the full behaviour.
 
 Scan mode only reads the browser — it can't download audio itself. To get
 key/BPM for what's playing, press `k` ([Sample mode](sample.md)) to record the
-output and analyse it, or `O` ([Record mode](record.md)) to capture unattended.
+output and analyse it, or `O` (`make admin`, [Record mode](record.md)) to capture unattended.
 `A` queues the track for post-processing (which needs a downloadable source).
 
 ## Related

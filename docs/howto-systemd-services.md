@@ -15,6 +15,8 @@ stack every 5 minutes.
 | `karaoke-mq-forward.service` | `kubectl port-forward` for in-cluster RabbitMQ | 5672 / 15672 |
 | `karaoke-celery-worker.service` | Celery post-processing worker (key/BPM + word-timing workflow tasks) | — |
 | `karaoke-celery-flower.service` | Flower dashboard for Celery tasks/workers | 5555 |
+| `karaoke-kiosk.service` | Google Chrome kiosk window running YT Music | 9222 |
+| `karaoke-webtui.service` | Textual Web TUI server for the browser interface | 8001 |
 | `karaoke-postprocess@1..6.service` | Legacy pika post-processing workers (rollback/manual debugging) | — |
 | `karaoke-postprocess.slice` | Shared CPU/memory cap for all worker instances | — |
 | `karaoke-healthcheck.service` | One-shot health probe (run by the timer) | — |
@@ -109,6 +111,57 @@ karaoke health: HEALTHY
   [✓] kiosk-chrome   (opt)  CDP :9222
   [✓] sqlite-db      (req)  348 tracks
 ```
+
+## Reloading & Code Updates
+
+### 1. Systemd Unit Configurations
+Edits to systemd unit configurations (such as modifying `.service` files under `deploy/systemd/`) do not apply automatically. After refreshing or changing these repo files, you must instruct systemd to pick up the changes:
+```bash
+make systemd-install   # Automatically links and runs daemon-reload
+# or manually:
+systemctl --user daemon-reload
+```
+
+### 2. Python Code Changes (Editable Installs)
+Because services run the host-side Python interpreter pointing directly to active files, systemd-managed processes do not automatically reload when you update python code. To activate newly edited code, the respective systemd service(s) must be explicitly restarted:
+```bash
+# Restart the core API, control API, and Celery worker
+systemctl --user restart karaoke-api.service karaoke-ctrl-api.service karaoke-celery-worker.service
+```
+
+---
+
+## Admin TUI Service Relations
+
+The **Admin TUI** (`make admin`, backed by `src/karaoke/admin_tui.py`) serves as the active control center for the background platform services, allowing real-time monitoring and lifecycle operations.
+
+### 1. Direct systemd Fallback Status Checking
+The Admin TUI periodically polls the platform event ledger and worker pool status:
+- Under normal operation, it polls these stats gracefully over HTTP from the Control API (`ctrl_api` on `:8765`).
+- If the Control API is offline or unreachable, the Admin TUI seamlessly falls back to querying the host systemd state directly using direct `systemctl --user is-active` command shell-outs. This ensures you can always see whether background processes are alive.
+
+### 2. Live Worker and Kiosk Control
+The Admin TUI maps keyboard shortcuts directly to background service state changes via `ctrl_api` (routing requests to `/api/workers/scale` and `/api/players/window/restart` which wrap `systemctl` and process management under the hood):
+- **Scale Up (`+` / Worker +1)**: Automatically spins up background post-processing by running `systemctl --user start karaoke-celery-worker.service`.
+- **Scale Down (`-` / Worker -1)**: Shuts down background post-processing to conserve system resources by running `systemctl --user stop karaoke-celery-worker.service`.
+- **Worker Restart (`R` / Restart Workers)**: Performs a clean reboot of worker processing capacity.
+- **Restart Kiosk (`K` / Restart Kiosk Chrome)**: Restarts the Google Chrome kiosk playback window. It tries running `systemctl --user restart karaoke-kiosk.service` first; if the systemd unit is unavailable, it falls back to killing active CDP-enabled Chrome processes (`port :9222`) and spawning a fresh, isolated background process. Note that Chrome startup is fully decoupled from `make tui` and handled entirely via this background/systemd lifecycle.
+- **Web UI Control (`X` / Stop Web UI)**: Shuts down active `web_serve.py` (textual-serve) server instances via standard `SIGTERM` signals, letting browser tab sockets disconnect gracefully.
+
+### Web TUI reloads
+
+The Web TUI is managed by `karaoke-webtui.service` on port `8001`:
+
+```bash
+systemctl --user restart karaoke-webtui.service
+systemctl --user status karaoke-webtui.service --no-pager
+journalctl --user -u karaoke-webtui.service -f
+```
+
+After changing Python code, restart the Web TUI service. The kiosk browser does
+not need to be restarted unless its browser-side state or CDP connection needs
+resetting. `make systemd-install` refreshes the symlinks and daemon metadata.
+
 
 ## Configuration
 

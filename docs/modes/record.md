@@ -1,10 +1,8 @@
 # Record mode
 
-**Turned on with `O`** (`toggle_record`). The unattended counterpart to
-[Sample mode](sample.md): leave it running for an evening and it captures
-everything coming out of the speakers while, in parallel, asking songrec every
-so often what is playing. Each answer is stored as a **marker**, so the session
-can be cut back into tracks and analysed offline afterwards.
+**Turned on with `O` (`toggle_record`) inside the Admin TUI (`make admin`).** Previously on the main playback TUI, live recording management has been consolidated into the Operations/Admin dashboard.
+
+It is the unattended counterpart to [Sample mode](sample.md): leave it running for an evening and it captures everything coming out of the speakers while, in parallel, asking songrec every so often what is playing. Each answer is stored as a **marker**, so the session can be cut back into tracks and analysed offline afterwards.
 
 The recording is a means to metadata, not a library — the audio is discarded
 once analysed unless `keep_audio` is set.
@@ -33,13 +31,7 @@ marks, size, source, blinking dot).
 
 Offline, at full speed — an evening analyses in minutes.
 
-**Stopping with `O` starts this automatically.** Recording and analysing used to
-be separate steps with nothing joining them, so finished sessions just
-accumulated: four of them, 987 MB, before anyone noticed. A session that
-identified nothing is skipped, since with no markers there is no track list to
-cut. Analysis deliberately does *not* run on app exit — starting minutes of work
-during shutdown would be worse than leaving it — so a session closed by quitting
-mid-recording is caught by the reminder at mount instead.
+**Stopping and analysing are coordinated through the Admin TUI.** You can toggle active recording on and off by pressing `O` (or clicking the "Toggle Record" button) in the Admin TUI. Once stopped, you can initiate analysis of all completed recordings by pressing `a` (or clicking "Analyse Recordings") in the Admin TUI, which decompiles the sessions, identifies track boundaries, and ingests the resulting vectors.
 
 To drive it by hand, or to pick up a session closed that way:
 

@@ -128,13 +128,31 @@ def field_score(value: str, query: str) -> float:
     if needle in haystack:
         return CONTAINS
 
-    # Fallback for multi-word search within a single field
+    # Fuzzy matching for single words and multi-word phrases
+    import difflib
+    haystack_words = haystack.split()
     words = [w for w in needle.split() if w]
-    if len(words) > 1:
+    if len(words) == 1:
+        w = words[0]
+        best_ratio = 0.0
+        for hw in haystack_words:
+            if len(hw) >= 3 and len(w) >= 3:
+                r = difflib.SequenceMatcher(None, w, hw).ratio()
+                if r > best_ratio:
+                    best_ratio = r
+        if best_ratio >= 0.72:
+            return WORD * best_ratio * 0.9
+        r_all = difflib.SequenceMatcher(None, needle, haystack).ratio()
+        if r_all >= 0.72:
+            return PARTIAL * r_all * 0.85
+    else:
         meaningful_words = [w for w in words if len(w) > 2 or w not in ("of", "the", "a", "in", "and", "or", "to", "on", "at", "by", "for", "with", "is", "it")]
         if not meaningful_words:
             meaningful_words = words
-        matched_count = sum(1 for w in meaningful_words if re.search(rf"\b{re.escape(w)}\b", haystack))
+        matched_count = 0
+        for w in meaningful_words:
+            if any(w in hw or (len(w) >= 3 and len(hw) >= 3 and difflib.SequenceMatcher(None, w, hw).ratio() >= 0.72) for hw in haystack_words):
+                matched_count += 1
         if matched_count > 0:
             return WORD * (matched_count / len(meaningful_words)) * 0.9
 

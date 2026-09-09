@@ -186,8 +186,9 @@ def test_a_fresh_session_is_within_limits(db, monkeypatch):
 # -- the TUI key --------------------------------------------------------
 
 def test_record_is_bound_to_O():
-    from karaoke.tui import KaraokeTui, binding_rows
-    assert dict(binding_rows(KaraokeTui.BINDINGS))["O"] == "Record"
+    from karaoke.tui import binding_rows
+    from karaoke.admin_tui import KaraokeAdminApp
+    assert dict(binding_rows(KaraokeAdminApp.BINDINGS))["O"] == "Toggle Live Recording"
 
 
 # --- the sidebar indicator -------------------------------------------------
@@ -327,41 +328,32 @@ def test_the_tui_stops_recordings_on_exit():
 # sessions accumulated: four of them, nearly a gigabyte, before anyone noticed.
 
 def _record_app(monkeypatch, *, recording_id=7, marks=(5, 6)):
-    from karaoke.tui import KaraokeTui
+    from karaoke.admin_tui import KaraokeAdminApp
     from karaoke.api_client import ApiClient
 
-    app = KaraokeTui.__new__(KaraokeTui)
-    # No API server in tests; the client falls back to in-process recorder calls,
-    # which are monkeypatched below.
+    app = KaraokeAdminApp.__new__(KaraokeAdminApp)
     app.api = ApiClient()
     app._recording_id = recording_id
-    app._record_marks = None
-    app._record_tick = 0
     notes = []
-    app.notify = lambda msg, **k: notes.append(msg)
-    app._refresh_record_status = lambda: None
+    app.notify = lambda message, **k: notes.append(message)
+    app.refresh_record_status = lambda: None
     monkeypatch.setattr(recorder, "mark_count", lambda rid: marks)
     monkeypatch.setattr(recorder, "stop", lambda rid: None)
     return app, notes
 
 
-def test_stopping_a_recording_starts_its_analysis(monkeypatch):
-    app, notes = _record_app(monkeypatch)
-    started = []
-    monkeypatch.setattr(app, "_analyse_recording",
-                        lambda rid: started.append(rid), raising=False)
+def test_stopping_a_recording_works(monkeypatch):
+    app, notes = _record_app(monkeypatch, marks=(5, 6))
     app.action_toggle_record()
-    assert started == [7]
     assert app._recording_id is None
+    assert any("Recording 7 stopped (5/6 tracks identified)" in n for n in notes)
 
 
-def test_a_recording_that_identified_nothing_is_not_analysed(monkeypatch):
-    """No marks means no track list; there is nothing to decompile."""
+def test_stopping_a_recording_with_no_marks(monkeypatch):
     app, notes = _record_app(monkeypatch, marks=(0, 4))
-    monkeypatch.setattr(app, "_analyse_recording",
-                        lambda rid: pytest.fail("nothing to analyse"),
-                        raising=False)
     app.action_toggle_record()
+    assert app._recording_id is None
+    assert any("Recording 7 stopped (0/4 tracks identified)" in n for n in notes)
 
 
 def test_unanalysed_recordings_are_pointed_out(tmp_path, monkeypatch):
