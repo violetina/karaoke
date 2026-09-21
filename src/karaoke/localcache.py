@@ -2122,8 +2122,8 @@ def get_saved_searches(
             """
             SELECT query, result_count, created_at, last_used_at, use_count
             FROM saved_searches
-            ORDER BY last_used_at DESC
-            LIMIT %s
+            ORDER BY last_used_at DESC, use_count DESC
+            LIMIT ?
             """,
             (limit,),
         ).fetchall()

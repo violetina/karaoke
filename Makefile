@@ -206,6 +206,8 @@ api: ## Launch the FastAPI library backend (read-only: tracks, lyrics, stats)
 ctrl-api: ## Launch the host-side control API (playback; needs a desktop session)
 	$(PYTHON) -m karaoke.ctrl_api
 
+dev: ## Launch both APIs and the Angular dashboard
+	$(PYTHON) scripts/dev.py
 mcp: ## Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 	$(PYTHON) -m karaoke.mcp_server --host 0.0.0.0 --port 8888
 
