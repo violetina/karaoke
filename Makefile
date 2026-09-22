@@ -244,6 +244,41 @@ k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
 
+yt-playlist-ingest: ## Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
+	$(PYTHON) scripts/yt_playlist_ingest.py $(PLAYLIST) \
+	  $(if $(DRY_RUN),--dry-run,) \
+	  $(if $(SKIP_CACHED),--skip-cached,) \
+	  $(if $(NO_VECTORS),--no-vectors,) \
+	  $(if $(FORCE_HARMONY),--force-harmony,) \
+	  $(if $(LIMIT),--limit $(LIMIT),)
+
+RADIO_PLAYLIST_ID := PLA9C-EXX-pyg
+
+radio-playlist: ## Push radio-discovered songs to the 'Karaoke: Radio Discoveries' YTMusic playlist
+	$(PYTHON) - <<'EOF'
+	from karaoke import localcache
+	from karaoke.ytmusic_client import YTMusicClient
+	from karaoke.ytmusic_playlist import build_or_sync_ytmusic_playlist, Candidate, extract_video_id
+	conn = localcache.connect()
+	rows = conn.execute("""
+	    SELECT DISTINCT ON (lower(m.artist), lower(m.title)) m.artist, m.title, s.url
+	    FROM recording_marks m
+	    JOIN tracks t ON lower(t.artist)=lower(m.artist) AND lower(t.title)=lower(m.title)
+	    JOIN sources s ON s.track_id = t.track_id AND s.url LIKE '%youtu%'
+	    WHERE m.artist IS NOT NULL AND m.title IS NOT NULL AND m.artist != '' AND m.title != ''
+	    ORDER BY lower(m.artist), lower(m.title)
+	""").fetchall()
+	conn.close()
+	candidates = [Candidate(artist=r['artist'], title=r['title'], video_id=extract_video_id(r['url'] or ''), resolved_by='stored') for r in rows if extract_video_id(r['url'] or '')]
+	result = build_or_sync_ytmusic_playlist(candidates=candidates, name="Karaoke: Radio Discoveries", description="Songs shazam-identified from radio / mic sessions.", client=YTMusicClient())
+	print(f"✓ {result.name}  id={result.playlist_id}  added={result.added}  already={result.already_present}")
+	EOF
+
+radio-playlist-ingest: ## Download + full pipeline (CLAP/chords) for the Radio Discoveries playlist [FORCE_HARMONY=1]
+	$(PYTHON) scripts/yt_playlist_ingest.py $(RADIO_PLAYLIST_ID) \
+	  --skip-cached \
+	  $(if $(FORCE_HARMONY),--force-harmony,)
+
 folder-scan: ## Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 	$(PYTHON) -c "import sys; from karaoke.cli import folder_scan_main; args=['$(DIR)']+(['--limit','$(LIMIT)'] if '$(LIMIT)' else [])+(['--dry-run'] if '$(DRY_RUN)' else []); raise SystemExit(folder_scan_main(args))"
 
@@ -264,7 +299,7 @@ postprocess-worker: ## Run the host-side post-processing worker (analysis + word
 celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
 		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
-		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2} \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-6} \
 		--events
 
 celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
@@ -306,6 +341,9 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-webtui.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-relay.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mcp.service $(HOME)/.config/systemd/user/
+	# karaoke.target Wants this, so a missing symlink makes the target fail to
+	# pull it in. It was linked by hand on the live host and absent here.
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-obot-tunnel.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess@.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.slice $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
