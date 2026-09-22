@@ -2374,12 +2374,25 @@ def append_playlist_track(
     c = conn or connect()
     try:
         ensure_saved_searches_and_playlists_schema(c)
+        now = time.time()
+        c.execute(
+            """
+            INSERT INTO saved_playlists (playlist_id, name, track_count, source_kind, created_at, updated_at)
+            -- 1, not 0: this row is created because a track is being appended,
+            -- and that track is inserted just below. Seeding 0 leaves
+            -- track_count one short of reality for the life of the playlist.
+            VALUES (%s, %s, 1, 'dj', %s, %s)
+            ON CONFLICT (playlist_id) DO UPDATE SET
+                track_count = saved_playlists.track_count + 1,
+                updated_at = %s
+            """,
+            (playlist_id, playlist_id, now, now, now),
+        )
         row = c.execute(
             "SELECT COALESCE(MAX(position), 0) AS max_pos FROM saved_playlist_tracks WHERE playlist_id = %s",
             (playlist_id,),
         ).fetchone()
         new_pos = int(row["max_pos"] or 0) + 1
-        now = time.time()
         c.execute(
             """
             INSERT INTO saved_playlist_tracks (playlist_id, position, track_id, artist, title, video_id, url)
@@ -2394,16 +2407,6 @@ def append_playlist_track(
                 str(track.get("video_id") or ""),
                 str(track.get("url") or ""),
             ),
-        )
-        c.execute(
-            """
-            INSERT INTO saved_playlists (playlist_id, name, track_count, source_kind, created_at, updated_at)
-            VALUES (%s, %s, 1, 'dj', %s, %s)
-            ON CONFLICT (playlist_id) DO UPDATE SET
-                track_count = saved_playlists.track_count + 1,
-                updated_at = %s
-            """,
-            (playlist_id, playlist_id, now, now, now),
         )
         c.commit()
         return new_pos

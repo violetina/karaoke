@@ -355,6 +355,22 @@ def try_chrome_cdp_navigate(url: str) -> bool:
     return False
 
 
+def cdp_ensure_play() -> bool:
+    """Ensure playback is active on the kiosk browser over CDP (never pause)."""
+    js = """(() => {
+      const v = document.querySelector('video');
+      if (v) {
+        if (v.paused) v.play().catch(() => {});
+        return true;
+      }
+      const playBtn = document.querySelector('#play-pause-button[aria-label*="Play" i], .play-pause-button[aria-label*="Play" i], button[aria-label*="Play" i], button[aria-label*="Afspelen" i]');
+      if (playBtn) { playBtn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
 def cdp_play_pause() -> bool:
     """Toggle play/pause on the kiosk browser over CDP."""
     js = """(() => {

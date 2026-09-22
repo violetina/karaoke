@@ -21,6 +21,11 @@ _DEFAULT_AUTH_PATHS = (
     Path("~/.config/karaoke/oauth.json"),
 )
 
+# Browser-cookie tokens (SAPISID etc.) expire within a few days. We
+# proactively re-extract from the running Chrome kiosk when the auth file
+# is older than this threshold so callers never need to do it manually.
+_AUTH_MAX_AGE_DAYS: int = 5
+
 
 class YTMusicError(Exception):
     """Base error for YouTube Music operations."""
@@ -30,8 +35,24 @@ class YTMusicAuthError(YTMusicError):
     """Raised when an operation requires authentication but no valid auth is available."""
 
 
+def _auth_file_is_stale(path: Path) -> bool:
+    """Return True if the auth file is older than _AUTH_MAX_AGE_DAYS."""
+    try:
+        import time
+        age_seconds = time.time() - path.stat().st_mtime
+        return age_seconds > _AUTH_MAX_AGE_DAYS * 86400
+    except Exception:
+        return False
+
+
 def resolve_auth_file(custom_path: str | Path | None = None) -> Optional[Path]:
-    """Find the configured YouTube Music auth file, or None if unconfigured."""
+    """Find the configured YouTube Music auth file, or None if unconfigured.
+
+    When a browser-cookie auth file is found but is older than
+    ``_AUTH_MAX_AGE_DAYS`` days, this function tries to re-extract fresh
+    credentials from the running Chrome kiosk via CDP and save them in place,
+    so tokens never silently expire between runs.
+    """
     if custom_path:
         p = Path(custom_path).expanduser()
         if p.is_file():
@@ -48,9 +69,24 @@ def resolve_auth_file(custom_path: str | Path | None = None) -> Optional[Path]:
     for default_path in _DEFAULT_AUTH_PATHS:
         p = default_path.expanduser()
         if p.is_file():
+            if _auth_file_is_stale(p):
+                log.info(
+                    "ytmusic_auth.json is older than %d days — attempting to "
+                    "refresh credentials from the Chrome kiosk.",
+                    _AUTH_MAX_AGE_DAYS,
+                )
+                refreshed = extract_auth_from_chrome_cdp(dest_path=p)
+                if refreshed:
+                    log.info("YouTube Music auth refreshed and saved to %s", refreshed)
+                else:
+                    log.debug(
+                        "Auto-refresh failed (Chrome may not be running); "
+                        "continuing with the existing auth file."
+                    )
             return p
 
     return None
+
 
 
 def extract_auth_from_chrome_cdp(dest_path: Path | None = None) -> Optional[Path]:
@@ -146,8 +182,14 @@ class YTMusicClient:
         if not self.is_authenticated:
             raise YTMusicAuthError(
                 "Operation requires YouTube Music authentication. "
-                "Configure ~/.config/karaoke/ytmusic_auth.json or run karaoke-ytmusic-playlist --setup-auth"
+                "Auth is loaded from ~/.config/karaoke/ytmusic_auth.json and "
+                f"auto-refreshed from the Chrome kiosk when older than "
+                f"{_AUTH_MAX_AGE_DAYS} days. "
+                "If Chrome is not running, re-extract manually: "
+                "from karaoke.ytmusic_client import extract_auth_from_chrome_cdp; "
+                "extract_auth_from_chrome_cdp()"
             )
+
 
     def search_track(self, artist: str, title: str, *, filter_type: Any = "songs") -> Optional[str]:
         """Search for a song on YouTube Music and return its videoId."""
