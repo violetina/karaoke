@@ -69,7 +69,8 @@ def test_a_spotify_only_track_is_not_enqueued(conn, monkeypatch):
     """The regression: this fired on every track change and always failed."""
     published = []
     monkeypatch.setattr(q, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t)) or True)
     assert q.enqueue_if_needed("A", "Spotify Only",
                                "https://open.spotify.com/track/x", conn) is False
     assert published == []
@@ -78,7 +79,8 @@ def test_a_spotify_only_track_is_not_enqueued(conn, monkeypatch):
 def test_a_youtube_track_is_still_enqueued(conn, monkeypatch):
     published = []
     monkeypatch.setattr(q, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t)) or True)
     assert q.enqueue_if_needed("B", "Has YouTube", "https://youtu.be/y", conn) is True
     assert published == [("B", "Has YouTube")]
 
@@ -87,7 +89,8 @@ def test_a_downloadable_url_wins_over_stored_sources(conn, monkeypatch):
     """The caller may know a URL the database does not."""
     published = []
     monkeypatch.setattr(q, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t)) or True)
     assert q.enqueue_if_needed("A", "Spotify Only",
                                "https://youtu.be/new", conn) is True
 
@@ -96,7 +99,8 @@ def test_an_unknown_track_with_a_spotify_url_is_not_enqueued(conn, monkeypatch):
     """Nothing to resolve and nothing to download: it would only fail."""
     published = []
     monkeypatch.setattr(q, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t)) or True)
     assert q.enqueue_if_needed("Unknown", "Track",
                                "https://open.spotify.com/track/z", conn) is False
     assert published == []
@@ -106,5 +110,6 @@ def test_an_unknown_track_with_no_url_is_still_enqueued(conn, monkeypatch):
     """The worker can search for it; that path is unchanged."""
     published = []
     monkeypatch.setattr(q, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t)) or True)
     assert q.enqueue_if_needed("Unknown", "Track", "", conn) is True

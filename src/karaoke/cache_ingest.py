@@ -304,14 +304,28 @@ def process_youtube_cache(
                             except Exception:
                                 pass
 
-        # 6. Enqueue for word timings via Celery
+        # 6. Enqueue for word timings via Celery (only for files in this cache directory)
         if enqueue_postprocessing:
             try:
                 from .postprocess_queue import needs_postprocessing, publish_postprocess_task
 
-                for url, tid in url_to_track.items():
-                    pending = needs_postprocessing(tid, c)
-                    if "timings" in pending or "sync" in pending:
+                enqueued_tids: set[int] = set()
+                for file_path in files:
+                    vid_id = file_path.stem
+                    url = f"https://www.youtube.com/watch?v={vid_id}"
+                    tid = url_to_track.get(url)
+                    if not tid or tid in enqueued_tids:
+                        continue
+                    enqueued_tids.add(tid)
+                    # Only the database-derived steps matter here: this pass has
+                    # already written vectors and genre itself, and harmony for
+                    # these on-disk files belongs to folder_scan.
+                    pending = needs_postprocessing(tid, c,
+                                                   include_search_artefacts=False)
+                    # Bulk ingest is normal processing, so it does not opt into
+                    # the rate-limited timing upgrade; a timings-only track has
+                    # nothing else for the chain to do.
+                    if "sync" in pending:
                         cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (tid,))
                         row = cur.fetchone()
                         if row and publish_postprocess_task(row["artist"], row["title"], url):

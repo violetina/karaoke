@@ -45,7 +45,16 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
             context,
             download_audio.s(),
             analyze_audio.s(),
-            upgrade_timings.s(),
+            analyze_harmony.s(),
+        ]
+        # Word-timing upgrade is opt-in, never part of normal processing: it is
+        # rate-limited to 15/m and would otherwise hold the whole chain (and the
+        # worker's prefetch window) hostage behind YouTube caption fetches.
+        # Callers ask for it explicitly -- the TUI's "A" key, or a targeted
+        # re-run for a track whose timings are missing.
+        if payload.get("include_timings"):
+            tasks.append(upgrade_timings.s())
+        tasks += [
             sync_lyrics.s(),
             rebuild_vectors.s(),
         ]
@@ -68,6 +77,11 @@ class PostprocessContext:
     audio_path: Optional[Path] = None
     cookies_from_browser: Optional[str] = None
     pending: list[str] = field(default_factory=list)
+    # Set only for an explicitly requested full run (playlist import). It lets
+    # download_audio fetch audio that only harmony needs -- normally forbidden,
+    # because the library is built from disk and a library-wide chord backfill
+    # would re-download files that are already on the drive.
+    full: bool = False
 
     # Methods for easy serialization/deserialization to/from dict for Celery
     def to_dict(self) -> dict[str, Any]:
@@ -108,7 +122,8 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
     cookies = os.environ.get("KARAOKE_COOKIES_FROM_BROWSER")
 
     context = PostprocessContext(
-        artist=artist, title=title, url=url, cookies_from_browser=cookies
+        artist=artist, title=title, url=url, cookies_from_browser=cookies,
+        full=bool(payload.get("full")),
     )
 
     with localcache.connect() as conn:
@@ -161,8 +176,9 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                 "SELECT url FROM sources WHERE track_id = %s AND kind = 'local' LIMIT 1",
                 (track_id,),
             ).fetchone()
-            if local_row and local_row[0] and Path(local_row[0]).is_file():
-                local_file_path = Path(local_row[0])
+            url_val = local_row.get("url") if isinstance(local_row, dict) else (local_row[0] if local_row else None)
+            if url_val and Path(url_val).is_file():
+                local_file_path = Path(url_val)
 
         if local_file_path:
             context.audio_path = local_file_path
@@ -219,7 +235,18 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
     if context.audio_path and context.audio_path.is_file():
         return context.to_dict()
-    if context.track_id is None or context.url is None or ("analysis" not in context.pending and "sync" not in context.pending):
+    # Chords are deliberately NOT in this set. The library is built from disk,
+    # so harmony rides along on audio that is already here -- a local source, or
+    # a file fetched because analysis or sync needed it. Letting "chords" pull a
+    # download would mean re-fetching the whole library to analyse files that
+    # are already on the drive; folder_scan covers those without the network.
+    needs_audio = {"analysis", "sync"}
+    if context.full:
+        # An explicit full run (playlist import) is a bounded set the caller
+        # has chosen to pay the downloads for, so harmony may pull audio too.
+        needs_audio = needs_audio | {"chords"}
+    if (context.track_id is None or context.url is None
+            or not needs_audio.intersection(context.pending)):
         return context.to_dict()
     log.info("celery download_audio: %s - %s", context.artist, context.title)
     from . import postprocess_worker
@@ -229,9 +256,11 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     else:
         log.warning("postprocess: audio unavailable for track %s (%s)",
                     context.track_id, context.url)
-        # If download fails, remove analysis/sync from pending tasks for this run
-        if "analysis" in context.pending: context.pending.remove("analysis")
-        if "sync" in context.pending: context.pending.remove("sync")
+        # If download fails, drop every step that needs the audio. Vectors are
+        # built from database rows, so they stay pending and still run.
+        for step in ("analysis", "sync", "chords"):
+            if step in context.pending:
+                context.pending.remove(step)
     return context.to_dict()
 
 
@@ -245,6 +274,31 @@ def analyze_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     with localcache.connect() as conn:
         if not postprocess_worker.run_analysis_logic(context.track_id, context.audio_path, conn):
             log.warning("postprocess: analysis failed for track %s (%s)",
+                        context.track_id, context.url)
+    return context.to_dict()
+
+
+@app.task(bind=True, name="karaoke.tasks.analyze_harmony", autoretry_for=(Exception,),
+          retry_backoff=True, retry_jitter=True, max_retries=2)
+def analyze_harmony(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """Key movement and chord motion, stored in the progression index.
+
+    Runs only when the audio is already available -- a local source resolved
+    from disk, or a file another step had to fetch anyway. It never triggers a
+    download of its own: a whole-library chord backfill belongs to folder_scan,
+    which reads the drive, not to the playback path.
+    """
+    context = PostprocessContext.from_dict(context_dict)
+    if (context.track_id is None or "chords" not in context.pending
+            or context.audio_path is None):
+        return context.to_dict()
+    log.info("celery analyze_harmony: %s - %s", context.artist, context.title)
+    from . import postprocess_worker, localcache
+    with localcache.connect() as conn:
+        if not postprocess_worker.run_harmony_logic(
+                context.track_id, context.audio_path, conn,
+                artist=context.artist, title=context.title):
+            log.warning("postprocess: harmony analysis failed for track %s (%s)",
                         context.track_id, context.url)
     return context.to_dict()
 

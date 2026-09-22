@@ -660,11 +660,14 @@ def test_approve_queues_when_lyrics_exist(monkeypatch, tmp_path):
     _add_track(conn)
     published = []
     monkeypatch.setattr(pq, "publish_postprocess_task",
-                        lambda a, t, u="": published.append((a, t, u)) or True)
+                        lambda a, t, u="", include_timings=False:
+                            published.append((a, t, u, include_timings)) or True)
 
     ok, msg = app.approve_postprocess("A", "B", "https://youtu.be/x")
+    # "A" is the explicit ask, so it is the path that opts into timings.
+    assert published and published[0][3] is True
     assert ok, msg
-    assert published == [("A", "B", "https://youtu.be/x")]
+    assert published == [("A", "B", "https://youtu.be/x", True)]
     assert "analysis" in msg          # what it actually queued
 
 

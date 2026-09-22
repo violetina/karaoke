@@ -96,16 +96,45 @@ def scan_and_ingest_folder(
             from .osclient import client as get_os_client
 
             os_client = get_os_client()
+
+            def _all_track_ids(index_name: str, query: dict[str, Any]) -> set[int]:
+                """Every matching track_id, not just the first page.
+
+                A plain search caps out at index.max_result_window (10k by
+                default). Silently truncating here does not fail loudly -- it
+                just drops tracks out of the "already done" set, so a rescan
+                re-decodes and re-analyses them. Scrolling keeps the skip
+                honest as the indexes grow past that window.
+                """
+                found: set[int] = set()
+                page = os_client.search(
+                    index=index_name, scroll="2m",
+                    body={"size": 1000, "_source": ["track_id"], "query": query},
+                )
+                scroll_id = page.get("_scroll_id")
+                try:
+                    while True:
+                        hits = page["hits"]["hits"]
+                        if not hits:
+                            break
+                        found.update(int(h["_source"]["track_id"]) for h in hits)
+                        if scroll_id is None:
+                            break
+                        page = os_client.scroll(scroll_id=scroll_id, scroll="2m")
+                        scroll_id = page.get("_scroll_id", scroll_id)
+                finally:
+                    if scroll_id:
+                        try:
+                            os_client.clear_scroll(scroll_id=scroll_id)
+                        except Exception:
+                            pass
+                return found
+
             if os_client is not None:
                 for index_name, bucket in ((clap_vector.CLAP_INDEX, done_clap),
                                            (key_progression.PROGRESSION_INDEX, done_prog)):
                     try:
-                        res = os_client.search(index=index_name, body={
-                            "size": 10000, "_source": ["track_id"],
-                            "query": {"match_all": {}},
-                        })
-                        bucket.update(int(h["_source"]["track_id"])
-                                      for h in res["hits"]["hits"])
+                        bucket.update(_all_track_ids(index_name, {"match_all": {}}))
                     except Exception:
                         pass
                 # Chords are newer than progressions, so "has a progression"
@@ -113,12 +142,9 @@ def scan_and_ingest_folder(
                 # reason the CLAP and progression sets are: treating one
                 # artefact as proof of another silently strands the rest.
                 try:
-                    res = os_client.search(index=key_progression.PROGRESSION_INDEX, body={
-                        "size": 10000, "_source": ["track_id"],
-                        "query": {"exists": {"field": "chord_motion"}},
-                    })
-                    done_chords.update(int(h["_source"]["track_id"])
-                                       for h in res["hits"]["hits"])
+                    done_chords.update(_all_track_ids(
+                        key_progression.PROGRESSION_INDEX,
+                        {"exists": {"field": "chord_motion"}}))
                 except Exception:
                     pass
         except Exception:
@@ -222,6 +248,22 @@ def scan_and_ingest_folder(
                      reason="missing artist/title after tags & fingerprint")
                 stats["errors"] += 1
                 continue
+
+            # Second skip gate, now that the tags name the song. The first one
+            # matches on this exact path, so it cannot recognise the same track
+            # arriving from a different drive -- a backup disk holding another
+            # copy of a file already analysed from ~/Music would be decoded and
+            # re-analysed in full. Resolving artist/title to a track_id catches
+            # that, and still costs only a tag read rather than a decode.
+            if not force and c is not None:
+                twin = localcache.find_track_id(artist, title, c)
+                if (twin is not None and twin in done_clap and twin in done_prog
+                        and (not classify_audio or twin in done_chords)):
+                    stats["skipped"] += 1
+                    emit("skip", index=index, total=len(audio_files), path=str(path),
+                         name=path.name, artist=artist, title=title,
+                         reason="another copy of this track is already analysed")
+                    continue
 
             # 2. Audio Analysis (Key/BPM/Energy/Brightness)
             analysis_res = None

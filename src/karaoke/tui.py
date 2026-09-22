@@ -891,7 +891,7 @@ class SavedPlaylistsScreen(ModalScreen[None]):
                 first_vid = next((r.get("video_id") or localcache.extract_youtube_id(r.get("url", "")) for r in rows if (r.get("video_id") or r.get("url"))), "")
 
                 # Load into player queue so TUI follows
-                self.app.call_from_thread(self.app._apply_restored_playlist, rows, playlist_id, pl_name)
+                self.app.call_from_thread(self.app._apply_restored_playlist, rows, playlist_id, pl_name, 0)
 
                 # Open the playlist in YouTube Music so player plays it & TUI follows
                 play_url = (
@@ -1498,6 +1498,7 @@ class KaraokeTui(App):
         rows: list[dict[str, Any]],
         playlist_id: str = "",
         playlist_name: str = "",
+        target_index: int | None = None,
     ) -> None:
         self._queue = list(rows)
         self._unfiltered_queue = list(rows)
@@ -1507,7 +1508,14 @@ class KaraokeTui(App):
         self._ytmusic_queue_follow = True
         self._play_once = False
 
-        target_index: int = 0
+        if target_index is not None and self._queue:
+            target_index = max(0, min(target_index, len(self._queue) - 1))
+            self._queue_at = target_index
+            self._render_queue()
+            self.notify(f"Playing '{playlist_name or playlist_id}' ({target_index + 1}/{len(rows)})", severity="information")
+            return
+
+        chosen_index: int = 0
         from . import playerctl
         is_playing = False
         try:
@@ -1520,16 +1528,16 @@ class KaraokeTui(App):
         if is_playing and self._det.is_active:
             vid = localcache.extract_youtube_id(getattr(self._det, "url", "") or "")
             if vid and vid in self._ytmusic_video_to_queue_index:
-                target_index = self._ytmusic_video_to_queue_index[vid]
+                chosen_index = self._ytmusic_video_to_queue_index[vid]
             else:
                 det_title = (getattr(self._det, "title", "") or "").strip().casefold()
                 for i, r in enumerate(self._queue):
                     if (r.get("title") or "").strip().casefold() == det_title:
-                        target_index = i
+                        chosen_index = i
                         break
-            self._queue_at = target_index
+            self._queue_at = chosen_index
             self._render_queue()
-            self.notify(f"Synced queue with active playback ({target_index + 1}/{len(rows)})", severity="information")
+            self.notify(f"Synced queue with active playback ({chosen_index + 1}/{len(rows)})", severity="information")
         else:
             last_played = localcache.get_last_played_track()
             if last_played:
@@ -1539,12 +1547,12 @@ class KaraokeTui(App):
                     r_title = (r.get("title") or "").strip().casefold()
                     r_artist = (r.get("artist") or "").strip().casefold()
                     if r_title == lp_title and (not lp_artist or not r_artist or lp_artist == r_artist):
-                        target_index = i
+                        chosen_index = i
                         break
-            self._queue_at = target_index
+            self._queue_at = chosen_index
             self._render_queue()
             label = (
-                f"Resumed queue at #{target_index + 1}: {self._queue[target_index]['artist']} - {self._queue[target_index]['title']}"
+                f"Resumed queue at #{chosen_index + 1}: {self._queue[chosen_index]['artist']} - {self._queue[chosen_index]['title']}"
                 if self._queue
                 else "Loaded latest playlist"
             )
@@ -2210,7 +2218,9 @@ class KaraokeTui(App):
             pending = needs_postprocessing(track_id, conn)
         if not pending:
             return False, f"{title} is already fully processed"
-        if not publish_postprocess_task(artist, title, url):
+        # "A" is the explicit ask, so this is the one path that opts into the
+        # rate-limited word-timing upgrade.
+        if not publish_postprocess_task(artist, title, url, include_timings=True):
             return False, "Broker unreachable — nothing queued"
         return True, f"Queued {title}: {', '.join(pending)}"
 
@@ -2773,8 +2783,6 @@ class KaraokeTui(App):
             self.notify(f"Rolled back to #{target_idx + 1}: {row.get('artist')} - {row.get('title')}")
         else:
             self.notify("No earlier queue state to roll back to", severity="warning")
-            index += 1
-        self.notify("End of queue")
 
     def action_enqueue_selected(self) -> None:
         """`a`: Add the currently selected track to the end of the queue."""

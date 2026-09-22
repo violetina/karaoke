@@ -47,8 +47,12 @@ def _embedding_text(row: Any) -> str:
     return f"{row['title']} {row['artist']} {row['album'] or ''}".strip()
 
 
-def iter_track_rows(conn: Any) -> Iterable[Any]:
-    """Yield one row per SQLite track with preferred source, approved lyrics, and audio genre."""
+def iter_track_rows(conn: Any, track_id: Optional[int] = None) -> Iterable[Any]:
+    """Yield one row per SQLite track with preferred source, approved lyrics, and audio genre.
+
+    ``track_id`` narrows the scan to a single track, so post-processing can
+    index the one track it just finished without rebuilding the whole index.
+    """
     cur = conn.cursor()
     has_track_genre = localcache.table_exists(conn, "track_genre")
 
@@ -89,10 +93,45 @@ def iter_track_rows(conn: Any) -> Iterable[Any]:
             ORDER BY lyric_id DESC
             LIMIT 1
         )
+        {"WHERE t.track_id = %s" if track_id is not None else ""}
         ORDER BY t.artist, t.title
-        """
+        """,
+        (track_id,) if track_id is not None else (),
     )
     yield from cur.fetchall()
+
+
+def index_track(track_id: int, *, conn: Any = None, os_client: Any = None,
+                embed: bool = True) -> bool:
+    """Index a single track's document into OpenSearch.
+
+    The per-track counterpart to ``rebuild_from_sqlite``: post-processing has
+    just changed one track and needs that one document refreshed, not a full
+    library rebuild. Returns False when there is nothing to write or the
+    cluster is unreachable, so callers can treat it as best-effort.
+    """
+    from .logger import log
+
+    own_conn = conn is None
+    c = conn or localcache.connect()
+    try:
+        if os_client is None:
+            from .osclient import client as get_os_client
+            os_client = get_os_client()
+        if os_client is None:
+            log.debug("vector index: no OpenSearch client for track %s", track_id)
+            return False
+        rows = list(iter_track_rows(c, track_id=track_id))
+        if not rows:
+            log.debug("vector index: track %s not found", track_id)
+            return False
+        doc = build_track_doc(rows[0], embed=embed)
+        os_client.index(index=settings.index_name,
+                        id=track_doc_id(track_id), body=doc)
+        return True
+    finally:
+        if own_conn:
+            c.close()
 
 
 def build_track_doc(

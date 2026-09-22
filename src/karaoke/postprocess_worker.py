@@ -118,6 +118,15 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
             return "no-source"
         res = upgrade_track(row, conn, delay=3.0, cookies_from_browser=cookies_from_browser)
         log.info("postprocess: timings upgrade for track %s -> %s", track_id, res.status)
+        if res.status == "no-captions":
+            try:
+                conn.execute(
+                    "UPDATE lyrics SET source = 'no_youtube_captions' WHERE track_id = %s AND kind = 'approved'",
+                    (track_id,),
+                )
+                conn.commit()
+            except Exception:
+                pass
         return res.status
     except Exception as exc:
         if "rate limited" in str(exc).lower():
@@ -284,18 +293,53 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
 def run_vectors_logic(track_id: int, conn) -> bool:
     """Rebuild audio/lyrics vectors for a track."""
     try:
-        from .vector_index import rebuild_from_sqlite
-        # rebuild_from_sqlite is designed to be idempotent and can be run safely
-        # even if only one track's vectors are missing.
-        # We pass an explicit db_path and dry_run=True to ensure it's isolated
-        # for this single track and doesn't conflict with a global rebuild.
-        # This will need refinement once OpenSearch integration is more mature.
-        # For now, it just ensures the vector_index is updated.
-        rebuild_from_sqlite(db_path=None, dry_run=False, track_id=track_id) # Call the relevant logic here
+        from .vector_index import index_track
+        # One document, not a library rebuild: this runs per track at the end of
+        # a post-processing chain. The previous call passed track_id to
+        # rebuild_from_sqlite, which takes no such argument -- it raised
+        # TypeError on every invocation.
+        if not index_track(track_id, conn=conn):
+            log.warning("postprocess: no vector doc written for track %s", track_id)
+            return False
         log.info("postprocess: rebuilt vectors for track %s", track_id)
         return True
     except Exception:
         log.exception("postprocess: failed to rebuild vectors for track %s", track_id)
+        return False
+
+
+def run_harmony_logic(track_id: int, audio_path: Path, conn,
+                      artist: str = "", title: str = "") -> bool:
+    """Derive key movement and chord motion for a track and store them.
+
+    The same pair folder_scan produces: a Progression describes how the key
+    moves across the track, chord detection describes the harmony inside those
+    regions. They answer different questions, so a failure to detect chords
+    still stores the progression.
+    """
+    try:
+        from . import chords, key_progression
+
+        prog = key_progression.analyse(str(audio_path))
+        if not prog:
+            log.warning("postprocess: no progression for track %s (%s)",
+                        track_id, audio_path)
+            return False
+        chord_analysis = None
+        try:
+            chord_analysis = chords.detect(str(audio_path))
+        except Exception:
+            log.debug("postprocess: chord detection failed for track %s",
+                      track_id, exc_info=True)
+        if not key_progression.store(track_id, prog, artist=artist, title=title,
+                                     chords=chord_analysis):
+            log.warning("postprocess: could not store progression for track %s", track_id)
+            return False
+        log.info("postprocess: analysed harmony for track %s (chords=%s)",
+                 track_id, chord_analysis is not None)
+        return True
+    except Exception:
+        log.exception("postprocess: harmony analysis failed for track %s", track_id)
         return False
 
 

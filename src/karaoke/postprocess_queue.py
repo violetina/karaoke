@@ -32,12 +32,19 @@ def orchestrator() -> str:
     return os.environ.get(ORCHESTRATOR_ENV, "celery").strip().lower() or "celery"
 
 
-def needs_postprocessing(track_id: int, conn: Connection) -> list[str]:
+def needs_postprocessing(track_id: int, conn: Connection, *,
+                         include_search_artefacts: bool = True) -> list[str]:
     """Return the list of pending post-processing tasks for a track.
 
     Possible values: ``"analysis"`` (no key/BPM row), ``"timings"`` (approved
-    synced lyrics lack Enhanced LRC word tags) and ``"sync"`` (approved lyrics
-    are plain text with no timings at all). Empty list = nothing to do.
+    synced lyrics lack Enhanced LRC word tags), ``"sync"`` (approved lyrics are
+    plain text with no timings at all), ``"vectors"`` (no OpenSearch document)
+    and ``"chords"`` (no harmonic progression with chord motion). Empty list =
+    nothing to do.
+
+    The last two are answered by OpenSearch rather than the database. Pass
+    ``include_search_artefacts=False`` to skip those two round-trips when the
+    caller only cares about the database-derived steps.
     """
     from . import track_analysis
     from .upgrade_timings import has_word_timings
@@ -54,14 +61,20 @@ def needs_postprocessing(track_id: int, conn: Connection) -> list[str]:
     except Exception:
         pending.append("analysis")
 
-    # 2. Word-level timing. Missing if approved synced lyrics carry no word tags.
+    # 2. Word-level timing. Missing if approved synced lyrics carry no word tags,
+    # unless we already verified that YouTube has no word-level captions for it.
     cur.execute(
-        "SELECT synced_lyrics, plain_lyrics FROM lyrics"
+        "SELECT synced_lyrics, plain_lyrics, source FROM lyrics"
         " WHERE track_id = %s AND kind = 'approved'",
         (track_id,),
     )
     row = cur.fetchone()
-    if row and row["synced_lyrics"] and not has_word_timings(row["synced_lyrics"]):
+    if (
+        row
+        and row["synced_lyrics"]
+        and not has_word_timings(row["synced_lyrics"])
+        and row.get("source") != "no_youtube_captions"
+    ):
         pending.append("timings")
 
     # 3. Any timing at all. Words with no timestamps cannot drive a karaoke
@@ -71,7 +84,56 @@ def needs_postprocessing(track_id: int, conn: Connection) -> list[str]:
     if row and not row["synced_lyrics"] and row["plain_lyrics"]:
         pending.append("sync")
 
+    # 4. Search artefacts in OpenSearch: the track's own vector document, and
+    # the harmonic progression/chord document. Both are best-effort -- if the
+    # cluster is unreachable we report nothing rather than claim every track in
+    # the library needs re-indexing, which would flood the queue.
+    if include_search_artefacts:
+        pending.extend(_missing_search_artefacts(track_id))
+
     return pending
+
+
+def _missing_search_artefacts(track_id: int) -> list[str]:
+    """Return which of ``vectors``/``chords`` are absent for this track.
+
+    Never raises and never guesses: an unreachable cluster yields an empty list,
+    so a broker/OpenSearch outage cannot enqueue the whole library.
+    """
+    from .config import settings
+    from .key_progression import PROGRESSION_INDEX, doc_id as progression_doc_id
+    from .vector_index import track_doc_id
+
+    try:
+        from .osclient import client as get_os_client
+        os_client = get_os_client()
+    except Exception:
+        return []
+    if os_client is None:
+        return []
+
+    missing: list[str] = []
+    try:
+        if not os_client.exists(index=settings.index_name,
+                                id=track_doc_id(track_id)):
+            missing.append("vectors")
+    except Exception:
+        log.debug("could not check vector doc for track %s", track_id)
+    try:
+        # A progression document can predate chord detection, so the chord
+        # field has to be checked rather than the document's existence.
+        res = os_client.search(index=PROGRESSION_INDEX, body={
+            "size": 1, "_source": False,
+            "query": {"bool": {"filter": [
+                {"ids": {"values": [progression_doc_id(track_id)]}},
+                {"exists": {"field": "chord_motion"}},
+            ]}},
+        })
+        if not res["hits"]["hits"]:
+            missing.append("chords")
+    except Exception:
+        log.debug("could not check progression doc for track %s", track_id)
+    return missing
 
 
 # What the worker can actually fetch audio (or captions) for. Both task kinds
@@ -108,11 +170,15 @@ def has_downloadable_source(track_id: int, conn: Connection) -> bool:
 def enqueue_if_needed(
     artist: str, title: str, url: str = "",
     conn: Optional[Connection] = None,
+    include_timings: bool = False,
 ) -> bool:
     """Publish a post-processing task only if the track actually needs work.
 
     Looks up the track by artist/title, checks ``needs_postprocessing``, and
     enqueues when non-empty. Best-effort; never raises to the caller.
+
+    ``include_timings`` is off by default, so the automatic playback-driven
+    path never queues the rate-limited word-timing upgrade.
     """
     from . import localcache
 
@@ -127,9 +193,15 @@ def enqueue_if_needed(
                 log.debug("not enqueuing %s - %s: no downloadable source",
                           artist, title)
                 return False
-            return publish_postprocess_task(artist, title, url)
+            return publish_postprocess_task(artist, title, url, include_timings)
         pending = needs_postprocessing(track_id, c)
         if not pending:
+            return False
+        # Timings are opt-in, so a track that needs nothing else would run an
+        # entire chain of no-ops. Skip it rather than queue busywork.
+        if not include_timings and pending == ["timings"]:
+            log.debug("not enqueuing %s - %s: only timings pending (opt-in)",
+                      artist, title)
             return False
         # The worker cannot analyse what it cannot fetch. However, if the track
         # has plain lyrics needing sync or timing upgrades, we allow enqueuing
@@ -139,7 +211,7 @@ def enqueue_if_needed(
                 log.info("skipping post-process for %s - %s: no downloadable audio"
                          " (sample it instead)", artist, title)
                 return False
-        return publish_postprocess_task(artist, title, url)
+        return publish_postprocess_task(artist, title, url, include_timings)
     except Exception as exc:
         log.debug("enqueue_if_needed skipped: %s", exc)
         return False
@@ -148,11 +220,23 @@ def enqueue_if_needed(
             c.close()
 
 
-def publish_postprocess_task(artist: str, title: str, url: str = "") -> bool:
+def publish_postprocess_task(artist: str, title: str, url: str = "",
+                             include_timings: bool = False,
+                             full: bool = False) -> bool:
     """Publish a track post-processing task to RabbitMQ.
 
     Returns True if successfully published, False otherwise.
     Safe: catches pika exceptions so the TUI/app never crashes.
+
+    ``include_timings`` adds the word-timing upgrade to the chain. It is off by
+    default: the upgrade is rate-limited to 15/m, so running it on every track
+    stalls the whole post-processing pipeline. Pass True only when a caller
+    explicitly asks for timings.
+
+    ``full`` lets the chain download audio that only harmony needs. Off by
+    default, because the library is 90% built from disk and a library-wide
+    chord backfill would re-fetch files already on the drive. Pass True for a
+    bounded, explicitly chosen set -- a playlist import.
     """
     if not (artist or title):
         return False
@@ -160,7 +244,9 @@ def publish_postprocess_task(artist: str, title: str, url: str = "") -> bool:
     payload = {
         "artist": artist.strip(),
         "title": title.strip(),
-        "url": url.strip() if url else ""
+        "url": url.strip() if url else "",
+        "include_timings": bool(include_timings),
+        "full": bool(full),
     }
 
     if orchestrator() != "legacy":
