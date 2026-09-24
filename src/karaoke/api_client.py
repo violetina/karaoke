@@ -530,3 +530,19 @@ class ApiClient:
             except Exception as e:
                 return {"status": "error", "detail": str(e)}
         return {"status": "unreachable"}
+
+    def list_staging_jobs(self) -> list[dict[str, Any]]:
+        """List background supervisor jobs from the library API."""
+        res = self._http_get(self.lib_url, "/api/staging/jobs")
+        return res if isinstance(res, list) else []
+
+    def stage_youtube(self, url: str) -> dict[str, Any]:
+        """Dispatch a YouTube staging job."""
+        res = self._http_post(self.lib_url, "/api/staging/youtube", {"url": url})
+        return res or {"status": "unreachable"}
+
+    def stage_whisper(self, file_path: str, artist: str, title: str) -> dict[str, Any]:
+        """Dispatch a Whisper transcription job."""
+        body = {"file_path": str(file_path), "artist": artist, "title": title}
+        res = self._http_post(self.lib_url, "/api/staging/whisper", body)
+        return res or {"status": "unreachable"}
