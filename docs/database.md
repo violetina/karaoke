@@ -40,8 +40,8 @@ The connection string is read **directly from the environment** by
 | `KARAOKE_DATA_DIR` | `~/.local/share/karaoke` | Caches, artwork and the legacy `karaoke.db` snapshot. |
 
 !!! warning "`KARAOKE_DB_BACKEND` and `KARAOKE_DB_URL` are vestigial"
-    `config.py` still parses `KARAOKE_DB_BACKEND` (default `sqlite`) and
-    `KARAOKE_DB_URL` into `settings`, and `settings.uses_postgres` still exists.
+    `config.py` parses `KARAOKE_DB_BACKEND` (default `postgres`) and
+    `KARAOKE_DB_URL` into `settings`, and `settings.uses_postgres` still exists (returning `True` by default).
     **Nothing in the connection path reads them.** `localcache` sets a
     module-level `_IS_PG = True` and `connect()` always returns a pooled
     Postgres connection — including when passed an explicit `db_path`, which is

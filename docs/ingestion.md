@@ -34,12 +34,12 @@ Follow live with `tail -f <logfile>`.
 The database is the source of truth for how far ingestion has got. Quick counts:
 
 ```bash
-sqlite3 ~/.local/share/karaoke/karaoke.db "
-  SELECT 'tracks',        count(*) FROM tracks
-  UNION ALL SELECT 'local source',   count(DISTINCT track_id) FROM sources WHERE kind='local'
+psql "$KARAOKE_PG_URL" -c "
+  SELECT 'tracks' AS metric, count(*) FROM tracks
+  UNION ALL SELECT 'local source', count(DISTINCT track_id) FROM sources WHERE kind='local'
   UNION ALL SELECT 'youtube source', count(DISTINCT track_id) FROM sources WHERE kind IN ('youtube','youtube_music')
   UNION ALL SELECT 'spotify source', count(DISTINCT track_id) FROM sources WHERE kind='spotify'
-  UNION ALL SELECT 'analyzed',       count(*) FROM track_analysis;"
+  UNION ALL SELECT 'analyzed', count(*) FROM track_analysis;"
 ```
 
 Progress against the collection on disk (how many files still need a local

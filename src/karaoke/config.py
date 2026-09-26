@@ -62,11 +62,9 @@ class Settings:
 
     @property
     def uses_postgres(self) -> bool:
-        """True when configured to use a Postgres backend for bigger collections.
+        """True when configured to use a Postgres backend.
 
-        Postgres support is a planned backend for large libraries; SQLite (WAL,
-        indexed) remains the default and the only fully-wired backend today.
-        See docs/database.md for the migration roadmap.
+        Postgres is the default and only active backend for localcache.
         """
         return self.db_backend.strip().lower() in ("postgres", "postgresql", "pg")
 
@@ -94,11 +92,9 @@ class Settings:
             yt_cache_max_mb=int(os.environ.get("KARAOKE_YT_CACHE_MAX_MB", "500")),
             # VESTIGIAL: the backend is no longer selectable. localcache cut
             # over to Postgres unconditionally and reads KARAOKE_PG_URL
-            # directly; nothing in the connection path consults these two
-            # settings. Kept only so existing imports of settings.db_backend /
-            # settings.db_url keep resolving — see docs/database.md.
-            db_backend=os.environ.get("KARAOKE_DB_BACKEND", "sqlite"),
-            db_url=os.environ.get("KARAOKE_DB_URL", ""),
+            # directly; default is now "postgres".
+            db_backend=os.environ.get("KARAOKE_DB_BACKEND", "postgres"),
+            db_url=os.environ.get("KARAOKE_DB_URL", os.environ.get("KARAOKE_PG_URL", "postgresql://karaoke:karaoke@localhost:5432/karaoke")),
         )
 
 

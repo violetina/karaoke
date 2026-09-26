@@ -54,6 +54,8 @@ POST /api/players/pause          pause (never resumes)  body: {"player": "<name>
 POST /api/players/next           next track             body: {"player": "<name>"?}
 POST /api/players/previous       previous track         body: {"player": "<name>"?}
 POST /api/players/seek           relative seek          body: {"offset_s": 5.0, "player": "<name>"?}
+GET  /api/players/queue          inspect active YouTube Music browser queue over CDP
+POST /api/players/queue          enqueue video ID into browser queue over CDP  body: {"video_id": "...", "position": "next"|"end"}
 ```
 
 `player` is optional everywhere: omit it and playerctl targets the player that is

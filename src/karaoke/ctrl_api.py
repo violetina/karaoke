@@ -129,6 +129,13 @@ class SeekRequest(BaseModel):
     player: Optional[str] = None
 
 
+class QueueItemRequest(BaseModel):
+    """Enqueue a video ID into the web player queue over CDP."""
+
+    video_id: str
+    position: Optional[str] = "next"  # "next" (play next) or "end" (append)
+
+
 class FolderScanRequest(BaseModel):
     """Scan a local music folder and ingest it into the library."""
 
@@ -740,6 +747,28 @@ def player_seek(req: SeekRequest) -> dict[str, Any]:
                             detail="No player could handle 'seek'")
     return {"status": "ok", "action": "seek", "offset_s": req.offset_s,
             "player": req.player or ""}
+
+
+@app.get("/api/players/queue")
+def get_browser_player_queue() -> dict[str, Any]:
+    """Inspect YouTube Music's active in-browser player queue over CDP."""
+    from . import player_open
+    return player_open.cdp_get_queue_state()
+
+
+@app.post("/api/players/queue")
+def enqueue_browser_player_video(req: QueueItemRequest) -> dict[str, Any]:
+    """Enqueue a video ID into YouTube Music's active web player queue via CDP."""
+    from . import player_open
+
+    if req.position == "next":
+        ok = player_open.cdp_queue_next_video(req.video_id)
+    else:
+        ok = player_open.cdp_queue_add_video(req.video_id)
+
+    if not ok:
+        raise HTTPException(status_code=503, detail="Failed to enqueue video ID via CDP")
+    return {"status": "ok", "video_id": req.video_id, "position": req.position or "next"}
 
 
 # -- library ingestion (folder scan, audio cut) ---------------------------

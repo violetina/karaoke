@@ -348,6 +348,17 @@ CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (aggregate_type, aggre
 CREATE INDEX IF NOT EXISTS idx_events_type_created ON events (event_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_unpublished ON events (seq) WHERE published_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS opensearch_snapshots (
+    index_name  TEXT NOT NULL,
+    doc_id      TEXT NOT NULL,
+    track_id    INTEGER,
+    body        JSONB NOT NULL,
+    updated_at  DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (index_name, doc_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opensearch_snapshots_track ON opensearch_snapshots (track_id);
+CREATE INDEX IF NOT EXISTS idx_opensearch_snapshots_index ON opensearch_snapshots (index_name);
 """
 
 TABLES = [
