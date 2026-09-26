@@ -2913,8 +2913,8 @@ class KaraokeTui(App):
             target_label = f"{song.get('artist')} - {song.get('title')}"
         elif self._current_track_id is not None:
             target_id = self._current_track_id
-            if self._song:
-                target_label = f"{self._song.get('artist')} - {self._song.get('title')}"
+            if getattr(self._det, "artist", None) and getattr(self._det, "title", None):
+                target_label = f"{self._det.artist} - {self._det.title}"
             else:
                 target_label = f"track #{target_id}"
         elif self._queue and self._queue_at < len(self._queue):
