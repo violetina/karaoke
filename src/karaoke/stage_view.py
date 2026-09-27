@@ -952,25 +952,24 @@ def render_dancers_html() -> str:
       } else if (data.title) {
          hudArt.style.display = 'none';
          hudMood.style.display = 'block';
-         fetch(`/api/mood-pixels?mood=${mood}&energy=${energy}&bpm=${bpm}`)
-            .then(res => res.json())
-            .then(resData => {
-                if (resData.pixels) {
-                    const ctx = hudMood.getContext('2d');
-                    const imgData = ctx.createImageData(32, 32);
-                    let i = 0;
-                    for (let r=0; r<32; r++) {
-                        for (let c=0; c<32; c++) {
-                            const [red, green, blue] = resData.pixels[r][c];
-                            imgData.data[i++] = red;
-                            imgData.data[i++] = green;
-                            imgData.data[i++] = blue;
-                            imgData.data[i++] = 255;
-                        }
-                    }
-                    ctx.putImageData(imgData, 0, 0);
-                }
-            });
+         let seed = data.title || "unknown";
+         let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}`;
+         if (window.currentMoodUrl !== newSrc) {
+             window.currentMoodUrl = newSrc;
+             const img = new Image();
+             img.crossOrigin = "Anonymous";
+             img.onload = () => {
+                 const offCtx = document.createElement('canvas').getContext('2d');
+                 offCtx.canvas.width = 64;
+                 offCtx.canvas.height = 64;
+                 offCtx.drawImage(img, 0, 0, 64, 64);
+                 window.moodBaseImageData = offCtx.getImageData(0, 0, 64, 64);
+                 hudMood.width = 64;
+                 hudMood.height = 64;
+                 window.moodCanvasCtx = hudMood.getContext('2d');
+             };
+             img.src = newSrc;
+         }
       } else {
          hudArt.style.display = 'none';
          hudMood.style.display = 'none';
