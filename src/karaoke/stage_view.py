@@ -564,28 +564,24 @@ def render_stage_html() -> str:
         moodCanvas.style.display = "block";
         // Fetch mood pixels
         let mood = data.mood || "neutral";
-        let energy = data.energy !== null ? data.energy : 0.5;
-        let bpm = data.bpm || 120.0;
-        fetch(`/api/mood-pixels?mood=${mood}&energy=${energy}&bpm=${bpm}`)
-            .then(res => res.json())
-            .then(resData => {
-                if (resData.pixels) {
-                    const ctx = moodCanvas.getContext('2d');
-                    const imgData = ctx.createImageData(32, 32);
-                    let i = 0;
-                    for (let r=0; r<32; r++) {
-                        for (let c=0; c<32; c++) {
-                            const [red, green, blue] = resData.pixels[r][c];
-                            imgData.data[i++] = red;
-                            imgData.data[i++] = green;
-                            imgData.data[i++] = blue;
-                            imgData.data[i++] = 255;
-                        }
-                    }
-                    ctx.putImageData(imgData, 0, 0);
-                }
-            })
-            .catch(err => console.error(err));
+        let seed = data.title || "unknown";
+        let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}`;
+        if (window.currentMoodUrl !== newSrc) {
+            window.currentMoodUrl = newSrc;
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
+            img.onload = () => {
+                const offCtx = document.createElement('canvas').getContext('2d');
+                offCtx.canvas.width = 64;
+                offCtx.canvas.height = 64;
+                offCtx.drawImage(img, 0, 0, 64, 64);
+                window.moodBaseImageData = offCtx.getImageData(0, 0, 64, 64);
+                moodCanvas.width = 64;
+                moodCanvas.height = 64;
+                window.moodCanvasCtx = moodCanvas.getContext('2d');
+            };
+            img.src = newSrc;
+        }
       } else {
         artImg.style.display = "none";
         moodCanvas.style.display = "none";
@@ -640,6 +636,48 @@ def render_stage_html() -> str:
 
         // Update lyric lines
         renderLyrics(currentPos);
+        
+        // Flash mood art on beat (3-band EQ style)
+        const moodCanvas = document.getElementById("track-mood-art");
+        if (moodCanvas && moodCanvas.style.display !== 'none' && window.moodBaseImageData && window.moodCanvasCtx) {
+            const bpm = currentState.bpm || 120.0;
+            const beatDuration = 60.0 / Math.max(bpm, 1.0);
+            const beats = currentPos / beatDuration;
+            const withinBeat = beats % 1.0;
+            
+            const intensity = Math.max(0.0, 1.0 - (withinBeat * 1.5));
+            const outData = new ImageData(
+                new Uint8ClampedArray(window.moodBaseImageData.data),
+                window.moodBaseImageData.width,
+                window.moodBaseImageData.height
+            );
+            
+            const w = outData.width;
+            const h = outData.height;
+            for (let r = 0; r < h; r++) {
+                for (let c = 0; c < w; c++) {
+                    const progress = c / w;
+                    let boost = 0;
+                    if (progress < 0.33) {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 2.1));
+                    } else if (progress < 0.66) {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 3.7 + 1.0));
+                    } else {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 5.3 + 2.0));
+                    }
+                    
+                    const i = (r * w + c) * 4;
+                    const red = window.moodBaseImageData.data[i];
+                    const green = window.moodBaseImageData.data[i+1];
+                    const blue = window.moodBaseImageData.data[i+2];
+                    
+                    outData.data[i] = Math.max(0, Math.min(255, red + (255 - red) * boost));
+                    outData.data[i+1] = Math.max(0, Math.min(255, green + (255 - green) * boost));
+                    outData.data[i+2] = Math.max(0, Math.min(255, blue + (255 - blue) * boost));
+                }
+            }
+            window.moodCanvasCtx.putImageData(outData, 0, 0);
+        }
       }
       requestAnimationFrame(renderLoop);
     }

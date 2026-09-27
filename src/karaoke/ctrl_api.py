@@ -967,6 +967,28 @@ def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120
     pixels = moodart.generate(analysis, mood, 32, 32)
     return {"pixels": pixels}
 
+
+@app.get("/api/mood-art")
+def get_mood_art(mood: str = "neutral", seed: str = ""):
+    import os, random
+    from fastapi.responses import FileResponse, Response
+    
+    # Check if we have library images for this mood
+    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+    mood_dir = os.path.join(base_dir, mood)
+    
+    if os.path.isdir(mood_dir):
+        files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
+        if files:
+            # Deterministically pick an image based on the seed (e.g. song title)
+            rnd = random.Random(seed)
+            chosen = rnd.choice(files)
+            return FileResponse(os.path.join(mood_dir, chosen))
+            
+    # Fallback: serve a generic 64x64 transparent PNG if no image found
+    # (The web UI will handle this gracefully)
+    return Response(content=b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00@\x00\x00\x00@\x08\x06\x00\x00\x00\xaaiq\xde\x00\x00\x00\x0bIDATx\x9cc\xfc\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\x12\x00\x01\x00\x00\x00\x00IEND\xaeB`\x82', media_type="image/png")
+
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
     """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""
