@@ -453,6 +453,7 @@ def render_stage_html() -> str:
   <header>
     <div class="track-info">
       <img id="track-art" class="track-art" src="" alt="Album Art">
+      <canvas id="track-mood-art" class="track-art" width="32" height="32" style="display: none; image-rendering: pixelated;"></canvas>
       <div class="track-titles">
         <h1 id="track-title">Waiting for playback…</h1>
         <h2 id="track-artist">Start a song on Karaoke or cast from YouTube Music</h2>
@@ -546,8 +547,10 @@ def render_stage_html() -> str:
       document.getElementById("track-title").textContent = data.title;
       document.getElementById("track-artist").textContent = data.artist || "Unknown Artist";
 
-      // Album art
+      // Album art or Mood pixels
       const artImg = document.getElementById("track-art");
+      const moodCanvas = document.getElementById("track-mood-art");
+      
       if (data.art_url) {
         let newSrc = "/api/art?url=" + encodeURIComponent(data.art_url);
         // Only update if URL actually changed to prevent flicker
@@ -555,8 +558,37 @@ def render_stage_html() -> str:
             artImg.src = newSrc;
         }
         artImg.style.display = "block";
+        moodCanvas.style.display = "none";
+      } else if (data.title) {
+        artImg.style.display = "none";
+        moodCanvas.style.display = "block";
+        // Fetch mood pixels
+        let mood = data.mood || "neutral";
+        let energy = data.energy !== null ? data.energy : 0.5;
+        let bpm = data.bpm || 120.0;
+        fetch(`/api/mood-pixels?mood=${mood}&energy=${energy}&bpm=${bpm}`)
+            .then(res => res.json())
+            .then(resData => {
+                if (resData.pixels) {
+                    const ctx = moodCanvas.getContext('2d');
+                    const imgData = ctx.createImageData(32, 32);
+                    let i = 0;
+                    for (let r=0; r<32; r++) {
+                        for (let c=0; c<32; c++) {
+                            const [red, green, blue] = resData.pixels[r][c];
+                            imgData.data[i++] = red;
+                            imgData.data[i++] = green;
+                            imgData.data[i++] = blue;
+                            imgData.data[i++] = 255;
+                        }
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                }
+            })
+            .catch(err => console.error(err));
       } else {
         artImg.style.display = "none";
+        moodCanvas.style.display = "none";
       }
 
       // Cast badge
