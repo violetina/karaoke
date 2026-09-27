@@ -974,23 +974,23 @@ def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120
 
 
 @app.get("/api/mood-art")
-def get_mood_art(mood: str = "neutral", seed: str = "", energy: float = 0.5, bpm: float = 120.0):
+def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
     import io, random, os
     from fastapi.responses import StreamingResponse, FileResponse
     from PIL import Image
     from karaoke import moodframe
     
-    rng = random.Random(seed)
+    
     
     # 50% chance to use our custom AI generated pixel art library
-    use_custom = rng.choice([True, False])
+    use_custom = random.choice([True, False])
     if use_custom:
         base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
         mood_dir = os.path.join(base_dir, mood)
         if os.path.isdir(mood_dir):
             files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
             if files:
-                chosen = rng.choice(files)
+                chosen = random.choice(files)
                 return FileResponse(os.path.join(mood_dir, chosen))
                 
     class DummyAnalysis:
@@ -1004,7 +1004,7 @@ def get_mood_art(mood: str = "neutral", seed: str = "", energy: float = 0.5, bpm
     analysis = DummyAnalysis(energy, bpm)
     
     # Get pixels from the Python TUI logic (random cover or generated gradient)
-    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, rng=rng)
+    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, )
     
     # Fallback if no pixels returned
     if not pixels:
