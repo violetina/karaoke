@@ -947,6 +947,24 @@ def dancers_page() -> HTMLResponse:
 
 
 
+@app.get("/api/art")
+def get_art(url: str):
+    from fastapi.responses import FileResponse, RedirectResponse
+    from urllib.parse import urlparse, unquote
+    import os
+    
+    if not url:
+        return {"error": "no url"}
+        
+    if url.startswith("file://"):
+        parsed = urlparse(url)
+        path = unquote(parsed.path)
+        if os.path.exists(path):
+            return FileResponse(path)
+        return {"error": "not found"}
+    
+    return RedirectResponse(url)
+
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
     """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""

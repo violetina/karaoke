@@ -572,7 +572,7 @@ def render_stage_html() -> str:
       // Album art
       const artImg = document.getElementById("track-art");
       if (data.art_url) {
-        artImg.src = data.art_url;
+        artImg.src = "/api/art?url=" + encodeURIComponent(data.art_url);
         artImg.style.display = "block";
       } else {
         artImg.style.display = "none";
@@ -732,7 +732,7 @@ def render_coverart_html() -> str:
       
       if (data.art_url) {
         if (artEl.src !== data.art_url) {
-          artEl.src = data.art_url;
+          artEl.src = "/api/art?url=" + encodeURIComponent(data.art_url);
           artEl.style.display = 'block';
         }
       } else {
