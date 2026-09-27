@@ -113,12 +113,12 @@ def process_batch(candidates: list[dict[str, Any]], delay: float = 4.0, skip_dow
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Batch process tracks for audio, chords, and vectors.")
-    parser.add_argument("--limit", type=int, default=100, help="Maximum number of tracks to process (default: 100, max 120)")
+    parser.add_argument("--limit", type=int, default=100, help="Maximum number of tracks to process (default: 100, max 500)")
     parser.add_argument("--delay", type=float, default=4.0, help="Polite delay in seconds between YouTube downloads (default: 4.0s)")
     parser.add_argument("--skip-download", action="store_true", help="Skip downloading audio; only process existing cached files")
     args = parser.parse_args()
 
-    limit = min(max(1, args.limit), 120)
+    limit = min(max(1, args.limit), 500)
     conn = localcache.connect()
 
     candidates = find_candidate_tracks(conn, limit=limit)

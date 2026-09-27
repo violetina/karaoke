@@ -565,7 +565,7 @@ def render_stage_html() -> str:
         // Fetch mood pixels
         let mood = data.mood || "neutral";
         let seed = data.title || "unknown";
-        let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}`;
+        let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}`;
         if (window.currentMoodUrl !== newSrc) {
             window.currentMoodUrl = newSrc;
             const img = new Image();

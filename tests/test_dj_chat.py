@@ -159,3 +159,9 @@ def test_dj_chat_vibe_for_current_playing_song(sample_tracks):
     assert screen.session.current_track_provider is not None
     assert screen.initial_prompt == "/vibe"
 
+
+def test_dj_chat_chords():
+    session = DJChatSession()
+    reply = session.ask("/chords 8A")
+    assert "Harmonic Motion Matches" in reply or "unavailable" in reply
+

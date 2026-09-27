@@ -84,12 +84,13 @@ class SentimentProfile:
 
 def analyze_sentiment(text: str) -> SentimentProfile:
     """Aggregate per-line moods across a lyric block into a profile."""
-    counts = {"happy": 0, "sad": 0, "angry": 0, "tender": 0}
+    from .sentiment import score_line_contextual
+    counts = {"happy": 0, "sad": 0, "angry": 0, "tender": 0, "cynical": 0}
     line_moods: list[str] = []
     for line in text.splitlines():
         if not line.strip():
             continue
-        s = score_line(line)
+        s = score_line_contextual(line)
         for mood in counts:
             counts[mood] += s.get(mood, 0)
         line_moods.append(mood_of(line))

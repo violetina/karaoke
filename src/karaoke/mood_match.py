@@ -28,6 +28,7 @@ MOOD_TARGETS: dict[str, tuple[float, float]] = {
     "sad": (0.20, 0.25),
     "angry": (0.25, 0.85),
     "tender": (0.65, 0.25),
+    "cynical": (0.25, 0.50),
 }
 
 # Words people actually type at a DJ that the lyric lexicon does not cover.

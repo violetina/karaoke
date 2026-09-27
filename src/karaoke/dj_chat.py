@@ -159,6 +159,11 @@ class DJChatSession:
             query = user_prompt.strip()[8:].strip()
             return self.cmd_search(query)
 
+        if p_lower.startswith("/chords ") or p_lower.startswith("/harmony "):
+            parts = user_prompt.strip().split(maxsplit=1)
+            query = parts[1].strip() if len(parts) > 1 else ""
+            return self.cmd_chords(query)
+
         if p_lower.startswith("/play "):
             arg = user_prompt.strip()[6:].strip()
             return self.cmd_play(arg)
@@ -538,6 +543,78 @@ class DJChatSession:
         lines.append(
             f"\n👉 Type **1**–**{len(rows)}** to queue, or `all` for the whole set."
         )
+        return "\n".join(lines)
+
+    def cmd_chords(self, query: str) -> str:
+        """Find tracks with similar harmonic progression / chord motion."""
+        if not query:
+            return "🎹 **Specify a harmonic query or track ID.** Example: `/chords 8A` or `/chords 42`"
+
+        from . import osclient, localcache, musictheory
+        cli = osclient.client()
+
+        # Check if query is a track_id to query by example
+        target_vec = None
+        if query.isdigit():
+            tid = int(query)
+            try:
+                res = cli.search(index="karaoke-progression", body={
+                    "size": 1, "query": {"term": {"track_id": tid}}
+                })
+                hits = res.get("hits", {}).get("hits", [])
+                if hits:
+                    target_vec = hits[0]["_source"].get("chord_motion")
+            except Exception:
+                pass
+
+        if not target_vec:
+            # Construct a synthetic 12-dim chord motion vector prioritizing descending fifths
+            # (Index 5 in 12-semitone motion vector)
+            target_vec = [0.05] * 12
+            if "fifth" in query.lower() or "jazz" in query.lower() or "cadence" in query.lower():
+                target_vec[5] = 0.50
+            else:
+                target_vec[0] = 0.30
+
+        try:
+            res = cli.search(index="karaoke-progression", body={
+                "size": 5,
+                "query": {"knn": {"chord_motion": {"vector": target_vec, "k": 5}}}
+            })
+            hits = res.get("hits", {}).get("hits", [])
+        except Exception as exc:
+            return f"🎹 Chord motion vector index unavailable ({exc}). Try `/search` instead."
+
+        if not hits:
+            return f"🎹 No harmonic progression matches found for '{escape(query)}'."
+
+        tids = [int(h["_source"]["track_id"]) for h in hits if h.get("_source", {}).get("track_id")]
+        with localcache.connect() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, g.genre
+                FROM tracks t
+                LEFT JOIN track_analysis a ON a.track_id = t.track_id
+                LEFT JOIN track_genre g ON g.track_id = t.track_id
+                WHERE t.track_id = ANY(%s)
+            """, (tids,))
+            rows = [dict(r) for r in cur.fetchall()]
+
+        self.last_candidates = rows
+        self.last_suggestions = rows
+
+        lines = [f"🎹 **Harmonic Motion Matches for '{escape(query)}'**:"]
+        for i, r in enumerate(rows, 1):
+            key_obj = musictheory.parse_key(r.get("detected_key") or "")
+            cam = key_obj.camelot if key_obj else "?"
+            bpm = round(r.get("bpm") or 0)
+            genre = f" · {r['genre']}" if r.get("genre") else ""
+            lines.append(
+                f"[bold cyan][{i}][/bold cyan] [dim][#{r['track_id']}][/dim] "
+                f"**{escape(r['artist'])}** — *{escape(r['title'])}* "
+                f"(`{cam}` / {bpm} BPM{genre})"
+            )
+        lines.append(f"\n👉 Type **1**–**{len(rows)}** to queue, or `all` for all.")
         return "\n".join(lines)
 
     # Filter tokens /browse understands, as `name=value`.
