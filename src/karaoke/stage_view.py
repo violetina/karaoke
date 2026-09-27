@@ -572,7 +572,10 @@ def render_stage_html() -> str:
       // Album art
       const artImg = document.getElementById("track-art");
       if (data.art_url) {
-        artImg.src = "/api/art?url=" + encodeURIComponent(data.art_url);
+        let newSrc = "/api/art?url=" + encodeURIComponent(data.art_url);
+        if (!artImg.src.endsWith(newSrc)) {
+            artImg.src = newSrc;
+        }
         artImg.style.display = "block";
       } else {
         artImg.style.display = "none";
@@ -858,6 +861,7 @@ def render_dancers_html() -> str:
 <body>
   <div id="hud">
     <img id="hud-art" src="" alt="Cover Art" />
+    <canvas id="hud-mood-art" width="32" height="32" style="display: none; image-rendering: pixelated; width: 120px; height: 120px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);"></canvas>
     <div id="hud-sentiment" class="sentiment"></div>
   </div>
   <div id="stage-container">
@@ -937,11 +941,39 @@ def render_dancers_html() -> str:
       
       // Update HUD
       const hudArt = document.getElementById('hud-art');
+      const hudMood = document.getElementById('hud-mood-art');
       if (data.art_url) {
-         hudArt.src = '/api/art?url=' + encodeURIComponent(data.art_url);
+         let newSrc = '/api/art?url=' + encodeURIComponent(data.art_url);
+         if (!hudArt.src.endsWith(newSrc)) {
+             hudArt.src = newSrc;
+         }
          hudArt.style.display = 'block';
+         hudMood.style.display = 'none';
+      } else if (data.title) {
+         hudArt.style.display = 'none';
+         hudMood.style.display = 'block';
+         fetch(`/api/mood-pixels?mood=${mood}&energy=${energy}&bpm=${bpm}`)
+            .then(res => res.json())
+            .then(resData => {
+                if (resData.pixels) {
+                    const ctx = hudMood.getContext('2d');
+                    const imgData = ctx.createImageData(32, 32);
+                    let i = 0;
+                    for (let r=0; r<32; r++) {
+                        for (let c=0; c<32; c++) {
+                            const [red, green, blue] = resData.pixels[r][c];
+                            imgData.data[i++] = red;
+                            imgData.data[i++] = green;
+                            imgData.data[i++] = blue;
+                            imgData.data[i++] = 255;
+                        }
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                }
+            });
       } else {
          hudArt.style.display = 'none';
+         hudMood.style.display = 'none';
       }
       
       const hudSentiment = document.getElementById('hud-sentiment');

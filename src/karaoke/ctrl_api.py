@@ -975,6 +975,22 @@ def get_dance_library():
         return FileResponse(path, media_type="application/json")
     return {"error": "not found"}
 
+
+@app.get("/api/mood-pixels")
+def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
+    from karaoke import moodart
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+    
+    analysis = DummyAnalysis(energy, bpm)
+    pixels = moodart.generate(analysis, mood, 32, 32)
+    return {"pixels": pixels}
+
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
     """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""
