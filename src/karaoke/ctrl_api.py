@@ -993,25 +993,45 @@ def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120
 
 
 @app.get("/api/mood-art")
-def get_mood_art(mood: str = "neutral", seed: str = ""):
-    import os, random
-    from fastapi.responses import FileResponse, Response
+def get_mood_art(mood: str = "neutral", seed: str = "", energy: float = 0.5, bpm: float = 120.0):
+    import io, random
+    from fastapi.responses import StreamingResponse
+    from PIL import Image
+    from karaoke import moodframe
     
-    # Check if we have library images for this mood
-    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
-    mood_dir = os.path.join(base_dir, mood)
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+
+    analysis = DummyAnalysis(energy, bpm)
+    # Seed the RNG to keep the same image for the same song
+    rng = random.Random(seed)
     
-    if os.path.isdir(mood_dir):
-        files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
-        if files:
-            # Deterministically pick an image based on the seed (e.g. song title)
-            rnd = random.Random(seed)
-            chosen = rnd.choice(files)
-            return FileResponse(os.path.join(mood_dir, chosen))
-            
-    # Fallback: serve a generic 64x64 transparent PNG if no image found
-    # (The web UI will handle this gracefully)
-    return Response(content=b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00@\x00\x00\x00@\x08\x06\x00\x00\x00\xaaiq\xde\x00\x00\x00\x0bIDATx\x9cc\xfc\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\x12\x00\x01\x00\x00\x00\x00IEND\xaeB`\x82', media_type="image/png")
+    # Get pixels from the Python TUI logic (random cover or generated gradient)
+    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, rng=rng)
+    
+    # Fallback if no pixels returned
+    if not pixels:
+        img = Image.new("RGB", (64, 64), color="black")
+    else:
+        # Convert 2D list of (R,G,B) to PIL Image
+        rows = len(pixels)
+        cols = len(pixels[0])
+        img = Image.new("RGB", (cols, rows))
+        put_data = []
+        for r in range(rows):
+            for c in range(cols):
+                put_data.append(pixels[r][c])
+        img.putdata(put_data)
+        
+    img_io = io.BytesIO()
+    img.save(img_io, "PNG")
+    img_io.seek(0)
+    return StreamingResponse(img_io, media_type="image/png")
 
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
