@@ -1217,7 +1217,7 @@ def render_mood_html() -> str:
   <div id="hud-top">
     <div id="mic-btn" class="hud-pill" onclick="toggleMic()">
       <span id="mic-icon">🎙️</span>
-      <span id="mic-label">ENABLE ROOM MIC</span>
+      <span id="mic-label">ROOM MIC [R]</span>
       <div id="vu-meter">
         <div class="vu-bar"></div>
         <div class="vu-bar"></div>
@@ -1263,6 +1263,14 @@ def render_mood_html() -> str:
     const micLabel = document.getElementById('mic-label');
     const vuBars = Array.from(document.querySelectorAll('.vu-bar'));
 
+    // Keyboard shortcut 'r' to capture room mic
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'r' || e.key === 'R') {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+        toggleMic();
+      }
+    });
+
     async function toggleMic() {
       if (micActive) {
         if (micStream) {
@@ -1273,7 +1281,7 @@ def render_mood_html() -> str:
         }
         micActive = false;
         micBtn.classList.remove('active');
-        micLabel.textContent = 'ENABLE ROOM MIC';
+        micLabel.textContent = 'ENABLE ROOM MIC [R]';
         vuBars.forEach(b => b.className = 'vu-bar');
         return;
       }
@@ -1294,11 +1302,11 @@ def render_mood_html() -> str:
         micDataArray = new Uint8Array(analyser.frequencyBinCount);
         micActive = true;
         micBtn.classList.add('active');
-        micLabel.textContent = 'ROOM MIC VIBE';
+        micLabel.textContent = 'ROOM MIC ACTIVE [R]';
       } catch (err) {
         console.warn('Microphone access failed or denied:', err);
         micLabel.textContent = 'MIC UNAVAILABLE';
-        setTimeout(() => { if (!micActive) micLabel.textContent = 'ENABLE ROOM MIC'; }, 3000);
+        setTimeout(() => { if (!micActive) micLabel.textContent = 'ENABLE ROOM MIC [R]'; }, 3000);
       }
     }
 
