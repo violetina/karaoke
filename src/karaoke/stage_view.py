@@ -771,22 +771,58 @@ def render_dancers_html() -> str:
     }
     #stage-container {
       flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
-      padding-bottom: 10vh; position: relative;
+      padding-bottom: 15vh; position: relative;
     }
     .layer {
       position: absolute; left: 0; width: 100%; display: flex;
-      justify-content: space-evenly; align-items: flex-end;
+      justify-content: center; align-items: flex-end; gap: 4vw;
     }
-    .bg-layer { bottom: 30vh; opacity: 0.3; transform: scale(0.6); }
+    .bg-layer { bottom: 35vh; opacity: 0.3; transform: scale(0.6); z-index: 1; gap: 2vw; }
     .fg-layer { bottom: 10vh; z-index: 10; }
     
-    .dancer {
-      white-space: pre; font-size: 2vw; line-height: 1; text-align: center;
-      transition: transform 0.08s ease-out;
+    .dancer-wrapper {
+      transition: transform 0.2s ease-out, margin 0.3s ease-in-out;
+      display: flex; align-items: flex-end; justify-content: center;
     }
-    .fg-layer .dancer { font-size: 4vw; text-shadow: 0 0 20px rgba(0, 242, 254, 0.5); }
-    .jazz-style .fg-layer .dancer { color: #ff007f; text-shadow: 0 0 20px rgba(255, 0, 127, 0.5); }
-    .hop { transform: translateY(-15%); }
+    .pose {
+      white-space: pre; font-size: 2vw; line-height: 1; text-align: center;
+      transition: transform 0.08s ease-out, color 0.3s;
+    }
+    
+    /* Foreground styles */
+    .fg-layer .pose { font-size: 4vw; text-shadow: 0 0 20px rgba(0, 242, 254, 0.5); }
+    .jazz-style .fg-layer .pose { color: #ff007f; text-shadow: 0 0 20px rgba(255, 0, 127, 0.5); }
+    
+    /* Outer dancers pushed back */
+    .dancer-wrapper.outer {
+      transform: scale(0.55) translateY(-30px);
+      opacity: 0.7;
+      z-index: 5;
+      margin: 0 4vw; /* spacing from center */
+    }
+    
+    /* Inner duet dancers */
+    .dancer-wrapper.inner {
+      z-index: 15;
+      margin: 0 2vw;
+    }
+    
+    /* Together cue */
+    .fg-layer.together .dancer-wrapper.inner {
+      margin: 0 -4vw; /* Overlap them */
+    }
+    .fg-layer.together .dancer-wrapper.inner.right .pose {
+      transform: rotate(180deg) translateY(20%); /* Upside down and shifted to interlock */
+      color: #00f2fe;
+    }
+    .jazz-style .fg-layer.together .dancer-wrapper.inner.right .pose {
+      color: #ff007f;
+    }
+    
+    .hop .pose { transform: translateY(-15%); }
+    .fg-layer.together .hop .dancer-wrapper.inner.right .pose {
+      transform: rotate(180deg) translateY(5%);
+    }
   </style>
 </head>
 <body>
@@ -795,42 +831,58 @@ def render_dancers_html() -> str:
     <div id="fg" class="layer fg-layer"></div>
   </div>
   <script>
-    // Minimal ASCII poses
     const POSES = [
-      " o \\n/|\\\\\\n/ \\\\",
-      "\\\\o/\\n | \\n/ \\\\",
-      " o \\n/| \\n/ \\\\",
-      " o\\n |\\\\\\n/ \\\\",
-      " o/\\n | \\n/ \\\\",
-      "\\\\o \\n | \\n/ \\\\",
-      "~o~\\n | \\n/ \\\\",
-      "\\\\o/\\n | \\n   ",
-      " o \\n\\\\|/\\n/ \\\\",
-      "  o\\n /|_\\n/ \\\\ "
+      " o \n/|\\\n/ \\",
+      "\\o/\n | \n/ \\",
+      " o \n/| \n/ \\",
+      " o\n |\\\n/ \\",
+      " o/\n | \n/ \\",
+      "\\o \n | \n/ \\",
+      "~o~\n | \n/ \\",
+      "\\o/\n | \n   ",
+      " o \n\\|/\n/ \\",
+      "  o\n /|_\n/ \\ "
     ];
+    
+    function mirrorPose(pose) {
+      return pose.split('\n').map(line => {
+        return line.split('').reverse().map(c => {
+          if (c === '/') return '\\';
+          if (c === '\\') return '/';
+          return c;
+        }).join('');
+      }).join('\n');
+    }
     
     const bgContainer = document.getElementById('bg');
     const fgContainer = document.getElementById('fg');
     const stageContainer = document.getElementById('stage-container');
     
-    // Create elements
     const NUM_BG = 12;
-    const NUM_FG = 4;
     const bgDancers = [];
     const fgDancers = [];
     
     for(let i=0; i<NUM_BG; i++) {
-       let el = document.createElement('div');
-       el.className = 'dancer';
-       bgContainer.appendChild(el);
-       bgDancers.push({el: el, phase: i * 1.618});
+       let wrapper = document.createElement('div');
+       wrapper.className = 'dancer-wrapper';
+       let poseEl = document.createElement('div');
+       poseEl.className = 'pose';
+       wrapper.appendChild(poseEl);
+       bgContainer.appendChild(wrapper);
+       bgDancers.push({el: wrapper, poseEl: poseEl, phase: i * 1.618});
     }
-    for(let i=0; i<NUM_FG; i++) {
-       let el = document.createElement('div');
-       el.className = 'dancer';
-       fgContainer.appendChild(el);
-       fgDancers.push({el: el, phase: i * 1.618});
-    }
+    
+    // Foreground: 4 dancers (Outer, Inner Left, Inner Right, Outer)
+    const fgRoles = ['outer left', 'inner left', 'inner right', 'outer right'];
+    fgRoles.forEach((role, i) => {
+       let wrapper = document.createElement('div');
+       wrapper.className = 'dancer-wrapper ' + role;
+       let poseEl = document.createElement('div');
+       poseEl.className = 'pose';
+       wrapper.appendChild(poseEl);
+       fgContainer.appendChild(wrapper);
+       fgDancers.push({el: wrapper, poseEl: poseEl, phase: i * 1.618, isRight: role.includes('right')});
+    });
     
     const es = new EventSource('/api/stage/stream');
     es.onmessage = (event) => {
@@ -841,6 +893,7 @@ def render_dancers_html() -> str:
       const beatSec = 60.0 / Math.max(bpm, 1);
       const beats = data.position_s / beatSec;
       const energy = data.energy !== null ? data.energy : 0.5;
+      const mood = data.mood || 'neutral';
       
       // Determine style based on chords
       const isJazz = data.fifth_ratio > 0.4 && data.chord_cpm > 10;
@@ -853,11 +906,22 @@ def render_dancers_html() -> str:
       
       const speed = 1.0 + energy * 0.8;
       
+      // Together cue: phrase > 0.70
+      const phrase = (beats / 8.0) % 1.0;
+      const isTogether = phrase > 0.70;
+      if (isTogether) fgContainer.classList.add('together');
+      else fgContainer.classList.remove('together');
+      
       // Update foreground
       fgDancers.forEach((d, i) => {
          const dBeats = beats * speed + d.phase;
          const pidx = Math.floor(dBeats * 2) % poseIndices.length;
-         d.el.innerText = POSES[poseIndices[pidx] % POSES.length];
+         let poseStr = POSES[poseIndices[pidx] % POSES.length];
+         
+         // Inner right dancer mirrors the inner left dancer during duet
+         if (d.isRight) poseStr = mirrorPose(poseStr);
+         
+         d.poseEl.innerText = poseStr;
          
          const within = dBeats % 1.0;
          if (bpm >= 100 && within < 0.2) d.el.classList.add('hop');
@@ -868,7 +932,7 @@ def render_dancers_html() -> str:
       bgDancers.forEach((d, i) => {
          const dBeats = beats * 0.5 + d.phase;
          const pidx = Math.floor(dBeats) % POSES.length;
-         d.el.innerText = POSES[pidx];
+         d.poseEl.innerText = POSES[pidx];
       });
     };
   </script>
