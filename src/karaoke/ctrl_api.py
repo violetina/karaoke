@@ -965,6 +965,16 @@ def get_art(url: str):
     
     return RedirectResponse(url)
 
+
+@app.get("/api/dance-library")
+def get_dance_library():
+    import os
+    from fastapi.responses import FileResponse
+    path = os.path.join(os.path.dirname(__file__), "dance-library.json")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/json")
+    return {"error": "not found"}
+
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
     """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""

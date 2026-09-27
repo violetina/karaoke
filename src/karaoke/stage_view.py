@@ -785,12 +785,12 @@ def render_dancers_html() -> str:
       display: flex; align-items: flex-end; justify-content: center;
     }
     .pose {
-      white-space: pre; font-size: 2vw; line-height: 1; text-align: center;
+      white-space: pre; font-size: 1vw; line-height: 1; text-align: center;
       transition: transform 0.08s ease-out, color 0.3s;
     }
     
     /* Foreground styles */
-    .fg-layer .pose { font-size: 4vw; text-shadow: 0 0 20px rgba(0, 242, 254, 0.5); }
+    .fg-layer .pose { font-size: 2vw; text-shadow: 0 0 20px rgba(0, 242, 254, 0.5); }
     .jazz-style .fg-layer .pose { color: #ff007f; text-shadow: 0 0 20px rgba(255, 0, 127, 0.5); }
     
     /* Outer dancers pushed back */
@@ -831,19 +831,25 @@ def render_dancers_html() -> str:
     <div id="fg" class="layer fg-layer"></div>
   </div>
   <script>
-    const POSES = [
+
+    let POSES = [
       " o \n/|\\\n/ \\",
-      "\\o/\n | \n/ \\",
-      " o \n/| \n/ \\",
-      " o\n |\\\n/ \\",
-      " o/\n | \n/ \\",
-      "\\o \n | \n/ \\",
-      "~o~\n | \n/ \\",
-      "\\o/\n | \n   ",
-      " o \n\\|/\n/ \\",
-      "  o\n /|_\n/ \\ "
+      "\\o/\n | \n/ \\"
     ];
+    let LIBRARY = null;
+    let ACTIVE_CLIP = null;
     
+    // Fetch the dance pack
+    fetch('/api/dance-library')
+      .then(res => res.json())
+      .then(data => {
+         if (data.clips) {
+           LIBRARY = data;
+           console.log("Loaded dance library with", data.clip_count, "clips");
+         }
+      })
+      .catch(err => console.error("Failed to load dance library", err));
+      
     function mirrorPose(pose) {
       return pose.split('\n').map(line => {
         return line.split('').reverse().map(c => {
@@ -900,9 +906,25 @@ def render_dancers_html() -> str:
       if (isJazz) stageContainer.className = 'jazz-style';
       else stageContainer.className = '';
       
-      let poseIndices = [0, 1, 2, 3, 4, 6, 7, 8];
-      if (isJazz) poseIndices = [4, 9, 5, 0, 2, 3, 1, 6];
-      else if (energy > 0.8) poseIndices = [0, 1, 8, 6, 7, 2, 3, 7];
+      
+      let poseIndices = [0];
+      if (LIBRARY) {
+         // Find a solo clip that matches mood or feeling
+         // Map mood/energy to feeling
+         let targetFeeling = 'joyful';
+         if (energy > 0.8) targetFeeling = 'excited';
+         if (mood === 'tender') targetFeeling = 'tender';
+         if (mood === 'sad') targetFeeling = 'melancholy';
+         
+         const validClips = LIBRARY.clips.filter(c => c.mode === 'solo' && (c.feeling === targetFeeling || c.feeling === 'joyful'));
+         if (validClips.length > 0) {
+            ACTIVE_CLIP = validClips[0];
+            POSES = ACTIVE_CLIP.frames;
+            poseIndices = POSES.map((_, idx) => idx);
+         }
+      } else {
+         poseIndices = [0, 1];
+      }
       
       const speed = 1.0 + energy * 0.8;
       
@@ -912,7 +934,7 @@ def render_dancers_html() -> str:
       if (isTogether) fgContainer.classList.add('together');
       else fgContainer.classList.remove('together');
       
-      // Update foreground
+// Update foreground
       fgDancers.forEach((d, i) => {
          const dBeats = beats * speed + d.phase;
          const pidx = Math.floor(dBeats * 2) % poseIndices.length;
