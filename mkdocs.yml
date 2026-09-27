@@ -73,6 +73,7 @@ nav:
       - Bulk ingestion: ingestion.md
   - API reference: api.md
   - Control API: control-api.md
+  - Live auto-captions: live-captions.md
   - Karaoke DJ & MCP: mcp-server.md
   - systemd services: howto-systemd-services.md
   - Post-processing: howto-post-processing.md

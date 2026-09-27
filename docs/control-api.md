@@ -44,6 +44,18 @@ GET  /api/logs/errors             recent exception & error log lines
 
 `POST /api/workers/scale` manages `karaoke-postprocess@1..6.service` user units dynamically via `systemctl --user`.
 
+## Web views & live displays
+
+```
+GET /tv                  full-screen live stage prompter for TV
+GET /mood                sound & vibe-reactive visualizer
+GET /captions            live Dutch auto-captions for desktop audio (cycling/broadcast)
+GET /api/captions/stream SSE stream of live transcribed auto-captions
+GET /api/stage/stream    SSE stream of live playback, lyrics & rhythm
+```
+
+See [Live auto-captions](live-captions.md) for details on desktop PipeWire capture and Whisper transcription.
+
 ## Player controls (MPRIS)
 
 ```
