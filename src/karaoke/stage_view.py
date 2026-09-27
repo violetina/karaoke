@@ -448,12 +448,16 @@ def render_stage_html() -> str:
   </style>
 </head>
 <body>
+  <div id="mood-hud" style="position: absolute; top: 1.5rem; right: 1.5rem; display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem; z-index: 50;">
+    <canvas id="track-mood-art" width="64" height="64" style="width: 100px; height: 100px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); image-rendering: pixelated;"></canvas>
+    <div id="mood-sentiment" style="font-size: 0.85rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; color: #00f2fe; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"></div>
+  </div>
+  
   <div class="rhythm-bar" id="rhythm-bar"></div>
 
   <header>
     <div class="track-info">
       <img id="track-art" class="track-art" src="" alt="Album Art">
-      <canvas id="track-mood-art" class="track-art" width="32" height="32" style="display: none; image-rendering: pixelated;"></canvas>
       <div class="track-titles">
         <h1 id="track-title">Waiting for playback…</h1>
         <h2 id="track-artist">Start a song on Karaoke or cast from YouTube Music</h2>
