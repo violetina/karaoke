@@ -1038,138 +1038,606 @@ def render_dancers_html() -> str:
 
 
 def render_mood_html() -> str:
-    """Render a full-screen mood visualizer page."""
+    """Render a full-screen mood visualizer page with room mic vibe, feeling art, and randomized cover pixels."""
     return r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Karaoke Mood Visualizer</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
+  <title>Karaoke Mood Visualizer · Vibe & Sound Reactive</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@600;800;900&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --bg: #06080d;
+      --card-bg: rgba(13, 17, 27, 0.85);
+      --accent: #00f2fe;
+      --accent-pink: #ff007f;
+      --accent-gold: #ffbe0b;
+      --border: rgba(255, 255, 255, 0.12);
+    }
+    * { box-sizing: border-box; }
     body {
-      margin: 0; padding: 0; background: #07090e; overflow: hidden;
+      margin: 0; padding: 0; background: var(--bg); overflow: hidden;
       display: flex; flex-direction: column; justify-content: center; align-items: center;
       height: 100vh; color: #fff; font-family: 'JetBrains Mono', monospace;
+      user-select: none;
     }
+    
+    /* Ambient glow behind visualizer */
+    #ambient-glow {
+      position: absolute;
+      width: 90vmin;
+      height: 90vmin;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 242, 254, 0.15) 0%, rgba(255, 0, 127, 0.08) 50%, transparent 70%);
+      filter: blur(40px);
+      pointer-events: none;
+      z-index: 0;
+      transition: transform 0.1s ease-out, background 0.8s ease;
+    }
+
+    #stage-container {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1;
+    }
+
+    #canvas-wrap {
+      position: relative;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.8), 0 0 40px rgba(0, 242, 254, 0.15);
+      backdrop-filter: blur(12px);
+    }
+
     #mood-canvas {
-      width: 80vmin;
-      height: 80vmin;
+      width: 76vmin;
+      height: 76vmin;
+      max-width: 640px;
+      max-height: 640px;
       image-rendering: pixelated;
+      image-rendering: crisp-edges;
       border-radius: 12px;
-      box-shadow: 0 8px 30px rgba(0,0,0,0.8);
-      transition: opacity 0.5s;
+      background: #000;
+      display: block;
+    }
+
+    /* Top HUD / Mic control pill */
+    #hud-top {
+      position: absolute;
+      top: 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      z-index: 10;
+    }
+
+    .hud-pill {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.85rem;
+      letter-spacing: 1px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+      backdrop-filter: blur(8px);
+    }
+
+    #mic-btn {
+      cursor: pointer;
+      transition: all 0.2s ease;
+      color: #fff;
+    }
+    #mic-btn:hover {
+      border-color: var(--accent);
+      background: rgba(0, 242, 254, 0.15);
+      transform: translateY(-1px);
+    }
+    #mic-btn.active {
+      border-color: var(--accent-pink);
+      color: #fff;
+      box-shadow: 0 0 18px rgba(255, 0, 127, 0.35);
+    }
+
+    #vu-meter {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+      height: 12px;
+    }
+    .vu-bar {
+      width: 3px;
+      height: 100%;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 1px;
+      transition: background 0.05s ease;
+    }
+    .vu-bar.lit {
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+    }
+    .vu-bar.peak {
+      background: var(--accent-pink);
+      box-shadow: 0 0 8px var(--accent-pink);
+    }
+
+    /* Track & Mood info */
+    #info-box {
+      margin-top: 1.5rem;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
     }
     #sentiment {
-      margin-top: 2rem;
-      font-size: 2rem;
-      font-weight: bold;
+      font-family: 'Outfit', sans-serif;
+      font-size: 2.2rem;
+      font-weight: 900;
       text-transform: uppercase;
-      letter-spacing: 4px;
-      color: #00f2fe;
-      text-shadow: 0 4px 10px rgba(0,0,0,0.8);
+      letter-spacing: 5px;
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 50%, #ff007f 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-shadow: 0 4px 20px rgba(0, 242, 254, 0.4);
     }
+    #track-info {
+      font-size: 0.95rem;
+      color: rgba(255, 255, 255, 0.7);
+      max-width: 80vw;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 500;
+    }
+    #sub-stats {
+      margin-top: 4px;
+      display: flex;
+      gap: 14px;
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.4);
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+    .stat-val { color: var(--accent); font-weight: bold; }
   </style>
 </head>
 <body>
-  <canvas id="mood-canvas" width="64" height="64"></canvas>
-  <div id="sentiment">Waiting for music...</div>
+  <div id="ambient-glow"></div>
+
+  <div id="hud-top">
+    <div id="mic-btn" class="hud-pill" onclick="toggleMic()">
+      <span id="mic-icon">🎙️</span>
+      <span id="mic-label">ENABLE ROOM MIC</span>
+      <div id="vu-meter">
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+        <div class="vu-bar"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="stage-container">
+    <div id="canvas-wrap">
+      <canvas id="mood-canvas" width="64" height="64"></canvas>
+    </div>
+
+    <div id="info-box">
+      <div id="sentiment">WAITING FOR MUSIC...</div>
+      <div id="track-info">Queue songs to begin</div>
+      <div id="sub-stats">
+        <span>BPM: <span id="val-bpm" class="stat-val">--</span></span>
+        <span>ENERGY: <span id="val-energy" class="stat-val">--</span></span>
+        <span>VIBE: <span id="val-vibe" class="stat-val">0%</span></span>
+      </div>
+    </div>
+  </div>
+
   <script>
-    const evtSource = new EventSource('/api/stage/stream');
+    // --- Audio / Mic Room Vibe Engine ---
+    let audioCtx = null;
+    let micStream = null;
+    let analyser = null;
+    let micDataArray = null;
+    let micActive = false;
+    let roomVibeLevel = 0.0;    // 0.0 to 1.0 smoothed room volume
+    let roomBassLevel = 0.0;    // low freq energy
+    let roomHighsLevel = 0.0;   // crowd/cheering/vocals
+    let micPeakImpulse = 0.0;   // sudden transients / claps
+
+    const micBtn = document.getElementById('mic-btn');
+    const micLabel = document.getElementById('mic-label');
+    const vuBars = Array.from(document.querySelectorAll('.vu-bar'));
+
+    async function toggleMic() {
+      if (micActive) {
+        if (micStream) {
+          micStream.getTracks().forEach(t => t.stop());
+        }
+        if (audioCtx && audioCtx.state !== 'closed') {
+          audioCtx.close();
+        }
+        micActive = false;
+        micBtn.classList.remove('active');
+        micLabel.textContent = 'ENABLE ROOM MIC';
+        vuBars.forEach(b => b.className = 'vu-bar');
+        return;
+      }
+
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+        }
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const source = audioCtx.createMediaStreamSource(micStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 128;
+        analyser.smoothingTimeConstant = 0.65;
+        source.connect(analyser);
+
+        micDataArray = new Uint8Array(analyser.frequencyBinCount);
+        micActive = true;
+        micBtn.classList.add('active');
+        micLabel.textContent = 'ROOM MIC VIBE';
+      } catch (err) {
+        console.warn('Microphone access failed or denied:', err);
+        micLabel.textContent = 'MIC UNAVAILABLE';
+        setTimeout(() => { if (!micActive) micLabel.textContent = 'ENABLE ROOM MIC'; }, 3000);
+      }
+    }
+
+    function updateMicMetrics() {
+      if (!micActive || !analyser) {
+        // Subtle idle breathing when mic not active
+        roomVibeLevel = roomVibeLevel * 0.95;
+        roomBassLevel = roomBassLevel * 0.95;
+        roomHighsLevel = roomHighsLevel * 0.95;
+        micPeakImpulse = micPeakImpulse * 0.9;
+        return;
+      }
+
+      analyser.getByteFrequencyData(micDataArray);
+      const binCount = micDataArray.length;
+      
+      let sum = 0;
+      let bassSum = 0;
+      let highsSum = 0;
+      const bassBins = Math.max(1, Math.floor(binCount * 0.25));
+      const midBins = Math.floor(binCount * 0.65);
+
+      for (let i = 0; i < binCount; i++) {
+        const val = micDataArray[i];
+        sum += val;
+        if (i < bassBins) bassSum += val;
+        else if (i >= midBins) highsSum += val;
+      }
+
+      const rawLevel = sum / (binCount * 255);
+      const rawBass = bassSum / (bassBins * 255);
+      const rawHighs = highsSum / ((binCount - midBins) * 255);
+
+      // Fast attack, smooth decay
+      const attack = 0.35;
+      const decay = 0.15;
+      roomVibeLevel = rawLevel > roomVibeLevel 
+        ? (roomVibeLevel * (1 - attack) + rawLevel * attack) 
+        : (roomVibeLevel * (1 - decay) + rawLevel * decay);
+
+      roomBassLevel = rawBass > roomBassLevel 
+        ? (roomBassLevel * 0.6 + rawBass * 0.4) 
+        : (roomBassLevel * 0.85 + rawBass * 0.15);
+
+      roomHighsLevel = rawHighs > roomHighsLevel 
+        ? (roomHighsLevel * 0.6 + rawHighs * 0.4) 
+        : (roomHighsLevel * 0.85 + rawHighs * 0.15);
+
+      // Detect sharp transient spikes (singing accents, cheers, claps)
+      const instantDelta = rawLevel - roomVibeLevel;
+      if (instantDelta > 0.15) {
+        micPeakImpulse = Math.min(1.0, micPeakImpulse + instantDelta * 2.0);
+      } else {
+        micPeakImpulse *= 0.88;
+      }
+
+      // Update VU bars
+      const numBars = vuBars.length;
+      const litCount = Math.round(roomVibeLevel * numBars * 1.4);
+      vuBars.forEach((bar, idx) => {
+        if (idx < litCount) {
+          bar.className = (idx >= numBars - 2) ? 'vu-bar peak' : 'vu-bar lit';
+        } else {
+          bar.className = 'vu-bar';
+        }
+      });
+    }
+
+    // --- Visualizer Rendering & Layering ---
+    const moodCanvas = document.getElementById('mood-canvas');
+    const moodCanvasCtx = moodCanvas.getContext('2d', { willReadFrequently: true });
+    const sentimentDiv = document.getElementById('sentiment');
+    const trackInfoDiv = document.getElementById('track-info');
+    const valBpm = document.getElementById('val-bpm');
+    const valEnergy = document.getElementById('val-energy');
+    const valVibe = document.getElementById('val-vibe');
+    const ambientGlow = document.getElementById('ambient-glow');
+
     let currentState = null;
     let lastEventTime = performance.now();
-    let currentMoodUrl = null;
-    let moodBaseImageData = null;
-    const moodCanvas = document.getElementById('mood-canvas');
-    const moodCanvasCtx = moodCanvas.getContext('2d');
-    const sentimentDiv = document.getElementById('sentiment');
-    
+    let currentMood = 'neutral';
+    let currentArtUrl = '';
+    let currentLoadSeed = Date.now();
+    let lastBeatCount = 0;
+
+    // Off-screen canvas buffers
+    const GRID_SIZE = 64;
+    const feelingBuffer = document.createElement('canvas');
+    feelingBuffer.width = GRID_SIZE; feelingBuffer.height = GRID_SIZE;
+    const feelingCtx = feelingBuffer.getContext('2d');
+    let feelingLoaded = false;
+
+    const coverBuffer = document.createElement('canvas');
+    coverBuffer.width = GRID_SIZE; coverBuffer.height = GRID_SIZE;
+    const coverCtx = coverBuffer.getContext('2d');
+    let coverLoaded = false;
+
+    // Stable random seed & pseudo-random permutation table for album cover pixels
+    let pixelPermutation = new Int32Array(GRID_SIZE * GRID_SIZE);
+    let pixelThresholds = new Float32Array(GRID_SIZE * GRID_SIZE);
+    let pixelJitter = new Float32Array(GRID_SIZE * GRID_SIZE * 2);
+
+    function reseedPixelRandomizer(seed) {
+      let s = seed % 2147483647;
+      if (s <= 0) s += 2147483646;
+      function rnd() {
+        s = (s * 16807) % 2147483647;
+        return (s - 1) / 2147483646;
+      }
+
+      const total = GRID_SIZE * GRID_SIZE;
+      for (let i = 0; i < total; i++) {
+        pixelPermutation[i] = i;
+        pixelThresholds[i] = rnd();
+        // Random spatial jitter offset for mosaic scattering
+        pixelJitter[i * 2] = (rnd() - 0.5) * 8.0;
+        pixelJitter[i * 2 + 1] = (rnd() - 0.5) * 8.0;
+      }
+      // Shuffle pixel permutation so album art is heavily scrambled/randomized
+      for (let i = total - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        const tmp = pixelPermutation[i];
+        pixelPermutation[i] = pixelPermutation[j];
+        pixelPermutation[j] = tmp;
+      }
+    }
+    reseedPixelRandomizer(1337);
+
+    // Load feeling image (background)
+    function loadFeelingImage(mood) {
+      const img = new Image();
+      img.crossOrigin = 'Anonymous';
+      img.onload = () => {
+        feelingCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
+        feelingCtx.drawImage(img, 0, 0, GRID_SIZE, GRID_SIZE);
+        feelingLoaded = true;
+      };
+      img.onerror = () => { feelingLoaded = false; };
+      img.src = `/api/mood-feeling-image?mood=${encodeURIComponent(mood)}&t=${currentLoadSeed}`;
+    }
+
+    // Load album cover (foreground pixels)
+    function loadCoverImage(mood, artUrl) {
+      const img = new Image();
+      img.crossOrigin = 'Anonymous';
+      img.onload = () => {
+        coverCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
+        // Draw into 64x64 buffer with pixelated quality
+        coverCtx.imageSmoothingEnabled = false;
+        coverCtx.drawImage(img, 0, 0, GRID_SIZE, GRID_SIZE);
+        coverLoaded = true;
+      };
+      img.onerror = () => { coverLoaded = false; };
+      img.src = `/api/mood-cover-image?mood=${encodeURIComponent(mood)}&art_url=${encodeURIComponent(artUrl || '')}&t=${currentLoadSeed}`;
+    }
+
+    // Server-Sent Events stream from Karaoke stage
+    const evtSource = new EventSource('/api/stage/stream');
     evtSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      currentState = data;
-      lastEventTime = performance.now();
-      
-      if (data.status !== 'Playing') return;
-      
-      const mood = data.mood || 'neutral';
-      sentimentDiv.textContent = mood + (data.genre ? ' • ' + data.genre : '');
-      
-      if (data.title) {
-         const bpm = data.bpm || 120.0;
-         const currentBeat = data.position_s / (60.0 / Math.max(bpm, 1.0));
-         
-         if (window.lastMood !== mood || !window.lastMoodBeat || Math.abs(currentBeat - window.lastMoodBeat) >= 9.0) {
-             window.lastMood = mood;
-             window.lastMoodBeat = currentBeat;
-             window.moodLoadId = Date.now();
-         }
-         let newSrc = `/api/mood-art?mood=${mood}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}&t=${window.moodLoadId}`;
-         if (currentMoodUrl !== newSrc) {
-             currentMoodUrl = newSrc;
-             const img = new Image();
-             img.crossOrigin = "Anonymous";
-             img.onload = () => {
-                 const offCtx = document.createElement('canvas').getContext('2d');
-                 offCtx.canvas.width = 64;
-                 offCtx.canvas.height = 64;
-                 offCtx.drawImage(img, 0, 0, 64, 64);
-                 moodBaseImageData = offCtx.getImageData(0, 0, 64, 64);
-             };
-             img.src = newSrc;
-         }
+      try {
+        const data = JSON.parse(event.data);
+        currentState = data;
+        lastEventTime = performance.now();
+
+        if (data.status !== 'Playing') {
+          sentimentDiv.textContent = 'PAUSED';
+          return;
+        }
+
+        const mood = (data.mood || 'neutral').toLowerCase();
+        const artUrl = data.art_url || '';
+        const title = data.title || '';
+        const artist = data.artist || '';
+
+        sentimentDiv.textContent = mood.toUpperCase() + (data.genre ? ' • ' + data.genre : '');
+        trackInfoDiv.textContent = (title && artist) ? `${title} — ${artist}` : (title || 'Karaoke Playing');
+        valBpm.textContent = data.bpm ? Math.round(data.bpm) : '120';
+        valEnergy.textContent = data.energy !== null ? Math.round(data.energy * 100) + '%' : '50%';
+
+        // Beat tracking for periodic 9th beat randomizer update
+        const bpm = data.bpm || 120.0;
+        const currentBeat = data.position_s / (60.0 / Math.max(bpm, 1.0));
+
+        let needReload = false;
+        if (mood !== currentMood) {
+          currentMood = mood;
+          needReload = true;
+        }
+        if (artUrl !== currentArtUrl) {
+          currentArtUrl = artUrl;
+          needReload = true;
+        }
+        if (!window.lastBeat || Math.abs(currentBeat - window.lastBeat) >= 9.0) {
+          window.lastBeat = currentBeat;
+          currentLoadSeed = Date.now();
+          reseedPixelRandomizer(Math.floor(currentBeat * 997 + Date.now()));
+          needReload = true;
+        }
+
+        if (needReload || !feelingLoaded || !coverLoaded) {
+          loadFeelingImage(currentMood);
+          loadCoverImage(currentMood, currentArtUrl);
+        }
+      } catch (e) {
+        console.error('SSE parse error:', e);
       }
     };
-    
-    function renderLoop(time) {
-        requestAnimationFrame(renderLoop);
-        if (!currentState || currentState.status !== 'Playing') return;
-        
-        let currentPos = currentState.position_s;
-        if (currentState.is_playing) {
-          const now = performance.now() / 1000;
-          currentPos += (now - lastEventTime / 1000);
-        }
-        
-        if (moodBaseImageData) {
-            const bpm = currentState.bpm || 120.0;
-            const beatDuration = 60.0 / Math.max(bpm, 1.0);
-            const beats = currentPos / beatDuration;
-            const withinBeat = beats % 1.0;
+
+    // Render loop running at 60 FPS
+    function renderLoop(now) {
+      requestAnimationFrame(renderLoop);
+      updateMicMetrics();
+
+      valVibe.textContent = Math.round(roomVibeLevel * 100) + '%';
+
+      if (!currentState || currentState.status !== 'Playing') return;
+
+      let currentPos = currentState.position_s || 0;
+      if (currentState.is_playing) {
+        const elapsed = (performance.now() - lastEventTime) / 1000;
+        currentPos += elapsed;
+      }
+
+      const bpm = currentState.bpm || 120.0;
+      const beatPeriod = 60.0 / Math.max(bpm, 1.0);
+      const beatProgress = (currentPos / beatPeriod) % 1.0;
+      
+      // Music beat pulse: sharp spike on downbeat that decays smoothly
+      const beatPulse = Math.max(0.0, 1.0 - beatProgress * 1.6);
+
+      // Sound influence: Combined metric from Room Mic + Music Beat + Song Energy
+      const songEnergy = currentState.energy !== null ? currentState.energy : 0.5;
+      const soundPower = Math.min(1.0, 
+        (micActive ? (roomVibeLevel * 1.6 + micPeakImpulse * 0.6) : (songEnergy * 0.4)) 
+        + beatPulse * 0.45
+      );
+
+      // Update ambient glow behind canvas
+      const glowScale = 1.0 + soundPower * 0.25;
+      ambientGlow.style.transform = `scale(${glowScale})`;
+
+      // Get pixel data from feeling (background) and cover (foreground)
+      if (!feelingLoaded && !coverLoaded) return;
+
+      const feelingImgData = feelingLoaded 
+        ? feelingCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE) 
+        : feelingCtx.createImageData(GRID_SIZE, GRID_SIZE);
+
+      const coverImgData = coverLoaded 
+        ? coverCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE) 
+        : coverCtx.createImageData(GRID_SIZE, GRID_SIZE);
+
+      const outImgData = moodCanvasCtx.createImageData(GRID_SIZE, GRID_SIZE);
+      const outData = outImgData.data;
+      const fData = feelingImgData.data;
+      const cData = coverImgData.data;
+
+      // Center coordinates for radial shockwaves on sound bursts
+      const cx = GRID_SIZE / 2;
+      const cy = GRID_SIZE / 2;
+
+      // Draw composite: Feeling in back, randomized cover pixels on top governed by sound
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          const pixelIndex = y * GRID_SIZE + x;
+          const byteIndex = pixelIndex * 4;
+
+          // Background Feeling pixel
+          const fR = fData[byteIndex];
+          const fG = fData[byteIndex + 1];
+          const fB = fData[byteIndex + 2];
+          const fA = fData[byteIndex + 3];
+
+          // Randomized/scrambled Cover pixel position
+          // Using shuffled permutation index + sound-dependent spatial jitter
+          const permIndex = pixelPermutation[pixelIndex];
+          const jitterX = pixelJitter[pixelIndex * 2] * (0.3 + soundPower * 0.7);
+          const jitterY = pixelJitter[pixelIndex * 2 + 1] * (0.3 + soundPower * 0.7);
+
+          // Radial displacement on loud claps / mic transients
+          const dx = x - cx;
+          const dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const radialPush = micPeakImpulse * 5.0 * (dist / (GRID_SIZE * 0.5));
+          const angle = Math.atan2(dy, dx);
+
+          let sampleX = Math.floor((permIndex % GRID_SIZE) + jitterX + Math.cos(angle) * radialPush);
+          let sampleY = Math.floor(Math.floor(permIndex / GRID_SIZE) + jitterY + Math.sin(angle) * radialPush);
+
+          // Clamp sample coordinates within bounds
+          sampleX = (sampleX % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
+          sampleY = (sampleY % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
+
+          const coverSampleIndex = (sampleY * GRID_SIZE + sampleX) * 4;
+          const cR = cData[coverSampleIndex];
+          const cG = cData[coverSampleIndex + 1];
+          const cB = cData[coverSampleIndex + 2];
+
+          // Sound-dependent coverage threshold
+          // Each pixel has a unique threshold. As sound increases, more cover pixels appear.
+          const threshold = pixelThresholds[pixelIndex];
+          
+          // Low sound: feeling shines through; High sound: randomized cover mosaic takes over
+          const showCover = soundPower > (threshold * 0.85);
+
+          // Beat brightness & color flash
+          const flash = beatPulse * 0.35 + micPeakImpulse * 0.4;
+
+          if (showCover) {
+            // Cover pixel is active over the feeling
+            // Blend opacity between cover and feeling based on sound power
+            const coverAlpha = Math.min(1.0, 0.45 + soundPower * 0.55);
             
-            const intensity = Math.max(0.0, 1.0 - (withinBeat * 1.5));
-            const outData = new ImageData(
-                new Uint8ClampedArray(moodBaseImageData.data),
-                moodBaseImageData.width,
-                moodBaseImageData.height
-            );
-            
-            const w = outData.width;
-            const h = outData.height;
-            for (let r = 0; r < h; r++) {
-                for (let c = 0; c < w; c++) {
-                    const progress = c / w;
-                    let boost = 0;
-                    if (progress < 0.33) {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 2.1));
-                    } else if (progress < 0.66) {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 3.7 + 1.0));
-                    } else {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 5.3 + 2.0));
-                    }
-                    
-                    const i = (r * w + c) * 4;
-                    const red = moodBaseImageData.data[i];
-                    const green = moodBaseImageData.data[i+1];
-                    const blue = moodBaseImageData.data[i+2];
-                    
-                    outData.data[i] = Math.max(0, Math.min(255, red + (255 - red) * boost));
-                    outData.data[i+1] = Math.max(0, Math.min(255, green + (255 - green) * boost));
-                    outData.data[i+2] = Math.max(0, Math.min(255, blue + (255 - blue) * boost));
-                }
-            }
-            moodCanvasCtx.putImageData(outData, 0, 0);
+            const r = cR * coverAlpha + fR * (1 - coverAlpha);
+            const g = cG * coverAlpha + fG * (1 - coverAlpha);
+            const b = cB * coverAlpha + fB * (1 - coverAlpha);
+
+            outData[byteIndex] = Math.min(255, r + (255 - r) * flash);
+            outData[byteIndex + 1] = Math.min(255, g + (255 - g) * flash);
+            outData[byteIndex + 2] = Math.min(255, b + (255 - b) * flash);
+            outData[byteIndex + 3] = 255;
+          } else {
+            // Feeling image in the background
+            outData[byteIndex] = Math.min(255, fR + (255 - fR) * (flash * 0.7));
+            outData[byteIndex + 1] = Math.min(255, fG + (255 - fG) * (flash * 0.7));
+            outData[byteIndex + 2] = Math.min(255, fB + (255 - fB) * (flash * 0.7));
+            outData[byteIndex + 3] = fA || 255;
+          }
         }
+      }
+
+      moodCanvasCtx.putImageData(outImgData, 0, 0);
     }
+
+    // Start render loop
     requestAnimationFrame(renderLoop);
+    // Initial load
+    loadFeelingImage('neutral');
+    loadCoverImage('neutral', '');
   </script>
 </body>
 </html>"""

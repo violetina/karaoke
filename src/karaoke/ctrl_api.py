@@ -1004,8 +1004,6 @@ def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0)
     from PIL import Image
     from karaoke import moodframe
     
-    
-    
     # 50% chance to use our custom AI generated pixel art library
     use_custom = random.choice([True, False])
     if use_custom:
@@ -1028,13 +1026,12 @@ def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0)
     analysis = DummyAnalysis(energy, bpm)
     
     # Get pixels from the Python TUI logic (random cover or generated gradient)
-    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, )
+    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64)
     
     # Fallback if no pixels returned
     if not pixels:
         img = Image.new("RGB", (64, 64), color="black")
     else:
-        # Convert 2D list of (R,G,B) to PIL Image
         rows = len(pixels)
         cols = len(pixels[0])
         img = Image.new("RGB", (cols, rows))
@@ -1050,87 +1047,59 @@ def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0)
     return StreamingResponse(img_io, media_type="image/png")
 
 
-@app.get("/api/art")
-def get_art(url: str):
+@app.get("/api/mood-feeling-image")
+def get_mood_feeling_image(mood: str = "neutral"):
+    """Return the generated pixel-art feeling image for the given mood."""
     import os
     from fastapi.responses import FileResponse
-    # Remove file:// prefix if present
-    if url.startswith("file://"):
-        path = url[7:]
-    else:
-        path = url
-    if os.path.exists(path):
-        return FileResponse(path)
-    return {"error": "not found"}
+    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+    mood_clean = (mood or "neutral").lower().strip()
+    mood_dir = os.path.join(base_dir, mood_clean)
+    if os.path.isdir(mood_dir):
+        files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
+        if files:
+            return FileResponse(os.path.join(mood_dir, sorted(files)[0]))
+    fallback = os.path.join(base_dir, "neutral", "1.png")
+    if os.path.isfile(fallback):
+        return FileResponse(fallback)
+    return {"error": "feeling image not found"}
 
 
-@app.get("/api/mood-pixels")
-def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
-    from karaoke import moodart
-    class DummyAnalysis:
-        def __init__(self, energy, bpm):
-            self.energy = energy
-            self.bpm = bpm
-            self.brightness = energy
-            self.resolved_key = None
-            self.detected_key = None
-    
-    analysis = DummyAnalysis(energy, bpm)
-    pixels = moodart.generate(analysis, mood, 32, 32)
-    return {"pixels": pixels}
-
-
-@app.get("/api/mood-art")
-def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
-    import io, random, os
-    from fastapi.responses import StreamingResponse, FileResponse
-    from PIL import Image
+@app.get("/api/mood-cover-image")
+def get_mood_cover_image(mood: str = "neutral", art_url: Optional[str] = None):
+    """Return the active song album cover, or a mood-matched cached cover from the library."""
+    import os, random
+    from fastapi.responses import FileResponse, RedirectResponse
+    from urllib.parse import urlparse, unquote
     from karaoke import moodframe
-    
-    
-    
-    # 50% chance to use our custom AI generated pixel art library
-    use_custom = random.choice([True, False])
-    if use_custom:
-        base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
-        mood_dir = os.path.join(base_dir, mood)
-        if os.path.isdir(mood_dir):
-            files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
-            if files:
-                chosen = random.choice(files)
-                return FileResponse(os.path.join(mood_dir, chosen))
-                
-    class DummyAnalysis:
-        def __init__(self, energy, bpm):
-            self.energy = energy
-            self.bpm = bpm
-            self.brightness = energy
-            self.resolved_key = None
-            self.detected_key = None
 
-    analysis = DummyAnalysis(energy, bpm)
-    
-    # Get pixels from the Python TUI logic (random cover or generated gradient)
-    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, )
-    
-    # Fallback if no pixels returned
-    if not pixels:
-        img = Image.new("RGB", (64, 64), color="black")
-    else:
-        # Convert 2D list of (R,G,B) to PIL Image
-        rows = len(pixels)
-        cols = len(pixels[0])
-        img = Image.new("RGB", (cols, rows))
-        put_data = []
-        for r in range(rows):
-            for c in range(cols):
-                put_data.append(pixels[r][c])
-        img.putdata(put_data)
-        
-    img_io = io.BytesIO()
-    img.save(img_io, "PNG")
-    img_io.seek(0)
-    return StreamingResponse(img_io, media_type="image/png")
+    if art_url:
+        if art_url.startswith("file://"):
+            p = unquote(urlparse(art_url).path)
+            if os.path.exists(p):
+                return FileResponse(p)
+        elif os.path.exists(art_url):
+            return FileResponse(art_url)
+        elif art_url.startswith("http://") or art_url.startswith("https://"):
+            return RedirectResponse(art_url)
+
+    pool = moodframe.art_pool()
+    if pool:
+        try:
+            scored = moodframe.score_pool(pool, mood or "neutral", limit=12)
+            winner = moodframe.choose(scored)
+            if winner:
+                return FileResponse(str(winner[1]))
+            return FileResponse(str(random.choice(pool)))
+        except Exception:
+            return FileResponse(str(random.choice(pool)))
+
+    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+    fallback = os.path.join(base_dir, "neutral", "1.png")
+    if os.path.isfile(fallback):
+        return FileResponse(fallback)
+    return {"error": "no cover available"}
+
 
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
