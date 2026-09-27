@@ -11,22 +11,22 @@ Accessible at: **`http://localhost:8765/captions`**
 ```mermaid
 flowchart TD
     subgraph Desktop["Host Desktop (Linux / PipeWire)"]
-        Stream[Cycling Stream / Audio Playback] -->|Audio Out| Speaker[HiFi Speaker Sink]
-        Speaker -->|PipeWire Monitor| Mon[Speaker.monitor]
+        Stream["Cycling Stream / Audio Playback"] -->|"Audio Out"| Speaker["HiFi Speaker Sink"]
+        Speaker -->|"PipeWire Monitor"| Mon["Speaker.monitor"]
     end
 
     subgraph Service["karaoke-ctrl-api (Port 8765)"]
-        Mon -->|parec 16kHz s16le| Worker[live_caption.py Worker Thread]
-        Worker -->|RMS Gate > 0.005| VAD[Silero VAD]
-        VAD -->|Chunked Audio| Whisper[faster-whisper-small (language='nl')]
-        Whisper -->|Transcribed Text| Broadcaster[Subscribers & Rolling History]
-        Broadcaster -->|SSE /api/captions/stream| SSE[Server-Sent Events]
+        Mon -->|"parec 16kHz s16le"| Worker["live_caption.py Worker Thread"]
+        Worker -->|"RMS Gate > 0.005"| VAD["Silero VAD"]
+        VAD -->|"Chunked Audio"| Whisper["faster-whisper-small (language='nl')"]
+        Whisper -->|"Transcribed Text"| Broadcaster["Subscribers & Rolling History"]
+        Broadcaster -->|"SSE /api/captions/stream"| SSE["Server-Sent Events"]
     end
 
     subgraph Browser["Web Frontend (/captions)"]
-        SSE -->|EventSource onmessage| Stage[/tv Style Stage View]
-        Stage --> Center[Centered Active Line in Yellow/White/Cyan]
-        Stage --> Prev[Smooth Upward Transitions: prev-1, prev-2]
+        SSE -->|"EventSource onmessage"| Stage["/tv Style Stage View"]
+        Stage --> Center["Centered Active Line in Yellow/White/Cyan"]
+        Stage --> Prev["Smooth Upward Transitions: prev-1, prev-2"]
     end
 ```
 
