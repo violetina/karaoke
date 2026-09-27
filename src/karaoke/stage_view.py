@@ -471,6 +471,11 @@ def render_stage_html() -> str:
   </style>
 </head>
 <body>
+  <div id="mood-hud" style="position: absolute; top: 1.5rem; right: 1.5rem; display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem; z-index: 50;">
+    <canvas id="track-mood-art" width="64" height="64" style="width: 100px; height: 100px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); image-rendering: pixelated;"></canvas>
+    <div id="mood-sentiment" style="font-size: 0.85rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; color: #00f2fe; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"></div>
+  </div>
+  
   <div class="rhythm-bar" id="rhythm-bar"></div>
 
   <header>
@@ -861,7 +866,7 @@ def render_dancers_html() -> str:
 <body>
   <div id="hud">
     <img id="hud-art" src="" alt="Cover Art" />
-    <canvas id="hud-mood-art" width="32" height="32" style="display: none; image-rendering: pixelated; width: 120px; height: 120px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);"></canvas>
+    <canvas id="hud-mood-art" width="64" height="64" style="image-rendering: pixelated; width: 120px; height: 120px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);"></canvas>
     <div id="hud-sentiment" class="sentiment"></div>
   </div>
   <div id="stage-container">
@@ -942,15 +947,18 @@ def render_dancers_html() -> str:
       // Update HUD
       const hudArt = document.getElementById('hud-art');
       const hudMood = document.getElementById('hud-mood-art');
+      
       if (data.art_url) {
          let newSrc = '/api/art?url=' + encodeURIComponent(data.art_url);
          if (!hudArt.src.endsWith(newSrc)) {
              hudArt.src = newSrc;
          }
          hudArt.style.display = 'block';
-         hudMood.style.display = 'none';
-      } else if (data.title) {
+      } else {
          hudArt.style.display = 'none';
+      }
+      
+      if (data.title) {
          hudMood.style.display = 'block';
          let seed = data.title || "unknown";
          let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}`;
@@ -971,7 +979,6 @@ def render_dancers_html() -> str:
              img.src = newSrc;
          }
       } else {
-         hudArt.style.display = 'none';
          hudMood.style.display = 'none';
       }
       
