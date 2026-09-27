@@ -820,12 +820,46 @@ def render_dancers_html() -> str:
     }
     
     .hop .pose { transform: translateY(-15%); }
+    
+    #hud {
+      position: absolute;
+      top: 2rem;
+      right: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.5rem;
+      z-index: 50;
+      opacity: 0.8;
+      transition: opacity 0.3s;
+    }
+    #hud img {
+      width: 120px;
+      height: 120px;
+      border-radius: 8px;
+      object-fit: cover;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+      display: none;
+    }
+    #hud .sentiment {
+      font-size: 1rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+      color: #00f2fe;
+    }
+
     .fg-layer.together .hop .dancer-wrapper.inner.right .pose {
       transform: rotate(180deg) translateY(5%);
     }
   </style>
 </head>
 <body>
+  <div id="hud">
+    <img id="hud-art" src="" alt="Cover Art" />
+    <div id="hud-sentiment" class="sentiment"></div>
+  </div>
   <div id="stage-container">
     <div id="bg" class="layer bg-layer"></div>
     <div id="fg" class="layer fg-layer"></div>
@@ -900,6 +934,20 @@ def render_dancers_html() -> str:
       const beats = data.position_s / beatSec;
       const energy = data.energy !== null ? data.energy : 0.5;
       const mood = data.mood || 'neutral';
+      
+      // Update HUD
+      const hudArt = document.getElementById('hud-art');
+      if (data.art_url) {
+         hudArt.src = '/api/art?url=' + encodeURIComponent(data.art_url);
+         hudArt.style.display = 'block';
+      } else {
+         hudArt.style.display = 'none';
+      }
+      
+      const hudSentiment = document.getElementById('hud-sentiment');
+      const genreStr = data.genre ? data.genre : '';
+      hudSentiment.textContent = mood + (genreStr ? ' • ' + genreStr : '');
+
       
       // Determine style based on chords
       const isJazz = data.fifth_ratio > 0.4 && data.chord_cpm > 10;
