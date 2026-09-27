@@ -757,7 +757,7 @@ def render_coverart_html() -> str:
 
 def render_dancers_html() -> str:
     """Render a CSS/JS dancer visualization reacting to music metrics."""
-    return """<!DOCTYPE html>
+    return r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
