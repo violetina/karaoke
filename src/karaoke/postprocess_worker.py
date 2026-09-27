@@ -239,6 +239,10 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         # reproducibly, so it would not describe the row that was stored.
         report: dict = {}
         lyric_lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+        
+        # In case the plain lyrics were already doubled in the DB (or pasted as sync+plain)
+        from .ytmusic_lyrics import _undouble
+        lyric_lines = _undouble(lyric_lines)
         lrc = lines_to_lrc(align_lines(
             lyric_lines, words,
             total_duration=(meta["duration"] if meta else None),

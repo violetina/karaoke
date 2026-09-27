@@ -1392,7 +1392,7 @@ def align_plain_text_for_track(track_identifier: str, lyrics_or_file_path: str) 
         if not audio_path or not Path(audio_path).is_file():
             raise ValueError(f"Could not locate or download audio for '{artist} - {title}' to align against.")
 
-        ok = postprocess_worker._run_sync(track_id, Path(audio_path), conn)
+        ok = postprocess_worker.run_sync_logic(track_id, Path(audio_path), conn)
         if not ok:
             raise RuntimeError(f"Whisper alignment produced no output for '{artist} - {title}'")
 
