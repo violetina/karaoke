@@ -72,6 +72,8 @@ def get_stage_state() -> dict[str, Any]:
     bpm: Optional[float] = None
     key: Optional[str] = None
     energy: Optional[float] = None
+    chord_cpm: Optional[float] = None
+    fifth_ratio: Optional[float] = None
     track_id: Optional[int] = None
 
     if artist and title:
@@ -119,8 +121,27 @@ def get_stage_state() -> dict[str, Any]:
                             energy = float(row["energy"]) if row["energy"] is not None else None
                     except Exception:
                         pass
+
         except Exception as exc:
             log.debug("stage_view: db lookup failed: %s", exc)
+
+    if track_id is not None:
+        try:
+            from . import osclient
+            from .key_progression import PROGRESSION_INDEX, doc_id
+            from opensearchpy.exceptions import NotFoundError
+            client = osclient.client()
+            if client:
+                try:
+                    resp = client.get(index=PROGRESSION_INDEX, id=doc_id(track_id))
+                    if resp and resp.get("found"):
+                        src = resp["_source"]
+                        chord_cpm = src.get("chord_changes_per_minute")
+                        fifth_ratio = src.get("fifth_ratio")
+                except NotFoundError:
+                    pass
+        except Exception as exc:
+            log.debug("stage_view: opensearch chord lookup failed: %s", exc)
 
     # 3. Look up active upcoming queue items
     upcoming_queue: list[dict[str, Any]] = []
@@ -183,6 +204,8 @@ def get_stage_state() -> dict[str, Any]:
         "energy": energy,
         "mood": mood,
         "genre": genre,
+        "chord_cpm": chord_cpm,
+        "fifth_ratio": fifth_ratio,
         "active_line_index": active_line_idx,
         "next_line_in": next_line_in,
         "lines": lines,
@@ -699,6 +722,319 @@ def render_stage_html() -> str:
   </script>
 </body>
 </html>"""
+
+
+def render_coverart_html() -> str:
+    """Render a dedicated full-screen cover art view that pulses to the beat."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Karaoke Cover Art</title>
+  <style>
+    body {
+      margin: 0; padding: 0; background: #000; overflow: hidden;
+      display: flex; align-items: center; justify-content: center; height: 100vh;
+    }
+    #art {
+      width: 80vmin; height: 80vmin; object-fit: cover; border-radius: 2vmin;
+      box-shadow: 0 10px 50px rgba(0,0,0,0.8);
+      transition: transform 0.05s ease-out;
+    }
+    .pulse { transform: scale(1.05); }
+  </style>
+</head>
+<body>
+  <img id="art" src="" style="display:none;" />
+  <script>
+    const artEl = document.getElementById('art');
+    let lastPulse = 0;
+    
+    const es = new EventSource('/api/stage/stream');
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.status === 'error') return;
+      
+      if (data.art_url) {
+        if (artEl.src !== data.art_url) {
+          artEl.src = "/api/art?url=" + encodeURIComponent(data.art_url);
+          artEl.style.display = 'block';
+        }
+      } else {
+        artEl.style.display = 'none';
+      }
+      
+      if (data.status === 'Playing' && data.bpm) {
+        const beatSec = 60.0 / data.bpm;
+        const phase = (data.position_s / beatSec) % 1.0;
+        // Pulse at the start of the beat
+        if (phase < 0.15 && Date.now() - lastPulse > (beatSec * 0.8 * 1000)) {
+           artEl.classList.add('pulse');
+           lastPulse = Date.now();
+           setTimeout(() => artEl.classList.remove('pulse'), Math.min(150, beatSec * 500));
+        }
+      }
+    };
+  </script>
+</body>
+</html>
+"""
+
+def render_dancers_html() -> str:
+    """Render a CSS/JS dancer visualization reacting to music metrics."""
+    return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Karaoke Dancers</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0; padding: 0; background: #07090e; overflow: hidden;
+      display: flex; flex-direction: column; height: 100vh; color: #fff;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    #stage-container {
+      flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+      padding-bottom: 15vh; position: relative;
+    }
+    .layer {
+      position: absolute; left: 0; width: 100%; display: flex;
+      justify-content: center; align-items: flex-end; gap: 4vw;
+    }
+    .bg-layer { bottom: 35vh; opacity: 0.3; transform: scale(0.6); z-index: 1; gap: 2vw; }
+    .fg-layer { bottom: 10vh; z-index: 10; }
+    
+    .dancer-wrapper {
+      transition: transform 0.2s ease-out, margin 0.3s ease-in-out;
+      display: flex; align-items: flex-end; justify-content: center;
+    }
+    .pose {
+      white-space: pre; font-size: 1vw; line-height: 1; text-align: center;
+      transition: transform 0.08s ease-out, color 0.3s;
+    }
+    
+    /* Foreground styles */
+    .fg-layer .pose { font-size: 2vw; text-shadow: 0 0 20px rgba(0, 242, 254, 0.5); }
+    .jazz-style .fg-layer .pose { color: #ff007f; text-shadow: 0 0 20px rgba(255, 0, 127, 0.5); }
+    
+    /* Outer dancers pushed back */
+    .dancer-wrapper.outer {
+      transform: scale(0.55) translateY(-30px);
+      opacity: 0.7;
+      z-index: 5;
+      margin: 0 4vw; /* spacing from center */
+    }
+    
+    /* Inner duet dancers */
+    .dancer-wrapper.inner {
+      z-index: 15;
+      margin: 0 2vw;
+    }
+    
+    /* Together cue */
+    .fg-layer.together .dancer-wrapper.inner {
+      margin: 0 -4vw; /* Overlap them */
+    }
+    .fg-layer.together .dancer-wrapper.inner.right .pose {
+      transform: rotate(180deg) translateY(20%); /* Upside down and shifted to interlock */
+      color: #00f2fe;
+    }
+    .jazz-style .fg-layer.together .dancer-wrapper.inner.right .pose {
+      color: #ff007f;
+    }
+    
+    .hop .pose { transform: translateY(-15%); }
+    
+    #hud {
+      position: absolute;
+      top: 2rem;
+      right: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.5rem;
+      z-index: 50;
+      opacity: 0.8;
+      transition: opacity 0.3s;
+    }
+    #hud img {
+      width: 120px;
+      height: 120px;
+      border-radius: 8px;
+      object-fit: cover;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+      display: none;
+    }
+    #hud .sentiment {
+      font-size: 1rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+      color: #00f2fe;
+    }
+
+    .fg-layer.together .hop .dancer-wrapper.inner.right .pose {
+      transform: rotate(180deg) translateY(5%);
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <img id="hud-art" src="" alt="Cover Art" />
+    <div id="hud-sentiment" class="sentiment"></div>
+  </div>
+  <div id="stage-container">
+    <div id="bg" class="layer bg-layer"></div>
+    <div id="fg" class="layer fg-layer"></div>
+  </div>
+  <script>
+
+    let POSES = [
+      " o \n/|\\\n/ \\",
+      "\\o/\n | \n/ \\"
+    ];
+    let LIBRARY = null;
+    let ACTIVE_CLIP = null;
+    
+    // Fetch the dance pack
+    fetch('/api/dance-library')
+      .then(res => res.json())
+      .then(data => {
+         if (data.clips) {
+           LIBRARY = data;
+           console.log("Loaded dance library with", data.clip_count, "clips");
+         }
+      })
+      .catch(err => console.error("Failed to load dance library", err));
+      
+    function mirrorPose(pose) {
+      return pose.split('\n').map(line => {
+        return line.split('').reverse().map(c => {
+          if (c === '/') return '\\';
+          if (c === '\\') return '/';
+          return c;
+        }).join('');
+      }).join('\n');
+    }
+    
+    const bgContainer = document.getElementById('bg');
+    const fgContainer = document.getElementById('fg');
+    const stageContainer = document.getElementById('stage-container');
+    
+    const NUM_BG = 12;
+    const bgDancers = [];
+    const fgDancers = [];
+    
+    for(let i=0; i<NUM_BG; i++) {
+       let wrapper = document.createElement('div');
+       wrapper.className = 'dancer-wrapper';
+       let poseEl = document.createElement('div');
+       poseEl.className = 'pose';
+       wrapper.appendChild(poseEl);
+       bgContainer.appendChild(wrapper);
+       bgDancers.push({el: wrapper, poseEl: poseEl, phase: i * 1.618});
+    }
+    
+    // Foreground: 4 dancers (Outer, Inner Left, Inner Right, Outer)
+    const fgRoles = ['outer left', 'inner left', 'inner right', 'outer right'];
+    fgRoles.forEach((role, i) => {
+       let wrapper = document.createElement('div');
+       wrapper.className = 'dancer-wrapper ' + role;
+       let poseEl = document.createElement('div');
+       poseEl.className = 'pose';
+       wrapper.appendChild(poseEl);
+       fgContainer.appendChild(wrapper);
+       fgDancers.push({el: wrapper, poseEl: poseEl, phase: i * 1.618, isRight: role.includes('right')});
+    });
+    
+    const es = new EventSource('/api/stage/stream');
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.status !== 'Playing') return;
+      
+      const bpm = data.bpm || 90;
+      const beatSec = 60.0 / Math.max(bpm, 1);
+      const beats = data.position_s / beatSec;
+      const energy = data.energy !== null ? data.energy : 0.5;
+      const mood = data.mood || 'neutral';
+      
+      // Update HUD
+      const hudArt = document.getElementById('hud-art');
+      if (data.art_url) {
+         hudArt.src = '/api/art?url=' + encodeURIComponent(data.art_url);
+         hudArt.style.display = 'block';
+      } else {
+         hudArt.style.display = 'none';
+      }
+      
+      const hudSentiment = document.getElementById('hud-sentiment');
+      const genreStr = data.genre ? data.genre : '';
+      hudSentiment.textContent = mood + (genreStr ? ' • ' + genreStr : '');
+
+      
+      // Determine style based on chords
+      const isJazz = data.fifth_ratio > 0.4 && data.chord_cpm > 10;
+      if (isJazz) stageContainer.className = 'jazz-style';
+      else stageContainer.className = '';
+      
+      
+      let poseIndices = [0];
+      if (LIBRARY) {
+         // Find a solo clip that matches mood or feeling
+         // Map mood/energy to feeling
+         let targetFeeling = 'joyful';
+         if (energy > 0.8) targetFeeling = 'excited';
+         if (mood === 'tender') targetFeeling = 'tender';
+         if (mood === 'sad') targetFeeling = 'melancholy';
+         
+         const validClips = LIBRARY.clips.filter(c => c.mode === 'solo' && (c.feeling === targetFeeling || c.feeling === 'joyful'));
+         if (validClips.length > 0) {
+            ACTIVE_CLIP = validClips[0];
+            POSES = ACTIVE_CLIP.frames;
+            poseIndices = POSES.map((_, idx) => idx);
+         }
+      } else {
+         poseIndices = [0, 1];
+      }
+      
+      const speed = 1.0 + energy * 0.8;
+      
+      // Together cue: phrase > 0.70
+      const phrase = (beats / 8.0) % 1.0;
+      const isTogether = phrase > 0.70;
+      if (isTogether) fgContainer.classList.add('together');
+      else fgContainer.classList.remove('together');
+      
+// Update foreground
+      fgDancers.forEach((d, i) => {
+         const dBeats = beats * speed + d.phase;
+         const pidx = Math.floor(dBeats * 2) % poseIndices.length;
+         let poseStr = POSES[poseIndices[pidx] % POSES.length];
+         
+         // Inner right dancer mirrors the inner left dancer during duet
+         if (d.isRight) poseStr = mirrorPose(poseStr);
+         
+         d.poseEl.innerText = poseStr;
+         
+         const within = dBeats % 1.0;
+         if (bpm >= 100 && within < 0.2) d.el.classList.add('hop');
+         else d.el.classList.remove('hop');
+      });
+      
+      // Update background (slower, ambient)
+      bgDancers.forEach((d, i) => {
+         const dBeats = beats * 0.5 + d.phase;
+         const pidx = Math.floor(dBeats) % POSES.length;
+         d.poseEl.innerText = POSES[pidx];
+      });
+    };
+  </script>
+</body>
+</html>
+"""
+
 
 
 def render_mood_html() -> str:

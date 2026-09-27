@@ -938,9 +938,116 @@ def stage_mood():
 def stage_page() -> HTMLResponse:
     """Dedicated full-screen stage view for TV/prompter displays."""
     from . import stage_view
-
     return HTMLResponse(stage_view.render_stage_html())
 
+@app.get("/coverart", response_class=HTMLResponse)
+def coverart_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_coverart_html())
+
+@app.get("/dancers", response_class=HTMLResponse)
+def dancers_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_dancers_html())
+
+
+
+@app.get("/api/art")
+def get_art(url: str):
+    from fastapi.responses import FileResponse, RedirectResponse
+    from urllib.parse import urlparse, unquote
+    import os
+    
+    if not url:
+        return {"error": "no url"}
+        
+    if url.startswith("file://"):
+        parsed = urlparse(url)
+        path = unquote(parsed.path)
+        if os.path.exists(path):
+            return FileResponse(path)
+        return {"error": "not found"}
+    
+    return RedirectResponse(url)
+
+
+@app.get("/api/dance-library")
+def get_dance_library():
+    import os
+    from fastapi.responses import FileResponse
+    path = os.path.join(os.path.dirname(__file__), "dance-library.json")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/json")
+    return {"error": "not found"}
+
+
+@app.get("/api/mood-pixels")
+def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
+    from karaoke import moodart
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+    
+    analysis = DummyAnalysis(energy, bpm)
+    pixels = moodart.generate(analysis, mood, 32, 32)
+    return {"pixels": pixels}
+
+
+@app.get("/api/mood-art")
+def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
+    import io, random, os
+    from fastapi.responses import StreamingResponse, FileResponse
+    from PIL import Image
+    from karaoke import moodframe
+    
+    
+    
+    # 50% chance to use our custom AI generated pixel art library
+    use_custom = random.choice([True, False])
+    if use_custom:
+        base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+        mood_dir = os.path.join(base_dir, mood)
+        if os.path.isdir(mood_dir):
+            files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
+            if files:
+                chosen = random.choice(files)
+                return FileResponse(os.path.join(mood_dir, chosen))
+                
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+
+    analysis = DummyAnalysis(energy, bpm)
+    
+    # Get pixels from the Python TUI logic (random cover or generated gradient)
+    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64, )
+    
+    # Fallback if no pixels returned
+    if not pixels:
+        img = Image.new("RGB", (64, 64), color="black")
+    else:
+        # Convert 2D list of (R,G,B) to PIL Image
+        rows = len(pixels)
+        cols = len(pixels[0])
+        img = Image.new("RGB", (cols, rows))
+        put_data = []
+        for r in range(rows):
+            for c in range(cols):
+                put_data.append(pixels[r][c])
+        img.putdata(put_data)
+        
+    img_io = io.BytesIO()
+    img.save(img_io, "PNG")
+    img_io.seek(0)
+    return StreamingResponse(img_io, media_type="image/png")
 
 
 @app.get("/api/art")

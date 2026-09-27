@@ -4646,6 +4646,22 @@ class KaraokeTui(App):
                     genre = str(localcache.genre_for(self._current_track_id, conn) or "")
             except Exception:
                 pass
+                
+        chord_cpm = None
+        fifth_ratio = None
+        if self._current_track_id is not None:
+            try:
+                from . import osclient
+                from .key_progression import PROGRESSION_INDEX, doc_id
+                client = osclient.client()
+                if client:
+                    resp = client.get(index=PROGRESSION_INDEX, id=doc_id(self._current_track_id), ignore=404)
+                    if resp and resp.get("found"):
+                        src = resp["_source"]
+                        chord_cpm = src.get("chord_changes_per_minute")
+                        fifth_ratio = src.get("fifth_ratio")
+            except Exception:
+                pass
 
         if getattr(self, "_mood_pixels", None):
             try:
@@ -4684,6 +4700,8 @@ class KaraokeTui(App):
                     mood=profile.dominant,
                     genre=genre,
                     energy=energy,
+                    chord_cpm=chord_cpm,
+                    fifth_ratio=fifth_ratio,
                 )
                 visual_panel.update(dance)
             except Exception:
