@@ -8,6 +8,7 @@ version = "0.9.1"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
+    "pillow",
     "opensearch-py>=2.6",
     "sentence-transformers>=3.0",
     "mutagen>=1.47",
