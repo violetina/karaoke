@@ -933,8 +933,18 @@ def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
 def stage_page() -> HTMLResponse:
     """Dedicated full-screen stage view for TV/prompter displays."""
     from . import stage_view
-
     return HTMLResponse(stage_view.render_stage_html())
+
+@app.get("/coverart", response_class=HTMLResponse)
+def coverart_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_coverart_html())
+
+@app.get("/dancers", response_class=HTMLResponse)
+def dancers_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_dancers_html())
+
 
 
 @app.get("/api/stage/stream")
