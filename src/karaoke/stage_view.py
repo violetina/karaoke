@@ -448,11 +448,6 @@ def render_stage_html() -> str:
   </style>
 </head>
 <body>
-  <div id="mood-hud" style="position: absolute; top: 1.5rem; right: 1.5rem; display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem; z-index: 50;">
-    <canvas id="track-mood-art" width="64" height="64" style="width: 100px; height: 100px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); image-rendering: pixelated;"></canvas>
-    <div id="mood-sentiment" style="font-size: 0.85rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; color: #00f2fe; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"></div>
-  </div>
-  
   <div class="rhythm-bar" id="rhythm-bar"></div>
 
   <header>
@@ -551,10 +546,8 @@ def render_stage_html() -> str:
       document.getElementById("track-title").textContent = data.title;
       document.getElementById("track-artist").textContent = data.artist || "Unknown Artist";
 
-      // Album art or Mood pixels
+      // Album art
       const artImg = document.getElementById("track-art");
-      const moodCanvas = document.getElementById("track-mood-art");
-      
       if (data.art_url) {
         let newSrc = "/api/art?url=" + encodeURIComponent(data.art_url);
         // Only update if URL actually changed to prevent flicker
@@ -562,33 +555,8 @@ def render_stage_html() -> str:
             artImg.src = newSrc;
         }
         artImg.style.display = "block";
-        moodCanvas.style.display = "none";
-      } else if (data.title) {
-        artImg.style.display = "none";
-        moodCanvas.style.display = "block";
-        // Fetch mood pixels
-        let mood = data.mood || "neutral";
-        let seed = data.title || "unknown";
-        let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}`;
-        if (window.currentMoodUrl !== newSrc) {
-            window.currentMoodUrl = newSrc;
-            const img = new Image();
-            img.crossOrigin = "Anonymous";
-            img.onload = () => {
-                const offCtx = document.createElement('canvas').getContext('2d');
-                offCtx.canvas.width = 64;
-                offCtx.canvas.height = 64;
-                offCtx.drawImage(img, 0, 0, 64, 64);
-                window.moodBaseImageData = offCtx.getImageData(0, 0, 64, 64);
-                moodCanvas.width = 64;
-                moodCanvas.height = 64;
-                window.moodCanvasCtx = moodCanvas.getContext('2d');
-            };
-            img.src = newSrc;
-        }
       } else {
         artImg.style.display = "none";
-        moodCanvas.style.display = "none";
       }
 
       // Cast badge
@@ -640,48 +608,6 @@ def render_stage_html() -> str:
 
         // Update lyric lines
         renderLyrics(currentPos);
-        
-        // Flash mood art on beat (3-band EQ style)
-        const moodCanvas = document.getElementById("track-mood-art");
-        if (moodCanvas && moodCanvas.style.display !== 'none' && window.moodBaseImageData && window.moodCanvasCtx) {
-            const bpm = currentState.bpm || 120.0;
-            const beatDuration = 60.0 / Math.max(bpm, 1.0);
-            const beats = currentPos / beatDuration;
-            const withinBeat = beats % 1.0;
-            
-            const intensity = Math.max(0.0, 1.0 - (withinBeat * 1.5));
-            const outData = new ImageData(
-                new Uint8ClampedArray(window.moodBaseImageData.data),
-                window.moodBaseImageData.width,
-                window.moodBaseImageData.height
-            );
-            
-            const w = outData.width;
-            const h = outData.height;
-            for (let r = 0; r < h; r++) {
-                for (let c = 0; c < w; c++) {
-                    const progress = c / w;
-                    let boost = 0;
-                    if (progress < 0.33) {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 2.1));
-                    } else if (progress < 0.66) {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 3.7 + 1.0));
-                    } else {
-                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 5.3 + 2.0));
-                    }
-                    
-                    const i = (r * w + c) * 4;
-                    const red = window.moodBaseImageData.data[i];
-                    const green = window.moodBaseImageData.data[i+1];
-                    const blue = window.moodBaseImageData.data[i+2];
-                    
-                    outData.data[i] = Math.max(0, Math.min(255, red + (255 - red) * boost));
-                    outData.data[i+1] = Math.max(0, Math.min(255, green + (255 - green) * boost));
-                    outData.data[i+2] = Math.max(0, Math.min(255, blue + (255 - blue) * boost));
-                }
-            }
-            window.moodCanvasCtx.putImageData(outData, 0, 0);
-        }
       }
       requestAnimationFrame(renderLoop);
     }
@@ -753,3 +679,135 @@ def render_stage_html() -> str:
   </script>
 </body>
 </html>"""
+
+
+def render_mood_html() -> str:
+    """Render a full-screen mood visualizer page."""
+    return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Karaoke Mood Visualizer</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0; padding: 0; background: #07090e; overflow: hidden;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      height: 100vh; color: #fff; font-family: 'JetBrains Mono', monospace;
+    }
+    #mood-canvas {
+      width: 80vmin;
+      height: 80vmin;
+      image-rendering: pixelated;
+      border-radius: 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.8);
+      transition: opacity 0.5s;
+    }
+    #sentiment {
+      margin-top: 2rem;
+      font-size: 2rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 4px;
+      color: #00f2fe;
+      text-shadow: 0 4px 10px rgba(0,0,0,0.8);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="mood-canvas" width="64" height="64"></canvas>
+  <div id="sentiment">Waiting for music...</div>
+  <script>
+    const evtSource = new EventSource('/api/stage/stream');
+    let currentState = null;
+    let lastEventTime = performance.now();
+    let currentMoodUrl = null;
+    let moodBaseImageData = null;
+    const moodCanvas = document.getElementById('mood-canvas');
+    const moodCanvasCtx = moodCanvas.getContext('2d');
+    const sentimentDiv = document.getElementById('sentiment');
+    
+    evtSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      currentState = data;
+      lastEventTime = performance.now();
+      
+      if (data.status !== 'Playing') return;
+      
+      const mood = data.mood || 'neutral';
+      sentimentDiv.textContent = mood + (data.genre ? ' • ' + data.genre : '');
+      
+      if (data.title) {
+         let seed = data.title || "unknown";
+         let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}`;
+         if (currentMoodUrl !== newSrc) {
+             currentMoodUrl = newSrc;
+             const img = new Image();
+             img.crossOrigin = "Anonymous";
+             img.onload = () => {
+                 const offCtx = document.createElement('canvas').getContext('2d');
+                 offCtx.canvas.width = 64;
+                 offCtx.canvas.height = 64;
+                 offCtx.drawImage(img, 0, 0, 64, 64);
+                 moodBaseImageData = offCtx.getImageData(0, 0, 64, 64);
+             };
+             img.src = newSrc;
+         }
+      }
+    };
+    
+    function renderLoop(time) {
+        requestAnimationFrame(renderLoop);
+        if (!currentState || currentState.status !== 'Playing') return;
+        
+        let currentPos = currentState.position_s;
+        if (currentState.is_playing) {
+          const now = performance.now() / 1000;
+          currentPos += (now - lastEventTime / 1000);
+        }
+        
+        if (moodBaseImageData) {
+            const bpm = currentState.bpm || 120.0;
+            const beatDuration = 60.0 / Math.max(bpm, 1.0);
+            const beats = currentPos / beatDuration;
+            const withinBeat = beats % 1.0;
+            
+            const intensity = Math.max(0.0, 1.0 - (withinBeat * 1.5));
+            const outData = new ImageData(
+                new Uint8ClampedArray(moodBaseImageData.data),
+                moodBaseImageData.width,
+                moodBaseImageData.height
+            );
+            
+            const w = outData.width;
+            const h = outData.height;
+            for (let r = 0; r < h; r++) {
+                for (let c = 0; c < w; c++) {
+                    const progress = c / w;
+                    let boost = 0;
+                    if (progress < 0.33) {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 2.1));
+                    } else if (progress < 0.66) {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 3.7 + 1.0));
+                    } else {
+                        boost = intensity * (0.4 + 0.6 * Math.sin(currentPos * 5.3 + 2.0));
+                    }
+                    
+                    const i = (r * w + c) * 4;
+                    const red = moodBaseImageData.data[i];
+                    const green = moodBaseImageData.data[i+1];
+                    const blue = moodBaseImageData.data[i+2];
+                    
+                    outData.data[i] = Math.max(0, Math.min(255, red + (255 - red) * boost));
+                    outData.data[i+1] = Math.max(0, Math.min(255, green + (255 - green) * boost));
+                    outData.data[i+2] = Math.max(0, Math.min(255, blue + (255 - blue) * boost));
+                }
+            }
+            moodCanvasCtx.putImageData(outData, 0, 0);
+        }
+    }
+    requestAnimationFrame(renderLoop);
+  </script>
+</body>
+</html>"""
+
