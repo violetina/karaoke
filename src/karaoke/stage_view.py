@@ -171,6 +171,24 @@ def get_stage_state() -> dict[str, Any]:
         elif t > position_s:
             next_line_in = round(t - position_s, 1)
             break
+    
+    mood = "neutral"
+    genre = ""
+    if active_line_idx >= 0 and active_line_idx < len(lines):
+        try:
+            from karaoke.visuals import mood_of
+            mood = mood_of(lines[active_line_idx]["text"])
+        except Exception:
+            pass
+            
+    if track_id is not None:
+        try:
+            with localcache.connect() as conn:
+                g = localcache.genre_for(track_id, conn)
+                if g:
+                    genre = str(g)
+        except Exception:
+            pass
 
     return {
         "artist": artist,
@@ -184,6 +202,8 @@ def get_stage_state() -> dict[str, Any]:
         "bpm": bpm,
         "key": key,
         "energy": energy,
+        "mood": mood,
+        "genre": genre,
         "chord_cpm": chord_cpm,
         "fifth_ratio": fifth_ratio,
         "active_line_index": active_line_idx,
@@ -1068,8 +1088,11 @@ def render_mood_html() -> str:
       sentimentDiv.textContent = mood + (data.genre ? ' • ' + data.genre : '');
       
       if (data.title) {
-         let seed = data.title || "unknown";
-         let newSrc = `/api/mood-art?mood=${mood}&seed=${encodeURIComponent(seed)}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}`;
+         if (window.lastMood !== mood) {
+             window.lastMood = mood;
+             window.moodLoadId = Date.now();
+         }
+         let newSrc = `/api/mood-art?mood=${mood}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}&t=${window.moodLoadId}`;
          if (currentMoodUrl !== newSrc) {
              currentMoodUrl = newSrc;
              const img = new Image();
