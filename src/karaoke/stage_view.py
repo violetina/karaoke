@@ -758,8 +758,12 @@ def render_mood_html() -> str:
       sentimentDiv.textContent = mood + (data.genre ? ' • ' + data.genre : '');
       
       if (data.title) {
-         if (window.lastMood !== mood) {
+         const bpm = data.bpm || 120.0;
+         const currentBeat = data.position_s / (60.0 / Math.max(bpm, 1.0));
+         
+         if (window.lastMood !== mood || !window.lastMoodBeat || Math.abs(currentBeat - window.lastMoodBeat) >= 9.0) {
              window.lastMood = mood;
+             window.lastMoodBeat = currentBeat;
              window.moodLoadId = Date.now();
          }
          let newSrc = `/api/mood-art?mood=${mood}&energy=${data.energy !== null ? data.energy : 0.5}&bpm=${data.bpm || 120.0}&t=${window.moodLoadId}`;
