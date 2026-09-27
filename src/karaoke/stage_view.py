@@ -1115,7 +1115,8 @@ def render_mood_html() -> str:
       display: flex;
       align-items: center;
       gap: 16px;
-      z-index: 10;
+      z-index: 9999;
+      pointer-events: auto;
     }
 
     .hud-pill {
@@ -1130,12 +1131,15 @@ def render_mood_html() -> str:
       letter-spacing: 1px;
       box-shadow: 0 6px 20px rgba(0,0,0,0.5);
       backdrop-filter: blur(8px);
+      pointer-events: auto;
     }
 
     #mic-btn {
       cursor: pointer;
       transition: all 0.2s ease;
       color: #fff;
+      pointer-events: auto;
+      user-select: none;
     }
     #mic-btn:hover {
       border-color: var(--accent);
@@ -1263,7 +1267,13 @@ def render_mood_html() -> str:
     const micLabel = document.getElementById('mic-label');
     const vuBars = Array.from(document.querySelectorAll('.vu-bar'));
 
-    // Keyboard shortcut 'r' to capture room mic
+    // Click & keyboard shortcut 'r' to capture room mic
+    micBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMic();
+    });
+
     window.addEventListener('keydown', (e) => {
       if (e.key === 'r' || e.key === 'R') {
         if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
