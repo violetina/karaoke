@@ -951,6 +951,29 @@ def dancers_page() -> HTMLResponse:
     return HTMLResponse(stage_view.render_dancers_html())
 
 
+@app.get("/captions", response_class=HTMLResponse)
+def captions_page() -> HTMLResponse:
+    """Live Dutch auto-captions display page."""
+    from . import live_caption
+    return HTMLResponse(live_caption.render_captions_html())
+
+
+@app.get("/api/captions/stream")
+async def captions_stream():
+    """Real-time SSE stream of live transcribed auto-captions."""
+    from . import live_caption
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        live_caption.caption_event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 
 @app.get("/api/art")
 def get_art(url: str):
