@@ -549,7 +549,11 @@ def render_stage_html() -> str:
       // Album art
       const artImg = document.getElementById("track-art");
       if (data.art_url) {
-        artImg.src = data.art_url;
+        let newSrc = "/api/art?url=" + encodeURIComponent(data.art_url);
+        // Only update if URL actually changed to prevent flicker
+        if (!artImg.src.endsWith(newSrc)) {
+            artImg.src = newSrc;
+        }
         artImg.style.display = "block";
       } else {
         artImg.style.display = "none";

@@ -937,6 +937,20 @@ def stage_page() -> HTMLResponse:
     return HTMLResponse(stage_view.render_stage_html())
 
 
+
+@app.get("/api/art")
+def get_art(url: str):
+    import os
+    from fastapi.responses import FileResponse
+    # Remove file:// prefix if present
+    if url.startswith("file://"):
+        path = url[7:]
+    else:
+        path = url
+    if os.path.exists(path):
+        return FileResponse(path)
+    return {"error": "not found"}
+
 @app.get("/api/stage/stream")
 async def stage_stream() -> StreamingResponse:
     """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""
