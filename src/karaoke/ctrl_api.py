@@ -929,6 +929,11 @@ def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
 
 
 @app.get("/stage", response_class=HTMLResponse)
+@app.get("/mood", response_class=HTMLResponse)
+def stage_mood():
+    from karaoke.stage_view import render_mood_html
+    return render_mood_html()
+
 @app.get("/tv", response_class=HTMLResponse)
 def stage_page() -> HTMLResponse:
     """Dedicated full-screen stage view for TV/prompter displays."""
