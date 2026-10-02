@@ -84,12 +84,13 @@ class SentimentProfile:
 
 def analyze_sentiment(text: str) -> SentimentProfile:
     """Aggregate per-line moods across a lyric block into a profile."""
-    counts = {"happy": 0, "sad": 0, "angry": 0, "tender": 0}
+    from .sentiment import score_line_contextual
+    counts = {"happy": 0, "sad": 0, "angry": 0, "tender": 0, "cynical": 0}
     line_moods: list[str] = []
     for line in text.splitlines():
         if not line.strip():
             continue
-        s = score_line(line)
+        s = score_line_contextual(line)
         for mood in counts:
             counts[mood] += s.get(mood, 0)
         line_moods.append(mood_of(line))
@@ -544,6 +545,170 @@ def _mirror_ascii_pose(line: str) -> str:
     table = str.maketrans("/\\|_", "\\/|_")
     return line.translate(table)[::-1]
 
+
+# -- additional dance poses for variety on a wide floor --------------------
+
+_DANCE_POSES: list[list[str]] = [
+    # 0  standing
+    [" o ", "/|\\", "/ \\"],
+    # 1  arms up
+    ["\\o/", " | ", "/ \\"],
+    # 2  left lean
+    [" o ", "/| ", "/ \\"],
+    # 3  right lean
+    [" o", " |\\", "/ \\"],
+    # 4  disco point
+    [" o/", " | ", "/ \\"],
+    # 5  crouch
+    [" o ", " /\\", " ||"],
+    # 6  kick left
+    [" o ", "/|\\", "_/ "],
+    # 7  kick right
+    [" o ", "/|\\", " \\_"],
+    # 8  wave
+    ["~o~", " | ", "/ \\"],
+    # 9  jump (arms wide)
+    ["\\o/", " | ", "   "],
+    # 10 headbang
+    [" o ", "\\|/", "/ \\"],
+    # 11 dab
+    ["  o", " /|_", "/ \\ "],
+]
+
+
+def dance_floor_frame(
+    bpm: float | None,
+    elapsed: float,
+    *,
+    width: int = 80,
+    height: int = 12,
+    num_dancers: int = 4,
+    mood: str = "neutral",
+    genre: str = "",
+    energy: float | None = None,
+    chord_cpm: float | None = None,
+    fifth_ratio: float | None = None,
+) -> str:
+    """Render a two-tier dance floor (background + main stage) with ASCII dancers."""
+    import math
+    safe_bpm = float(bpm or 90.0)
+    beat = 60.0 / max(safe_bpm, 1.0)
+    beats = elapsed / beat
+    e = max(0.0, min(1.0, float(energy if energy is not None else 0.5)))
+    
+    is_jazz = False
+    if fifth_ratio is not None and chord_cpm is not None:
+        if fifth_ratio > 0.4 and chord_cpm > 10:
+            is_jazz = True
+
+    genre_text = (genre or "").casefold()
+    if any(w in genre_text for w in ("metal", "hardcore", "punk", "rock")):
+        pose_indices = [0, 1, 10, 6, 7, 2, 3, 8]
+        floor_char = "✷"
+    elif any(w in genre_text for w in ("electronic", "techno", "dance", "house", "edm")):
+        pose_indices = [1, 8, 9, 4, 5, 0, 3, 2]
+        floor_char = "·"
+    elif any(w in genre_text for w in ("hip hop", "hip-hop", "rap", "soul")):
+        pose_indices = [4, 11, 5, 0, 2, 3, 1, 6]
+        floor_char = "~"
+    elif mood == "tender":
+        pose_indices = [0, 2, 3, 1, 0, 3, 2, 1]
+        floor_char = "♡"
+    else:
+        pose_indices = [0, 1, 2, 3, 4, 6, 7, 8]
+        floor_char = "·"
+
+    if is_jazz:
+        pose_indices = [4, 9, 5, 0, 2, 3, 1, 6]
+        floor_char = "♬"
+        
+    speed = 1.0 + e * 0.8
+    
+    bg_dancers_count = max(4, int(width / 8))
+    fg_dancers_count = max(1, min(12, num_dancers))
+    
+    figure_w = 5
+    fg_slot_w = max(figure_w, width // max(1, fg_dancers_count))
+    bg_slot_w = max(figure_w, width // max(1, bg_dancers_count))
+    
+    # 4 rows tall: 1 row for hop clearance, 3 rows for body
+    total_dancer_h = 4
+    
+    def render_layer(d_count, slot_w, is_bg=False):
+        layer_canvas = [[" "] * width for _ in range(total_dancer_h)]
+        for d in range(d_count):
+            phase_offset = d * 1.618033988749895
+            d_beats = beats * (speed * 0.5 if is_bg else speed) + phase_offset
+            
+            if is_bg:
+                pidx = int(d_beats) % len(_DANCE_POSES)
+                pose = _DANCE_POSES[pidx]
+            else:
+                pidx = int(d_beats * 2) % len(pose_indices)
+                pose = _DANCE_POSES[pose_indices[pidx]]
+                if d % 2 == 1:
+                    pose = [_mirror_ascii_pose(line) for line in pose]
+            
+            is_airborne = False
+            if not is_bg and safe_bpm >= 100:
+                within = d_beats % 1.0
+                is_airborne = (within < 0.35)  # HOP_FRACTION
+            
+            col = d * slot_w + (slot_w - figure_w) // 2
+            
+            # y=0 is top, y=3 is bottom. pose is 3 rows.
+            # if airborne, draw pose at y=0,1,2. if not, draw at y=1,2,3
+            y_offset = 0 if is_airborne else 1
+            
+            for y_pose in range(3):
+                y_canvas = y_pose + y_offset
+                line = pose[y_pose]
+                for x in range(min(len(line), figure_w)):
+                    if col + x < width and line[x] != " ":
+                        layer_canvas[y_canvas][col + x] = line[x]
+                            
+        res = []
+        for y in range(total_dancer_h):
+            row_str = "".join(layer_canvas[y])
+            if is_bg:
+                row_str = f"[dim]{row_str}[/dim]"
+            res.append(row_str)
+        return res
+        
+    bg_rows = render_layer(bg_dancers_count, bg_slot_w, is_bg=True)
+    fg_rows = render_layer(fg_dancers_count, fg_slot_w, is_bg=False)
+    
+    # Pulsing floor pattern
+    floor_canvas = [" "] * width
+    pulse_phase = math.sin(beats * math.pi) * 0.5 + 0.5
+    for cx in range(width):
+        wave = math.sin(cx * 0.3 + elapsed * 2.0) * 0.5 + 0.5
+        if wave > (1.0 - pulse_phase * e):
+            floor_canvas[cx] = floor_char
+            
+    floor_line = "".join(floor_canvas)
+    if is_jazz:
+        floor_line = f"[bold magenta]{floor_line}[/bold magenta]"
+    elif any(w in genre_text for w in ("metal", "hardcore")):
+        floor_line = f"[bold red]{floor_line}[/bold red]"
+    elif any(w in genre_text for w in ("electronic", "techno")):
+        floor_line = f"[bold cyan]{floor_line}[/bold cyan]"
+        
+    tempo = tempo_word(safe_bpm)
+    status = f"  ♫ {safe_bpm:.0f} bpm · {tempo} · {num_dancers} dancer{'s' if num_dancers != 1 else ''}"
+
+    lines = []
+    # add some padding at the top
+    pad_h = max(0, height - (total_dancer_h * 2 + 2)) // 2
+    for _ in range(pad_h):
+        lines.append(" " * width)
+        
+    lines.extend(bg_rows)
+    lines.extend(fg_rows)
+    lines.append(floor_line)
+    lines.append(status)
+    
+    return "\n".join(lines)
 
 
 def animate_mood_pixels(pixels: list[list[tuple[int, int, int]]], elapsed: float, bpm: float | None):

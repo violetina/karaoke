@@ -2,7 +2,7 @@
 
 Karaoke now has one operational database and one optional derived index:
 
-- **SQLite** (`~/.local/share/karaoke/karaoke.db`) is the source of truth for playback, source URLs, lyrics cache, stats, and backfill gaps.
+- **PostgreSQL** (`KARAOKE_PG_URL`) is the source of truth for playback, source URLs, lyrics cache, stats, and backfill gaps (see [Database backend](database.md)).
 - **OpenSearch** (`tracks`, on the kind cluster) is a rebuildable derived index for semantic/vector search and future training features.
 
 This page covers the OpenSearch index. For the SQLite schema see [Local cache and stats](local-cache-and-stats.md). For the re-index/training direction see [Vector search and training plan](vector-search-plan.md).

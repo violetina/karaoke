@@ -34,12 +34,12 @@ Follow live with `tail -f <logfile>`.
 The database is the source of truth for how far ingestion has got. Quick counts:
 
 ```bash
-sqlite3 ~/.local/share/karaoke/karaoke.db "
-  SELECT 'tracks',        count(*) FROM tracks
-  UNION ALL SELECT 'local source',   count(DISTINCT track_id) FROM sources WHERE kind='local'
+psql "$KARAOKE_PG_URL" -c "
+  SELECT 'tracks' AS metric, count(*) FROM tracks
+  UNION ALL SELECT 'local source', count(DISTINCT track_id) FROM sources WHERE kind='local'
   UNION ALL SELECT 'youtube source', count(DISTINCT track_id) FROM sources WHERE kind IN ('youtube','youtube_music')
   UNION ALL SELECT 'spotify source', count(DISTINCT track_id) FROM sources WHERE kind='spotify'
-  UNION ALL SELECT 'analyzed',       count(*) FROM track_analysis;"
+  UNION ALL SELECT 'analyzed', count(*) FROM track_analysis;"
 ```
 
 Progress against the collection on disk (how many files still need a local
@@ -90,6 +90,14 @@ With WAL mode active, lock-skips are rare on the retry.
 
 Run the retry pass **after** the first pass finishes, so the two do not compete
 for the writer.
+
+### Running from Admin TUI
+
+The Admin TUI (`python -m karaoke.admin_tui`) exposes these operations directly in the **File Ingestion & Folder Scan** panel:
+
+- **`Retry Skipped (p)`** (`btn-retry-skipped`): Ingests skipped files for the specified or default collection folder, updating OpenSearch vectors on completion.
+- **`Dry Run Check (d)`** (`btn-retry-dryrun`): Rapidly previews how many on-disk files are missing from SQLite without modifying anything.
+- **`Index YT Cache (y)`** (`btn-index-cache`): Scans downloaded YouTube cache files (`~/.local/share/karaoke/youtube/`) and adds unindexed tracks to SQLite.
 
 ### Files that still won't ingest
 

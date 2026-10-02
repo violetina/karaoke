@@ -107,7 +107,7 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
             FROM tracks t
             JOIN sources s ON s.track_id = t.track_id AND s.kind IN ('youtube', 'youtube_music')
             JOIN lyrics l  ON l.track_id = t.track_id AND l.kind = 'approved'
-            WHERE t.track_id = ?
+            WHERE t.track_id = %s
             LIMIT 1
             """,
             (track_id,),
@@ -118,6 +118,15 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
             return "no-source"
         res = upgrade_track(row, conn, delay=3.0, cookies_from_browser=cookies_from_browser)
         log.info("postprocess: timings upgrade for track %s -> %s", track_id, res.status)
+        if res.status == "no-captions":
+            try:
+                conn.execute(
+                    "UPDATE lyrics SET source = 'no_youtube_captions' WHERE track_id = %s AND kind = 'approved'",
+                    (track_id,),
+                )
+                conn.commit()
+            except Exception:
+                pass
         return res.status
     except Exception as exc:
         if "rate limited" in str(exc).lower():
@@ -143,8 +152,9 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
     from .whisper_sync import lines_to_lrc, transcribe_to_words
 
     row = conn.execute(
-        "SELECT plain_lyrics, source FROM lyrics"
-        " WHERE track_id = ? AND kind = 'approved'", (track_id,)).fetchone()
+        "SELECT t.artist, t.title, l.plain_lyrics, l.source FROM tracks t"
+        " JOIN lyrics l ON l.track_id = t.track_id"
+        " WHERE t.track_id = %s AND l.kind = 'approved'", (track_id,)).fetchone()
     plain = (row["plain_lyrics"] or "").strip() if row else ""
     if not plain:
         return False
@@ -184,6 +194,20 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         return False
 
     try:
+        from .lyrics import fetch_lrclib
+        ly = fetch_lrclib(row["artist"], row["title"], duration=dur)
+        if ly.has_synced:
+            log.info("postprocess: upgraded track %s to synced via online lyrics", track_id)
+            conn.execute(
+                "UPDATE lyrics SET synced_lyrics = %s, source = %s"
+                " WHERE track_id = %s AND kind = 'approved'",
+                (ly.synced_raw, ly.source, track_id))
+            conn.commit()
+            return True
+    except Exception:
+        log.warning("postprocess: fetch_lrclib failed for track %s", track_id, exc_info=True)
+
+    try:
         # Tell Whisper the language rather than letting it detect one from the
         # opening of the audio, which on music is regularly an instrumental
         # intro. The lyrics are already in hand, so the answer is knowable --
@@ -203,7 +227,7 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         meta = conn.execute(
             "SELECT t.duration, a.bpm FROM tracks t"
             " LEFT JOIN track_analysis a ON a.track_id = t.track_id"
-            " WHERE t.track_id = ?", (track_id,)).fetchone()
+            " WHERE t.track_id = %s", (track_id,)).fetchone()
         # The tempo is what turns a plausible-looking timestamp into a
         # musically placed one: it sets the beat grid the lines snap to and the
         # bar window that identifies an instrumental break.
@@ -215,6 +239,10 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         # reproducibly, so it would not describe the row that was stored.
         report: dict = {}
         lyric_lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+        
+        # In case the plain lyrics were already doubled in the DB (or pasted as sync+plain)
+        from .ytmusic_lyrics import _undouble
+        lyric_lines = _undouble(lyric_lines)
         lrc = lines_to_lrc(align_lines(
             lyric_lines, words,
             total_duration=(meta["duration"] if meta else None),
@@ -243,8 +271,8 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         return False
 
     conn.execute(
-        "UPDATE lyrics SET synced_lyrics = ?, source = ?"
-        " WHERE track_id = ? AND kind = 'approved'",
+        "UPDATE lyrics SET synced_lyrics = %s, source = %s"
+        " WHERE track_id = %s AND kind = 'approved'",
         (lrc, synced_source, track_id))
     conn.commit()
 
@@ -269,18 +297,53 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
 def run_vectors_logic(track_id: int, conn) -> bool:
     """Rebuild audio/lyrics vectors for a track."""
     try:
-        from .vector_index import rebuild_from_sqlite
-        # rebuild_from_sqlite is designed to be idempotent and can be run safely
-        # even if only one track's vectors are missing.
-        # We pass an explicit db_path and dry_run=True to ensure it's isolated
-        # for this single track and doesn't conflict with a global rebuild.
-        # This will need refinement once OpenSearch integration is more mature.
-        # For now, it just ensures the vector_index is updated.
-        rebuild_from_sqlite(db_path=None, dry_run=False, track_id=track_id) # Call the relevant logic here
+        from .vector_index import index_track
+        # One document, not a library rebuild: this runs per track at the end of
+        # a post-processing chain. The previous call passed track_id to
+        # rebuild_from_sqlite, which takes no such argument -- it raised
+        # TypeError on every invocation.
+        if not index_track(track_id, conn=conn):
+            log.warning("postprocess: no vector doc written for track %s", track_id)
+            return False
         log.info("postprocess: rebuilt vectors for track %s", track_id)
         return True
     except Exception:
         log.exception("postprocess: failed to rebuild vectors for track %s", track_id)
+        return False
+
+
+def run_harmony_logic(track_id: int, audio_path: Path, conn,
+                      artist: str = "", title: str = "") -> bool:
+    """Derive key movement and chord motion for a track and store them.
+
+    The same pair folder_scan produces: a Progression describes how the key
+    moves across the track, chord detection describes the harmony inside those
+    regions. They answer different questions, so a failure to detect chords
+    still stores the progression.
+    """
+    try:
+        from . import chords, key_progression
+
+        prog = key_progression.analyse(str(audio_path))
+        if not prog:
+            log.warning("postprocess: no progression for track %s (%s)",
+                        track_id, audio_path)
+            return False
+        chord_analysis = None
+        try:
+            chord_analysis = chords.detect(str(audio_path))
+        except Exception:
+            log.debug("postprocess: chord detection failed for track %s",
+                      track_id, exc_info=True)
+        if not key_progression.store(track_id, prog, artist=artist, title=title,
+                                     chords=chord_analysis):
+            log.warning("postprocess: could not store progression for track %s", track_id)
+            return False
+        log.info("postprocess: analysed harmony for track %s (chords=%s)",
+                 track_id, chord_analysis is not None)
+        return True
+    except Exception:
+        log.exception("postprocess: harmony analysis failed for track %s", track_id)
         return False
 
 

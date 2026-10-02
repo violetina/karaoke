@@ -80,22 +80,19 @@ _ATTRIBUTION_LINE = re.compile(r"^\s*(?:bron|source|quelle|fuente)\s*[:\-]",
 
 def _undouble(lines: list[str]) -> list[str]:
     """Collapse a line list that repeats itself wholesale.
-
-    The panel can be read mid-render and yield the lyrics twice over. The
-    result looks complete -- and the doubling is invisible in the text -- but
-    only the first copy is ever sung, so the second is left unanchored and gets
-    crammed into the closing seconds. Observed on a 21-line song stored as 42.
-
-    Only an *exact* whole-list repetition is collapsed. Songs legitimately
-    repeat a chorus, so anything short of the entire lyric appearing twice is
-    left alone.
+    
+    Tolerates empty lines when checking for exact duplication.
     """
-    n = len(lines)
-    for parts in (2, 3):
+    stripped = [l for l in lines if l.strip()]
+    if not stripped:
+        return lines
+        
+    n = len(stripped)
+    for parts in (2, 3, 4):
         if n >= parts * 2 and n % parts == 0:
             chunk = n // parts
-            first = lines[:chunk]
-            if all(lines[i * chunk:(i + 1) * chunk] == first
+            first = stripped[:chunk]
+            if all(stripped[i * chunk:(i + 1) * chunk] == first
                    for i in range(1, parts)):
                 return first
     return lines

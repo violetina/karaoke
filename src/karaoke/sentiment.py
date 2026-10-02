@@ -40,11 +40,52 @@ _TENDER = {
     "warm", "warmth", "close", "darling", "baby", "honey", "dear", "sweetheart",
     "forever", "always", "care", "caring", "soul", "soulmate", "angel",
 }
+_CYNICAL = {
+    "fake", "lying", "liar", "lies", "cheat", "cheating", "greedy", "money",
+    "plastic", "cynical", "cynic", "bitter", "fool", "fools", "joke", "tricked",
+    "trap", "trapped", "hollow", "sell", "sold", "puppet", "mask", "pretend",
+    "sham", "game", "slaves", "waste", "useless", "hypocrite", "disguise",
+}
+_NEGATORS = {"no", "not", "never", "don't", "dont", "cannot", "can't", "cant", "without", "hardly", "barely"}
 
 _WORD_RE = re.compile(r"[a-z']+")
 
 # All valid moods; "neutral" is the fallback used for the intro / no clear signal.
-MOODS = ("happy", "sad", "angry", "tender", "neutral")
+MOODS = ("happy", "sad", "angry", "tender", "cynical", "neutral")
+
+
+def score_line_contextual(text: str) -> dict[str, int]:
+    """Count mood-word hits with contextual negation and cynicism detection."""
+    words = _WORD_RE.findall((text or "").lower())
+    s = {"happy": 0, "sad": 0, "angry": 0, "tender": 0, "cynical": 0}
+    negated = False
+    for i, w in enumerate(words):
+        if w in _NEGATORS:
+            negated = True
+            continue
+        
+        # Check target bucket
+        if w in _CYNICAL:
+            s["cynical"] += 1
+        elif w in _ANGER:
+            s["angry"] += 1
+        elif w in _TENDER:
+            if negated:
+                s["sad"] += 1  # e.g., "no love", "never tender" -> sad
+            else:
+                s["tender"] += 1
+        elif w in _POSITIVE:
+            if negated:
+                s["cynical"] += 1 # e.g. "not happy", "never bright" -> cynical
+            else:
+                s["happy"] += 1
+        elif w in _NEGATIVE:
+            if negated:
+                s["happy"] += 1  # e.g. "no tears", "not sad" -> happy
+            else:
+                s["sad"] += 1
+        negated = False
+    return s
 
 
 def score_line(text: str) -> dict[str, int]:

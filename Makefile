@@ -33,7 +33,7 @@ K8S_NAMESPACE ?= karaoke
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-audit docs-sync docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
 		test test-audio mic-test stats clean clean-tools browse tui browse-log dev \
-        install-audio analyze api ctrl-api \
+        install-audio analyze api ctrl-api mcp dj \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run vector-status folder-scan \
@@ -155,8 +155,13 @@ recordings: ## List record-mode sessions
 recording-show: ## Show a recording's derived track list (ID=...)
 	$(PYTHON) -m karaoke.recording_worker --show $(ID)
 
-recording-analyse: ## Decompile a recording into the DB (ID=...); needs the audio venv
-	PYTHONPATH=src $(AUDIO_PY) -m karaoke.recording_worker --analyse $(ID)
+# Runs in the main venv, not $(AUDIO_VENV). This writes to Postgres, and the
+# audio venv is a DSP-only sidecar with no psycopg -- routing a database entry
+# point through it failed at import with "No module named 'psycopg'".
+# analyze_audio already delegates to the audio venv by itself when the calling
+# interpreter lacks essentia, so nothing is lost by calling this normally.
+recording-analyse: ## Decompile a recording into the DB (ID=...)
+	$(PYTHON) -m karaoke.recording_worker --analyse $(ID)
 
 analyze: ## Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 	$(PYTHON) -c "import sys; from karaoke.cli import analyze_main; sys.exit(analyze_main(['--file','$(FILE)','--artist','$(ARTIST)','--title','$(TITLE)']))"
@@ -204,6 +209,12 @@ ctrl-api: ## Launch the host-side control API (playback; needs a desktop session
 dev: ## Launch both APIs and the Angular dashboard
 	$(PYTHON) scripts/dev.py
 
+mcp: ## Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
+	$(PYTHON) -m karaoke.mcp_server --host 0.0.0.0 --port 8888
+
+dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
+	$(PYTHON) -m karaoke.dj_chat
+
 k8s-build: ## Build the library API container image
 	# --network=host: the default docker bridge has no working DNS on this host,
 	# so pip cannot resolve pypi.org during the build without it.
@@ -236,6 +247,41 @@ k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
 
+yt-playlist-ingest: ## Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
+	$(PYTHON) scripts/yt_playlist_ingest.py $(PLAYLIST) \
+	  $(if $(DRY_RUN),--dry-run,) \
+	  $(if $(SKIP_CACHED),--skip-cached,) \
+	  $(if $(NO_VECTORS),--no-vectors,) \
+	  $(if $(FORCE_HARMONY),--force-harmony,) \
+	  $(if $(LIMIT),--limit $(LIMIT),)
+
+RADIO_PLAYLIST_ID := PLA9C-EXX-pyg
+
+radio-playlist: ## Push radio-discovered songs to the 'Karaoke: Radio Discoveries' YTMusic playlist
+	$(PYTHON) - <<'EOF'
+	from karaoke import localcache
+	from karaoke.ytmusic_client import YTMusicClient
+	from karaoke.ytmusic_playlist import build_or_sync_ytmusic_playlist, Candidate, extract_video_id
+	conn = localcache.connect()
+	rows = conn.execute("""
+	    SELECT DISTINCT ON (lower(m.artist), lower(m.title)) m.artist, m.title, s.url
+	    FROM recording_marks m
+	    JOIN tracks t ON lower(t.artist)=lower(m.artist) AND lower(t.title)=lower(m.title)
+	    JOIN sources s ON s.track_id = t.track_id AND s.url LIKE '%youtu%'
+	    WHERE m.artist IS NOT NULL AND m.title IS NOT NULL AND m.artist != '' AND m.title != ''
+	    ORDER BY lower(m.artist), lower(m.title)
+	""").fetchall()
+	conn.close()
+	candidates = [Candidate(artist=r['artist'], title=r['title'], video_id=extract_video_id(r['url'] or ''), resolved_by='stored') for r in rows if extract_video_id(r['url'] or '')]
+	result = build_or_sync_ytmusic_playlist(candidates=candidates, name="Karaoke: Radio Discoveries", description="Songs shazam-identified from radio / mic sessions.", client=YTMusicClient())
+	print(f"✓ {result.name}  id={result.playlist_id}  added={result.added}  already={result.already_present}")
+	EOF
+
+radio-playlist-ingest: ## Download + full pipeline (CLAP/chords) for the Radio Discoveries playlist [FORCE_HARMONY=1]
+	$(PYTHON) scripts/yt_playlist_ingest.py $(RADIO_PLAYLIST_ID) \
+	  --skip-cached \
+	  $(if $(FORCE_HARMONY),--force-harmony,)
+
 folder-scan: ## Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 	$(PYTHON) -c "import sys; from karaoke.cli import folder_scan_main; args=['$(DIR)']+(['--limit','$(LIMIT)'] if '$(LIMIT)' else [])+(['--dry-run'] if '$(DRY_RUN)' else []); raise SystemExit(folder_scan_main(args))"
 
@@ -256,7 +302,7 @@ postprocess-worker: ## Run the host-side post-processing worker (analysis + word
 celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
 		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
-		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2} \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-6} \
 		--events
 
 celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
@@ -296,6 +342,11 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-kiosk.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-webtui.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-relay.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-mcp.service $(HOME)/.config/systemd/user/
+	# karaoke.target Wants this, so a missing symlink makes the target fail to
+	# pull it in. It was linked by hand on the live host and absent here.
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-obot-tunnel.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess@.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-postprocess.slice $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-healthcheck.service $(HOME)/.config/systemd/user/
@@ -307,7 +358,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower karaoke-kiosk karaoke-webtui 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower karaoke-kiosk karaoke-webtui karaoke-relay 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \

@@ -175,3 +175,23 @@ def test_record_start_reuses_active_session(ctrl):
         assert body["status"] == "recording"
         assert body["recording_id"] == 42
         assert body["reused"] is True
+
+
+def test_player_queue_get(ctrl):
+    with patch("karaoke.player_open.cdp_get_queue_state", return_value={"count": 2, "items": [{"index": 0, "title": "Song 1"}]}):
+        res = ctrl.get("/api/players/queue").json()
+        assert res["count"] == 2
+        assert res["items"][0]["title"] == "Song 1"
+
+
+def test_player_queue_post(ctrl):
+    with patch("karaoke.player_open.cdp_queue_next_video", return_value=True) as mock_next, \
+         patch("karaoke.player_open.cdp_queue_add_video", return_value=True) as mock_add:
+        res1 = ctrl.post("/api/players/queue", json={"video_id": "dQw4w9WgXcQ", "position": "next"}).json()
+        assert res1["status"] == "ok"
+        mock_next.assert_called_once_with("dQw4w9WgXcQ")
+
+        res2 = ctrl.post("/api/players/queue", json={"video_id": "dQw4w9WgXcQ", "position": "end"}).json()
+        assert res2["status"] == "ok"
+        mock_add.assert_called_once_with("dQw4w9WgXcQ")
+

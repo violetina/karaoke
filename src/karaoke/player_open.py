@@ -355,6 +355,22 @@ def try_chrome_cdp_navigate(url: str) -> bool:
     return False
 
 
+def cdp_ensure_play() -> bool:
+    """Ensure playback is active on the kiosk browser over CDP (never pause)."""
+    js = """(() => {
+      const v = document.querySelector('video');
+      if (v) {
+        if (v.paused) v.play().catch(() => {});
+        return true;
+      }
+      const playBtn = document.querySelector('#play-pause-button[aria-label*="Play" i], .play-pause-button[aria-label*="Play" i], button[aria-label*="Play" i], button[aria-label*="Afspelen" i]');
+      if (playBtn) { playBtn.click(); return true; }
+      return false;
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
 def cdp_play_pause() -> bool:
     """Toggle play/pause on the kiosk browser over CDP."""
     js = """(() => {
@@ -443,6 +459,99 @@ def cdp_toggle_repeat() -> bool:
     })()"""
     reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
     return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_queue_next_video(video_id: str) -> bool:
+    """Insert a video ID directly as 'Play Next' in YouTube Music's web player queue via CDP."""
+    if not video_id:
+        return False
+    clean_vid = video_id.strip()
+    js = f"""(() => {{
+      const vid = '{clean_vid}';
+      // Method 1: Dispatch YouTube Music's internal web component action
+      try {{
+        const app = document.querySelector('ytmusic-app');
+        if (app && app.dispatchEvent) {{
+          app.dispatchEvent(new CustomEvent('yt-action', {{
+            bubbles: true,
+            composed: true,
+            detail: {{
+              actionName: 'ytmusic_add_to_queue',
+              args: [{{ videoId: vid, insertPosition: 'INSERT_AFTER_CURRENT' }}]
+            }}
+          }}));
+          return true;
+        }}
+      }} catch(e) {{}}
+
+      // Method 2: Custom queue API dispatch fallback
+      try {{
+        window.dispatchEvent(new CustomEvent('yt-navigate-queue', {{
+          detail: {{ videoId: vid, playNext: true }}
+        }}));
+        return true;
+      }} catch(e) {{}}
+      return false;
+    }})()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_queue_add_video(video_id: str) -> bool:
+    """Append a video ID to the end of YouTube Music's web player queue via CDP."""
+    if not video_id:
+        return False
+    clean_vid = video_id.strip()
+    js = f"""(() => {{
+      const vid = '{clean_vid}';
+      try {{
+        const app = document.querySelector('ytmusic-app');
+        if (app && app.dispatchEvent) {{
+          app.dispatchEvent(new CustomEvent('yt-action', {{
+            bubbles: true,
+            composed: true,
+            detail: {{
+              actionName: 'ytmusic_add_to_queue',
+              args: [{{ videoId: vid, insertPosition: 'INSERT_AT_END' }}]
+            }}
+          }}));
+          return true;
+        }}
+      }} catch(e) {{}}
+      return false;
+    }})()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
+
+
+def cdp_get_queue_state() -> dict:
+    """Inspect YouTube Music's active in-browser queue over CDP."""
+    js = """(() => {
+      const items = Array.from(document.querySelectorAll('ytmusic-player-queue-item'));
+      const state = items.map((el, idx) => {
+        const titleEl = el.querySelector('.song-title, .title');
+        const artistEl = el.querySelector('.byline, .author');
+        const isSelected = el.hasAttribute('selected') || el.classList.contains('selected');
+        return {
+          index: idx,
+          selected: isSelected,
+          title: titleEl ? titleEl.innerText.strip() : '',
+          artist: artistEl ? artistEl.innerText.strip() : ''
+        };
+      });
+      return JSON.stringify({count: items.length, items: state});
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    if reply and "result" in reply:
+        import json
+        raw = reply.get("result", {}).get("result", {}).get("value")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                pass
+    return {"count": 0, "items": []}
+
 
 
 # Reads the page's own <video> element. MPRIS reports a position but not
