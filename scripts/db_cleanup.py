@@ -448,6 +448,75 @@ def find_track_id_by_artist_title(artist: str, title: str, conn) -> Optional[int
     return row["track_id"] if row else None
 
 
+def fix_doubled_lyrics(conn, dry_run: bool = False) -> int:
+    """Find and collapse lyrics whose plain or synced text was duplicated wholesale."""
+    from karaoke.ytmusic_lyrics import _undouble
+
+    def undouble_synced(synced: str) -> str:
+        if not synced:
+            return synced
+        lines = synced.splitlines()
+        parsed = []
+        for l in lines:
+            m = re.match(r'^(\[\d+:\d+(?:\.\d+)?\]|\<\d+:\d+(?:\.\d+)?\>)(.*)$', l.strip())
+            if m:
+                parsed.append((m.group(1), m.group(2)))
+            else:
+                parsed.append(('', l))
+        
+        text_lines = [p[1].strip() for p in parsed if p[1].strip()]
+        if not text_lines:
+            return synced
+        
+        undoubled_text = _undouble(text_lines)
+        if len(undoubled_text) < len(text_lines):
+            n = len(undoubled_text)
+            kept_parsed = []
+            count = 0
+            for prefix, text in parsed:
+                if text.strip():
+                    if count < n:
+                        kept_parsed.append(f'{prefix}{text}')
+                        count += 1
+                else:
+                    if count <= n:
+                        kept_parsed.append(f'{prefix}{text}')
+            return '\n'.join(kept_parsed)
+        return synced
+
+    def undouble_plain(plain: str) -> str:
+        if not plain:
+            return plain
+        lines = plain.splitlines()
+        text_lines = [l.strip() for l in lines if l.strip()]
+        if not text_lines:
+            return plain
+        undoubled_text = _undouble(text_lines)
+        if len(undoubled_text) < len(text_lines):
+            return '\n'.join(undoubled_text)
+        return plain
+
+    cur = conn.cursor()
+    cur.execute("SELECT lyric_id, track_id, plain_lyrics, synced_lyrics FROM lyrics WHERE kind = 'approved'")
+    rows = cur.fetchall()
+
+    fixed = 0
+    for r in rows:
+        p_orig = r['plain_lyrics'] or ''
+        s_orig = r['synced_lyrics'] or ''
+        p_new = undouble_plain(p_orig)
+        s_new = undouble_synced(s_orig)
+        if p_new != p_orig or s_new != s_orig:
+            fixed += 1
+            if not dry_run:
+                cur.execute(
+                    "UPDATE lyrics SET plain_lyrics = %s, synced_lyrics = %s WHERE lyric_id = %s",
+                    (p_new, s_new, r['lyric_id'])
+                )
+    print(f"Fixed {fixed} track(s) with doubled lyrics.")
+    return fixed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Karaoke DB cleanup / dedup / self-healing")
     parser.add_argument("--dry-run", action="store_true",
@@ -464,9 +533,11 @@ def main() -> None:
         if args.dry_run:
             # Read-only: report duplicates, touch nothing.
             run_deduplication(conn, dry_run=True)
+            fix_doubled_lyrics(conn, dry_run=True)
             return
-        # 1. Deduplication
+        # 1. Deduplication & Lyrics Undoubling
         run_deduplication(conn)
+        fix_doubled_lyrics(conn)
         conn.commit()
         if not args.dedup_only:
             # 2. Source healing
@@ -481,3 +552,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

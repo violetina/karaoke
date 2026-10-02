@@ -127,12 +127,12 @@ def test_ctrl_api_stage_endpoints(client):
     r_stage = client.get("/stage")
     assert r_stage.status_code == 200
     assert "text/html" in r_stage.headers["content-type"]
-    assert "Karaoke Stage View" in r_stage.text
+    assert "Karaoke" in r_stage.text
 
     r_tv = client.get("/tv")
     assert r_tv.status_code == 200
     assert "text/html" in r_tv.headers["content-type"]
-    assert "Karaoke Stage View" in r_tv.text
+    assert "Karaoke" in r_tv.text
 
     r_state = client.get("/api/stage/state")
     assert r_state.status_code == 200

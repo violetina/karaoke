@@ -2,16 +2,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import os
 import subprocess
 import threading
 import time
+import urllib.request
+import wave
 from typing import AsyncGenerator, Optional
 
 import numpy as np
 
-_MODEL = None
+_CONFIG = {
+    "model": os.environ.get("KARAOKE_CAPTION_MODEL", "faster-whisper-small"),
+    "language": os.environ.get("KARAOKE_CAPTION_LANG", "nl"),
+    "api_key": os.environ.get("GEMINI_API_KEY") or os.environ.get("VIOLETINA_API_KEY") or "",
+    "source": os.environ.get("KARAOKE_CAPTION_SOURCE", "mic"),
+}
+
+_WHISPER_MODELS = {}
 _MODEL_LOCK = threading.Lock()
 _SUBSCRIBERS = []
 _HISTORY: list[dict] = []
@@ -20,14 +31,133 @@ _RUNNING = False
 _WORKER_THREAD: Optional[threading.Thread] = None
 
 
-def get_model():
-    global _MODEL
+def get_caption_config() -> dict[str, str]:
+    return dict(_CONFIG)
+
+
+def set_caption_config(model: Optional[str] = None, language: Optional[str] = None, api_key: Optional[str] = None, source: Optional[str] = None) -> dict[str, str]:
+    if model:
+        _CONFIG["model"] = model.strip()
+    if language:
+        _CONFIG["language"] = language.strip()
+    if api_key is not None:
+        _CONFIG["api_key"] = api_key.strip()
+    if source:
+        _CONFIG["source"] = source.strip()
+    return dict(_CONFIG)
+
+
+def get_whisper_model(model_name: str = "faster-whisper-small"):
+    size_name = model_name.replace("faster-whisper-", "").strip() or "small"
     with _MODEL_LOCK:
-        if _MODEL is None:
+        if size_name not in _WHISPER_MODELS:
             from faster_whisper import WhisperModel
-            # Cached in ~/.cache/huggingface/hub/models--Systran--faster-whisper-small
-            _MODEL = WhisperModel("small", device="cpu", compute_type="int8")
-        return _MODEL
+            # Cached in ~/.cache/huggingface/hub
+            _WHISPER_MODELS[size_name] = WhisperModel(size_name, device="cpu", compute_type="int8")
+        return _WHISPER_MODELS[size_name]
+
+
+def get_model():
+    return get_whisper_model("small")
+
+
+def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
+def transcribe_gemini(pcm_bytes: bytes, api_key: str, language: str = "nl", model_name: str = "gemini-2.5-flash") -> str:
+    wav_bytes = pcm_to_wav(pcm_bytes)
+    b64_audio = base64.b64encode(wav_bytes).decode("ascii")
+
+    lang_map = {"nl": "Dutch", "en": "English", "fr": "French", "de": "German", "es": "Spanish"}
+    lang_name = lang_map.get(language, "auto")
+    if lang_name != "auto":
+        prompt = f"Transcribe the spoken audio in {lang_name} verbatim. Return ONLY the exact transcribed text, nothing else. If silent or background noise only, return an empty string."
+    else:
+        prompt = "Transcribe the spoken audio verbatim. Return ONLY the transcribed text, nothing else. If silent, return an empty string."
+
+    clean_model = model_name if "gemini" in model_name else "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "audio/wav", "data": b64_audio}},
+                {"text": prompt}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0
+        }
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        res_data = json.loads(resp.read().decode("utf-8"))
+        candidates = res_data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return " ".join([p.get("text", "").strip() for p in parts if p.get("text")]).strip()
+    return ""
+
+
+def transcribe_gemma(pcm_bytes: bytes, api_key: str, language: str = "nl", model_name: str = "gemma-2-9b-it") -> str:
+    """Use Gemma model via API for speech transcription / Dutch text refinement."""
+    raw_text = ""
+    if api_key:
+        try:
+            raw_text = transcribe_gemini(pcm_bytes, api_key=api_key, language=language, model_name="gemini-2.5-flash")
+        except Exception:
+            pass
+
+    if not raw_text:
+        try:
+            audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            whisper_model = get_whisper_model("faster-whisper-small")
+            trans_lang = None if language == "auto" else language
+            segments, _ = whisper_model.transcribe(audio, language=trans_lang, vad_filter=True, beam_size=3, temperature=0.0)
+            raw_text = " ".join([s.text.strip() for s in segments if s.text and s.text.strip()])
+        except Exception:
+            pass
+
+    if not raw_text or not api_key:
+        return raw_text
+
+    clean_model = model_name if "gemma" in model_name else "gemma-2-9b-it"
+    lang_map = {"nl": "Dutch", "en": "English", "fr": "French", "de": "German", "es": "Spanish"}
+    lang_name = lang_map.get(language, "Dutch")
+    prompt = f"You are a fluent {lang_name} speech assistant. Clean up, correct spelling, and fix grammar for this transcribed {lang_name} speech: '{raw_text}'. Return ONLY the clean corrected {lang_name} text, nothing else."
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.0}
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            res_data = json.loads(resp.read().decode("utf-8"))
+            candidates = res_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                refined = " ".join([p.get("text", "").strip() for p in parts if p.get("text")]).strip()
+                if refined:
+                    return refined
+    except Exception:
+        pass
+    return raw_text
 
 
 def _broadcast(item: dict):
@@ -41,28 +171,100 @@ def _broadcast(item: dict):
             pass
 
 
-def _find_monitor_sink() -> str:
+_WPM_HISTORY: list[tuple[float, int]] = []
+
+
+def detect_live_bpm(audio_pcm: np.ndarray, sample_rate: int = 16000) -> float:
+    """Estimate live audio beat / tempo (BPM) from audio frame energy onset autocorrelation."""
+    hop = 512
+    frames = [float(np.mean(audio_pcm[i:i + hop] ** 2)) for i in range(0, len(audio_pcm) - hop, hop)]
+    if not frames:
+        return 120.0
+    env = np.array(frames)
+    diff = np.maximum(0, np.diff(env))
+    if len(diff) < 20 or float(np.max(diff)) == 0.0:
+        return 120.0
+    fps = sample_rate / hop
+    min_lag = int(fps * 60 / 180)  # 180 BPM
+    max_lag = int(fps * 60 / 60)   # 60 BPM
+    autocorr = np.correlate(diff, diff, mode="full")
+    autocorr = autocorr[len(diff) - 1:]
+    if max_lag < len(autocorr):
+        lags = autocorr[min_lag:max_lag]
+        if len(lags) > 0 and float(np.max(lags)) > 0:
+            best_lag = min_lag + int(np.argmax(lags))
+            bpm = (fps * 60.0) / best_lag
+            return round(float(bpm), 1)
+    return 120.0
+
+
+def compute_rolling_wpm(new_words: int, window_seconds: float = 20.0) -> float:
+    """Calculate speech cadence in Words Per Minute (WPM) over a rolling time window."""
+    now = time.monotonic()
+    _WPM_HISTORY.append((now, new_words))
+    cutoff = now - window_seconds
+    while _WPM_HISTORY and _WPM_HISTORY[0][0] < cutoff:
+        _WPM_HISTORY.pop(0)
+    if len(_WPM_HISTORY) <= 1:
+        return round(float(new_words * (60.0 / 3.0)), 1)
+    span = _WPM_HISTORY[-1][0] - _WPM_HISTORY[0][0]
+    total_words = sum(w for _, w in _WPM_HISTORY)
+    if span <= 0:
+        return 0.0
+    return round(float((total_words / span) * 60.0), 1)
+
+
+def _find_audio_source() -> str:
+    source_cfg = _CONFIG.get("source", os.environ.get("KARAOKE_CAPTION_SOURCE", "mic")).strip().lower()
+
+    if source_cfg in ("mic", "microphone", "input", "default_source", "source"):
+        try:
+            res = subprocess.run(["pactl", "get-default-source"], stdout=subprocess.PIPE, text=True, check=True)
+            src = res.stdout.strip()
+            if src:
+                return src
+        except Exception:
+            pass
+        return "alsa_input.pci-0000_c1_00.6.HiFi__Mic2__source"
+
+    if source_cfg in ("speaker", "monitor", "sink", "output", "desktop"):
+        try:
+            res = subprocess.run(["pactl", "get-default-sink"], stdout=subprocess.PIPE, text=True, check=True)
+            sink = res.stdout.strip()
+            if sink:
+                return f"{sink}.monitor"
+        except Exception:
+            pass
+        return "alsa_output.pci-0000_c1_00.6.HiFi__Speaker__sink.monitor"
+
+    raw_val = _CONFIG.get("source", "").strip()
+    if raw_val:
+        return raw_val
+
     try:
-        res = subprocess.run(["pactl", "get-default-sink"], stdout=subprocess.PIPE, text=True, check=True)
-        sink = res.stdout.strip()
-        if sink:
-            return f"{sink}.monitor"
+        res = subprocess.run(["pactl", "get-default-source"], stdout=subprocess.PIPE, text=True, check=True)
+        src = res.stdout.strip()
+        if src:
+            return src
     except Exception:
         pass
-    return "alsa_output.pci-0000_c1_00.6.HiFi__Speaker__sink.monitor"
+    return "alsa_input.pci-0000_c1_00.6.HiFi__Mic2__source"
+
+
+def _find_monitor_sink() -> str:
+    return _find_audio_source()
 
 
 def _worker_loop():
     global _RUNNING
-    model = get_model()
-    monitor_source = _find_monitor_sink()
+    audio_source = _find_audio_source()
     sample_rate = 16000
     chunk_seconds = 3.0
     bytes_per_chunk = int(sample_rate * chunk_seconds * 2) # 16-bit mono
 
     cmd = [
         "parec",
-        "-d", monitor_source,
+        "-d", audio_source,
         f"--rate={sample_rate}",
         "--channels=1",
         "--format=s16le",
@@ -79,6 +281,24 @@ def _worker_loop():
 
     while _RUNNING:
         try:
+            current_src = _find_audio_source()
+            if current_src != audio_source:
+                audio_source = current_src
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+                cmd = [
+                    "parec",
+                    "-d", audio_source,
+                    f"--rate={sample_rate}",
+                    "--channels=1",
+                    "--format=s16le",
+                ]
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                continue
+
             raw = proc.stdout.read(bytes_per_chunk)
             if not raw or len(raw) < bytes_per_chunk:
                 time.sleep(0.1)
@@ -91,25 +311,66 @@ def _worker_loop():
             if rms < 0.005:
                 continue
 
-            segments, _ = model.transcribe(
-                audio,
-                language="nl",
-                vad_filter=True,
-                beam_size=3,
-                temperature=0.0,
-            )
+            model_name = _CONFIG.get("model", "faster-whisper-small")
+            lang = _CONFIG.get("language", "nl")
+            api_key = _CONFIG.get("api_key", "").strip()
 
-            texts = [s.text.strip() for s in segments if s.text and s.text.strip()]
-            if texts:
-                full_text = " ".join(texts)
-                # Ignore exact duplicates from consecutive chunks
-                if full_text.lower() != last_text.lower():
-                    last_text = full_text
-                    _broadcast({
-                        "text": full_text,
-                        "time": time.strftime("%H:%M:%S"),
-                        "rms": round(rms, 4),
-                    })
+            full_text = ""
+
+            if model_name.startswith("gemma"):
+                if not api_key:
+                    _broadcast({"text": "[Gemma API key required - enter key or set GEMINI_API_KEY]", "time": time.strftime("%H:%M:%S")})
+                    time.sleep(2.0)
+                    continue
+                try:
+                    full_text = transcribe_gemma(raw, api_key=api_key, language=lang, model_name=model_name)
+                except Exception as exc:
+                    _broadcast({"text": f"[Gemma error: {exc}]", "time": time.strftime("%H:%M:%S")})
+                    time.sleep(1.0)
+                    continue
+            elif model_name.startswith("gemini"):
+                if not api_key:
+                    _broadcast({"text": "[Gemini API key required - enter key or set GEMINI_API_KEY]", "time": time.strftime("%H:%M:%S")})
+                    time.sleep(2.0)
+                    continue
+                try:
+                    full_text = transcribe_gemini(raw, api_key=api_key, language=lang, model_name=model_name)
+                except Exception as exc:
+                    _broadcast({"text": f"[Gemini API error: {exc}]", "time": time.strftime("%H:%M:%S")})
+                    time.sleep(1.0)
+                    continue
+            else:
+                try:
+                    whisper_model = get_whisper_model(model_name)
+                    trans_lang = None if lang == "auto" else lang
+                    segments, _ = whisper_model.transcribe(
+                        audio,
+                        language=trans_lang,
+                        vad_filter=True,
+                        beam_size=3,
+                        temperature=0.0,
+                    )
+                    texts = [s.text.strip() for s in segments if s.text and s.text.strip()]
+                    if texts:
+                        full_text = " ".join(texts)
+                except Exception as exc:
+                    _broadcast({"text": f"[Whisper error: {exc}]", "time": time.strftime("%H:%M:%S")})
+                    time.sleep(1.0)
+            live_bpm = detect_live_bpm(audio)
+
+            if full_text and full_text.lower() != last_text.lower():
+                last_text = full_text
+                w_count = len(full_text.split())
+                live_wpm = compute_rolling_wpm(w_count)
+                _broadcast({
+                    "text": full_text,
+                    "time": time.strftime("%H:%M:%S"),
+                    "rms": round(rms, 4),
+                    "bpm": live_bpm,
+                    "wpm": live_wpm,
+                    "model": model_name,
+                    "lang": lang,
+                })
         except Exception as exc:
             time.sleep(0.5)
 
@@ -222,21 +483,30 @@ def render_captions_html() -> str:
       align-items: center;
       gap: 10px;
     }
-    .btn {
-      background: rgba(255, 255, 255, 0.06);
+    .btn, .select-btn, .input-key {
+      background: rgba(255, 255, 255, 0.08);
       border: 1px solid var(--border);
       color: #fff;
-      padding: 6px 14px;
+      padding: 6px 12px;
       border-radius: 8px;
       font-size: 0.85rem;
       font-weight: 700;
-      cursor: pointer;
-      transition: all 0.15s ease;
       font-family: inherit;
+      outline: none;
+      transition: all 0.15s ease;
+      cursor: pointer;
     }
-    .btn:hover {
-      background: rgba(255, 255, 255, 0.16);
-      border-color: rgba(255, 255, 255, 0.25);
+    .btn:hover, .select-btn:hover, .input-key:focus {
+      background: rgba(255, 255, 255, 0.18);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+    .select-btn option {
+      background: #0d111b;
+      color: #fff;
+    }
+    .input-key {
+      width: 160px;
+      cursor: text;
     }
 
     /* /tv style centered stage */
@@ -333,10 +603,29 @@ def render_captions_html() -> str:
   <header>
     <div class="badge-live">
       <div class="pulse-dot"></div>
-      <span>Live Dutch Auto-Captions · Koers TV</span>
+      <span>Live Auto-Captions</span>
     </div>
     <div class="controls">
-      <button class="btn" onclick="toggleColor()">Yellow / White / Cyan</button>
+      <button class="btn" id="source-toggle-btn" onclick="toggleSource()">🎙️ Mic ON</button>
+      <select class="select-btn" id="lang-select" onchange="updateConfig()">
+        <option value="nl">🇳🇱 Dutch (nl)</option>
+        <option value="en">🇬🇧 English (en)</option>
+        <option value="fr">🇫🇷 French (fr)</option>
+        <option value="de">🇩🇪 German (de)</option>
+        <option value="es">🇪🇸 Spanish (es)</option>
+        <option value="auto">🌐 Auto Detect</option>
+      </select>
+      <select class="select-btn" id="model-select" onchange="onModelChange()">
+        <option value="faster-whisper-small">⚡ Whisper Small (Local)</option>
+        <option value="faster-whisper-tiny">🚀 Whisper Tiny (Fast Local)</option>
+        <option value="faster-whisper-base">🎯 Whisper Base (Local)</option>
+        <option value="gemini-2.5-flash">✨ Gemini 2.5 Flash (API)</option>
+        <option value="gemini-1.5-flash">✨ Gemini 1.5 Flash (API)</option>
+        <option value="gemma-2-9b-it">💎 Gemma 2 9B (Dutch Refiner API)</option>
+        <option value="gemma-3-27b-it">💎 Gemma 3 27B (Dutch Refiner API)</option>
+      </select>
+      <input type="password" id="api-key-input" placeholder="API Key (violetina...)" class="input-key" style="display:none;" onchange="updateConfig()" />
+      <button class="btn" onclick="toggleColor()">Color</button>
       <button class="btn" onclick="adjustSize(-0.25)">A-</button>
       <button class="btn" onclick="adjustSize(0.25)">A+</button>
       <button class="btn" onclick="toggleFullscreen()">[F] Fullscreen</button>
@@ -347,13 +636,13 @@ def render_captions_html() -> str:
     <div id="captions-container">
       <div class="caption-line prev-2" id="line-prev-2"></div>
       <div class="caption-line prev-1" id="line-prev-1"></div>
-      <div class="caption-line active active-anim" id="line-active">Luisteren naar het commentaar…</div>
-      <div id="time-pill">LIVE KOERS</div>
+      <div class="caption-line active active-anim" id="line-active">Luisteren naar audio…</div>
+      <div id="time-pill">LIVE CAPTIONS</div>
     </div>
   </main>
 
   <footer>
-    <span>PipeWire Monitor: HiFi Speaker</span>
+    <span id="footer-source-text">PipeWire Input: Microphone / Default Source</span>
     <span>Druk op [F] voor Fullscreen</span>
   </footer>
 
@@ -366,6 +655,72 @@ def render_captions_html() -> str:
     let historyTexts = [];
     let currentFontSize = 3.4;
     let colorMode = 0; // 0: Yellow, 1: White, 2: Cyan
+    let currentSource = 'mic';
+
+    function updateSourceUI() {
+      const btn = document.getElementById('source-toggle-btn');
+      const footerSpan = document.getElementById('footer-source-text');
+      if (currentSource === 'speaker' || currentSource === 'monitor' || currentSource === 'desktop') {
+        btn.textContent = '🔊 Speaker (What\'s Playing)';
+        if (footerSpan) footerSpan.textContent = 'PipeWire Output: Speaker Monitor (What\'s Playing)';
+      } else {
+        btn.textContent = '🎙️ Mic ON';
+        if (footerSpan) footerSpan.textContent = 'PipeWire Input: Microphone / Default Source';
+      }
+    }
+
+    function toggleSource() {
+      currentSource = (currentSource === 'mic' || currentSource === 'microphone') ? 'speaker' : 'mic';
+      updateSourceUI();
+      updateConfig();
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/captions/config');
+        if (res.ok) {
+          const cfg = await res.json();
+          if (cfg.model) document.getElementById('model-select').value = cfg.model;
+          if (cfg.language) document.getElementById('lang-select').value = cfg.language;
+          if (cfg.api_key) document.getElementById('api-key-input').value = cfg.api_key;
+          if (cfg.source) {
+            currentSource = cfg.source;
+            updateSourceUI();
+          }
+          onModelChange(false);
+        }
+      } catch (err) {
+        console.warn('Failed to load captions config:', err);
+      }
+    }
+
+    function onModelChange(triggerSave = true) {
+      const model = document.getElementById('model-select').value;
+      const keyInput = document.getElementById('api-key-input');
+      if (model.startsWith('gemini') || model.startsWith('gemma')) {
+        keyInput.style.display = 'inline-block';
+      } else {
+        keyInput.style.display = 'none';
+      }
+      if (triggerSave) {
+        updateConfig();
+      }
+    }
+
+    async function updateConfig() {
+      const model = document.getElementById('model-select').value;
+      const language = document.getElementById('lang-select').value;
+      const apiKey = document.getElementById('api-key-input').value;
+      try {
+        await fetch('/api/captions/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, language, api_key: apiKey, source: currentSource }),
+        });
+      } catch (err) {
+        console.warn('Failed to save config:', err);
+      }
+    }
 
     function adjustSize(delta) {
       currentFontSize = Math.max(1.8, Math.min(5.0, currentFontSize + delta));
@@ -429,7 +784,8 @@ def render_captions_html() -> str:
       lineActive.classList.add('active-anim');
 
       if (item.time) {
-        timePill.textContent = `${item.time} · WIELRENNEN`;
+        const info = item.lang ? `${item.time} · ${item.lang.toUpperCase()}` : `${item.time}`;
+        timePill.textContent = info;
       }
     }
 
@@ -451,6 +807,7 @@ def render_captions_html() -> str:
       };
     }
 
+    loadConfig();
     connectSSE();
   </script>
 </body>

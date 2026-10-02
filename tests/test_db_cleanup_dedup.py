@@ -158,3 +158,36 @@ def test_a_credited_artist_variant_is_still_merged():
     a = _ver("Dave Grohl", "Mantra")
     b = _ver("Dave Grohl, Joshua Homme & Trent Reznor", "Mantra")
     assert db_cleanup.is_duplicate(a, b)
+
+
+def test_fix_doubled_lyrics_collapses_duplicates(monkeypatch):
+    """Ensure fix_doubled_lyrics collapses doubled plain and synced lyrics rows."""
+    class FakeCursor:
+        def __init__(self):
+            self.executed = []
+            self.updated = []
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+            if "UPDATE" in sql:
+                self.updated.append(params)
+        def fetchall(self):
+            plain = "Line 1\nLine 2\nLine 1\nLine 2"
+            synced = "[00:10.00] Line 1\n[00:15.00] Line 2\n[00:20.00] Line 1\n[00:25.00] Line 2"
+            return [{"lyric_id": 42, "track_id": 1, "plain_lyrics": plain, "synced_lyrics": synced}]
+
+    class FakeConn:
+        def cursor(self):
+            return cur
+        def commit(self):
+            pass
+
+    cur = FakeCursor()
+    conn = FakeConn()
+    fixed = db_cleanup.fix_doubled_lyrics(conn, dry_run=False)
+    assert fixed == 1
+    assert len(cur.updated) == 1
+    p_new, s_new, lyric_id = cur.updated[0]
+    assert lyric_id == 42
+    assert p_new == "Line 1\nLine 2"
+    assert s_new == "[00:10.00] Line 1\n[00:15.00] Line 2"
+

@@ -951,6 +951,12 @@ def dancers_page() -> HTMLResponse:
     return HTMLResponse(stage_view.render_dancers_html())
 
 
+class CaptionsConfigRequest(BaseModel):
+    model: Optional[str] = None
+    language: Optional[str] = None
+    api_key: Optional[str] = None
+
+
 @app.get("/captions", response_class=HTMLResponse)
 def captions_page() -> HTMLResponse:
     """Live Dutch auto-captions display page."""
@@ -972,6 +978,20 @@ async def captions_stream():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/captions/config")
+def get_captions_config():
+    """Get current caption model, language, and API key configuration."""
+    from . import live_caption
+    return live_caption.get_caption_config()
+
+
+@app.post("/api/captions/config")
+def update_captions_config(cfg: CaptionsConfigRequest):
+    """Update current caption model, language, or API key configuration."""
+    from . import live_caption
+    return live_caption.set_caption_config(model=cfg.model, language=cfg.language, api_key=cfg.api_key)
 
 
 

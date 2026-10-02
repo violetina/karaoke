@@ -34,9 +34,10 @@ flowchart TD
 
 ## Technical Breakdown
 
-### 1. Zero-Config Desktop Audio Capture (PipeWire)
-Instead of requiring virtual audio cables, browser extensions, or microphone rerouting, the system taps directly into the PipeWire speaker monitor source:
-- Identified automatically via `pactl get-default-sink` (e.g. `alsa_output.pci-0000_c1_00.6.HiFi__Speaker__sink.monitor`).
+### 1. Zero-Config Desktop & Microphone Audio Capture (PipeWire)
+By default, the system captures audio from the default PipeWire microphone source (`pactl get-default-source`), or desktop speaker monitor if configured:
+- Source identified automatically via `pactl get-default-source` (microphone) or `pactl get-default-sink` (speaker monitor).
+- Configurable via `KARAOKE_CAPTION_SOURCE` environment variable (`mic`, `speaker`, or custom device ID).
 - Captured in real-time via `/usr/bin/parec` at **16 kHz, 16-bit mono PCM**.
 - The worker runs inside `src/karaoke/live_caption.py` in a background daemon thread (`dutch-caption-worker`).
 

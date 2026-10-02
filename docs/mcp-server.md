@@ -6,26 +6,26 @@ The Karaoke AI DJ MCP Server bridges your 18,000+ local track library, harmonic 
 
 ```mermaid
 flowchart LR
-    subgraph Host[Host Desktop (Linux / ROCm)]
-        Ollama[Ollama\nqwen3:latest / ROCm 890M\n:11434]
-        MCP[karaoke-mcp\nSSE + Streamable HTTP\n:8888]
-        PG[(PostgreSQL\nkaraoke DB\n18k tracks + Camelot)]
-        Player[Desktop Playback\nSpotify / Chromium / TUI]
+    subgraph Host["Host Desktop (Linux / ROCm)"]
+        Ollama["Ollama<br/>qwen3:latest / ROCm 890M<br/>:11434"]
+        MCP["karaoke-mcp<br/>SSE + Streamable HTTP<br/>:8888"]
+        PG[("PostgreSQL<br/>karaoke DB<br/>18k tracks + Camelot")]
+        Player["Desktop Playback<br/>Spotify / Chromium / TUI"]
     end
 
-    subgraph Cluster[kind-karaoke Cluster]
-        Obot[Obot MCP Gateway\n:30080]
+    subgraph Cluster["kind-karaoke Cluster"]
+        Obot["Obot MCP Gateway<br/>:30080"]
     end
 
-    Tunnel[obot tunnel\nkaraoke-obot-tunnel.service]
+    Tunnel["obot tunnel<br/>karaoke-obot-tunnel.service"]
 
-    Obot -->|Model inference\nhttp://172.18.0.1:11434| Ollama
-    Tunnel -->|outbound, authenticated| Obot
+    Obot -->|"Model inference<br/>http://172.18.0.1:11434"| Ollama
+    Tunnel -->|"outbound, authenticated"| Obot
     Tunnel --> MCP
     MCP --> PG
     MCP --> Player
-    Client[MCP client\nClaude Code / Claude Desktop] -->|direct SSE\nlocalhost:8888/sse| MCP
-    Client -.->|or via gateway, for audit| Obot
+    Client["MCP client<br/>Claude Code / Claude Desktop"] -->|"direct SSE<br/>localhost:8888/sse"| MCP
+    Client -.->|"or via gateway, for audit"| Obot
 ```
 
 Obot rejects any MCP server URL that resolves to a private IP, so it cannot

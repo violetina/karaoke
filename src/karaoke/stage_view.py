@@ -180,7 +180,22 @@ def get_stage_state() -> dict[str, Any]:
             mood = mood_of(lines[active_line_idx]["text"])
         except Exception:
             pass
-            
+
+    if mood == "neutral":
+        try:
+            from . import live_caption
+            hist = live_caption.get_caption_history()
+            if hist:
+                latest = hist[-1]
+                txt = latest.get("text", "")
+                rms_val = latest.get("rms")
+                from .sentiment import mood_of as speech_mood_of
+                speech_m = speech_mood_of(txt, rms=rms_val)
+                if speech_m != "neutral":
+                    mood = speech_m
+        except Exception:
+            pass
+
     if track_id is not None:
         try:
             with localcache.connect() as conn:
@@ -1245,6 +1260,7 @@ def render_mood_html() -> str:
       <div id="track-info">Queue songs to begin</div>
       <div id="sub-stats">
         <span>BPM: <span id="val-bpm" class="stat-val">--</span></span>
+        <span>WPM: <span id="val-wpm" class="stat-val">--</span></span>
         <span>ENERGY: <span id="val-energy" class="stat-val">--</span></span>
         <span>VIBE: <span id="val-vibe" class="stat-val">0%</span></span>
       </div>
@@ -1280,6 +1296,16 @@ def render_mood_html() -> str:
         toggleMic();
       }
     });
+
+    // Auto-enable mic on load / first user interaction
+    window.addEventListener('DOMContentLoaded', () => {
+      toggleMic();
+    });
+    document.addEventListener('click', (e) => {
+      if (!micActive && e.target !== micBtn && !micBtn.contains(e.target)) {
+        toggleMic();
+      }
+    }, { once: true });
 
     async function toggleMic() {
       if (micActive) {
@@ -1391,6 +1417,7 @@ def render_mood_html() -> str:
     const sentimentDiv = document.getElementById('sentiment');
     const trackInfoDiv = document.getElementById('track-info');
     const valBpm = document.getElementById('val-bpm');
+    const valWpm = document.getElementById('val-wpm');
     const valEnergy = document.getElementById('val-energy');
     const valVibe = document.getElementById('val-vibe');
     const ambientGlow = document.getElementById('ambient-glow');
@@ -1522,6 +1549,42 @@ def render_mood_html() -> str:
         }
       } catch (e) {
         console.error('SSE parse error:', e);
+      }
+    };
+
+    // Listen to live captions stream for real-time speech sentiment & voice intonation
+    const captionSource = new EventSource('/api/captions/stream');
+    captionSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (!data || !data.text) return;
+        const text = data.text.toLowerCase();
+        let speechMood = 'neutral';
+        if (text.includes('!') || text.includes('haha') || text.includes('lol') || text.includes('grapje') || text.includes('lachen')) {
+          speechMood = 'happy';
+        } else if (text.includes('niet') || text.includes('fout') || text.includes('onzin') || text.includes('stop') || text.includes('ruzie')) {
+          speechMood = 'angry';
+        } else if (text.includes('valpartij') || text.includes('pech') || text.includes('schade') || text.includes('pijn')) {
+          speechMood = 'sad';
+        } else if (text.includes('liefde') || text.includes('mooi') || text.includes('fijn') || text.includes('dank')) {
+          speechMood = 'tender';
+        } else if (data.rms && data.rms > 0.035) {
+          speechMood = 'angry';
+        } else if (data.rms && data.rms > 0.018) {
+          speechMood = 'happy';
+        }
+
+        if (data.bpm && valBpm) valBpm.textContent = Math.round(data.bpm);
+        if (data.wpm && valWpm) valWpm.textContent = Math.round(data.wpm);
+
+        if (speechMood !== 'neutral' && speechMood !== currentMood) {
+          currentMood = speechMood;
+          sentimentDiv.textContent = currentMood.toUpperCase() + ' • LIVE SPEECH';
+          loadFeelingImage(currentMood);
+          loadCoverImage(currentMood, currentArtUrl);
+        }
+      } catch (e) {
+        console.error('Caption SSE error:', e);
       }
     };
 

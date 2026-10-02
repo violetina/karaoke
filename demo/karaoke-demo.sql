@@ -7313,55 +7313,7 @@ In Purgatory
 Oh, I''d rather end our story
 Than stay with you in Purgatory
 Another day, another day');
-INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1439, 719, 'approved', 'ytmusic_panel_musixmatch', '', '      You look nice as all dressed up
-A classy bloke with a half full cup
-But I came out just for you
-I got you
-Beer in the cupboard, your eyes to mine
-You skipped my queues and my lines
-Buy me a drink, and my eyes glaze over
-I got you
-And I don''t care about the things I have
-I got you
-And I don''t want anybody else
-I got you
-Walk in the room, and I start blushing
-I got you
-I dunno what, but it feels like something
-I got you
-Beer in the cupboard, your eyes to mine
-You skipped my queues and my lines
-Walk in the room, and I start blushing
-I don''t know what, but it feels like something
-It''s no secret, you''re my number one
-And just tonight, we''re out for fun
-Buy me a drink, and my eyes glaze over
-I got you
-And I don''t care about the things I have
-I got you
-And I don''t want anybody else
-I got you
-Walk in the room, and I start blushing
-I got you
-It''s all the same when you''re getting something
-I got you
-And I don''t care about the things I have
-I got you
-And I don''t want anybody else
-I got you
-Walk in the room, and I start blushing
-I got you
-It''s all the same when you''re getting something
-I got you
-And I don''t care about the things I have
-I got you
-And I don''t want anybody else
-I got you
-Walk in the room, and I start blushing
-I got you
-It''s all the same when you''re getting something
-I got you (I got you)
-    You look nice as all dressed up
+INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1439, 719, 'approved', 'ytmusic_panel_musixmatch', '', 'You look nice as all dressed up
 A classy bloke with a half full cup
 But I came out just for you
 I got you
@@ -15100,50 +15052,7 @@ The love is gone away
 Gone away
 Gone away
 Gone away');
-INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1462, 936, 'approved', 'ytmusic_panel_musixmatch', '', '      Cool thing sitting with a kitty
-Now you know you''re sure looking pretty
-Like a lover, not a dancer
-Superboy take a little chance here
-I don''t wanna, I don''t think so
-I don''t wanna, I don''t think so
-Cool thing, let me play it with your radio
-Move me, turn me on, baby-o
-I''ll be your slave
-Give you a shave
-I don''t wanna, I don''t think so
-I don''t wanna, I don''t think so
-Yeah
-Tell ''em about it, hit ''em where it hurts
-Hey, cool thing, come here
-Sit down beside me
-There''s something I got to ask you
-I just wanna know, what are you gonna do for me
-I mean, are you gonna liberate us girls
-From male white corporate oppression?
-Tell it like it is (huh?)
-Yeah (don''t be shy)
-Word up
-Fear of a female planet?
-Fear of a female planet?
-Fear, baby
-I just want you to know that we can still be friends
-Let everybody know (come on, come on, come on, come on)
-Cool, cool thing, cool, cool thing
-When you''re a star
-I know that you''ll fix everything
-Cool thing sitting with a kitty
-Now you know you''re sure lookin'' pretty
-Rock the beat just a little faster
-Now I know that you are the master
-I don''t wanna, I don''t think so
-I don''t wanna, I don''t think so
-Cool thing walkin'' like a panther
-Come on and give me an answer
-Cool thing walkin'' like a panther
-What''d he say?
-I don''t wanna, I don''t think so
-I don''t wanna, I don''t think so
-    Cool thing sitting with a kitty
+INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1462, 936, 'approved', 'ytmusic_panel_musixmatch', '', 'Cool thing sitting with a kitty
 Now you know you''re sure looking pretty
 Like a lover, not a dancer
 Superboy take a little chance here
@@ -15542,47 +15451,7 @@ Without you, I''m nothing
 Without you, I''m nothing
 Take the plan, spin it sideways
 Without you, I''m nothing at all');
-INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1484, 945, 'approved', 'ytmusic_panel_musixmatch', '', '      Put on that dress
-I''m going out dancing
-Starting off red
-Clean and sparkling, he''ll see me
-Music playing, make it dreamy for dancing
-Must be a way that I can dress to please him
-It''s hard to walk in the dress, it''s not easy
-I''m spilling over like a heavy loaded fruit tree
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-It''s sad to see
-Lonely, all this lonely
-Close up my eyes
-Dreamy, dreamy music make it be alright
-Music play, make it good for romancing
-Must be a way I can dress to please him
-Swing and sway, everything''ll alright
-But it''s feeling so damn tight tonight
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-"You, purdy thang," my man says
-"But I bought you beautiful dresses"
-"You, purdy thang," my man says
-"But I bought you beautiful dresses"
-Filthy tight, the dress is filthy
-I''m falling flat and my arms are empty
-Clear the way, better get it out of this room
-A falling woman in dancing costume
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-If you put it on
-    Put on that dress
+INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1484, 945, 'approved', 'ytmusic_panel_musixmatch', '', 'Put on that dress
 I''m going out dancing
 Starting off red
 Clean and sparkling, he''ll see me
@@ -17005,40 +16874,7 @@ Qu''elles nous rendent beaux
 Toutes ces morsures
 
 Envoyé');
-INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1871, 1102, 'approved', 'ytmusic_panel_lyricfind', '', '      A lazy rain am I
-The skies refuse to cry
-Cremation takes its piece of your supply
-The night is dressed like noon
-A sailor spoke too soon
-And China''s on the dark side of the moon
-(Hit me now)
-Platypus are a few
-The secret life of roo
-A personality I never knew (get it on)
-My Greta weighs a ton
-The archers on the run
-And no one stands alone behind the sun
-It''s been a long time since I made a new friend
-Waitin'' on another black summer to end
-It''s been a long time and you never know when
-Waitin'' on another black summer to end
-Crack the flaming whip
-A-sailing on a censorship
-Riding on a headless horse to make the trip
-Been a long time since I made a new friend
-Waitin'' on another black summer to end
-It''s been a long time and you never know when
-Waitin'' on another black summer to end
-I been waitin''
-I been waitin''
-Waitin'' on another black summer to end
-I been waitin''
-I been waitin''
-Waitin'' on another black summer to end
-I been waitin''
-I been waitin''
-Waitin'' on another black summer to end
-    A lazy rain am I
+INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyrics) VALUES (1871, 1102, 'approved', 'ytmusic_panel_lyricfind', '', 'A lazy rain am I
 The skies refuse to cry
 Cremation takes its piece of your supply
 The night is dressed like noon
@@ -19061,99 +18897,7 @@ INSERT INTO lyrics (lyric_id, track_id, kind, source, synced_lyrics, plain_lyric
 [08:57.45] I said hey
 [08:57.45] I said whoa
 [08:57.45] I said hey
-[08:57.45] I said whoa
-[08:57.57] You know, I know that you don''t really hate me
-[08:57.62] But I suppose that I probably irritate you
-[08:57.65] And furthermore, I know that I can''t relate to you
-[08:57.70] I''ll say I''m sorry in advance for all of my hyperbole
-[08:57.75] Don''t waste your time on me
-[08:57.77] Don''t waste your time on me
-[08:57.80] And you know, I really, really, really care for you
-[08:57.94] But I see lately you''re a little absentee
-[08:57.94] I''m sure that you have had your fair share, your fair share of me
-[08:57.94] So why do you come here lately, after all that we''ve been through?
-[08:57.94] Don''t waste my time on you
-[08:57.94] Don''t waste my time on you
-[08:58.06] It''s Nomatterday, here we go again
-[08:58.09] Necromancers bending to and fro
-[08:58.12] Feels like a Saturday
-[08:58.13] That never seems to end
-[08:58.16] Feast of burden that-away
-[08:58.18] Beast of famine that-away
-[08:58.20] Easter bunny that-away
-[08:58.22] I said hey-ey-ey-ey
-[08:58.24] Don''t piss in the fountain
-[08:58.27] I said whoa, whoa, whoa, whoa
-[08:58.30] Don''t piss in the fountain
-[08:58.42] I said hey-ey-ey-ey
-[08:58.42] Don''t piss in the fountain
-[08:58.42] I said whoa, whoa, whoa, whoa
-[08:58.42] Don''t piss in the fountain
-[08:58.42] It''s Nomatterday, I call up all my friends
-[08:58.42] And we go dancing at the show
-[08:58.42] But when the spirits call
-[08:58.42] It''s all shenanigans
-[08:58.42] Feast of burden that-away
-[08:58.55] Beast of famine that-away
-[08:58.57] Easter bunny that-away
-[08:58.59] I said hey-ey-ey-ey
-[08:58.61] Don''t piss in the fountain
-[08:58.64] I said whoa, whoa, whoa, whoa
-[08:58.67] Don''t piss in the fountain
-[08:58.69] I said hey-ey-ey-ey
-[08:58.71] Don''t piss in the fountain
-[08:58.74] I said whoa, whoa, whoa, whoa
-[08:58.77] Don''t piss in the fountain
-[08:58.91] I said hey
-[08:58.91] I said whoa
-[08:58.91] I said hey
-[08:58.91] I said whoa', '      You know, I know that you don''t really hate me
-But I suppose that I probably irritate you
-And furthermore, I know that I can''t relate to you
-I''ll say I''m sorry in advance for all of my hyperbole
-Don''t waste your time on me
-Don''t waste your time on me
-And you know, I really, really, really care for you
-But I see lately you''re a little absentee
-I''m sure that you have had your fair share, your fair share of me
-So why do you come here lately, after all that we''ve been through?
-Don''t waste my time on you
-Don''t waste my time on you
-It''s Nomatterday, here we go again
-Necromancers bending to and fro
-Feels like a Saturday
-That never seems to end
-Feast of burden that-away
-Beast of famine that-away
-Easter bunny that-away
-I said hey-ey-ey-ey
-Don''t piss in the fountain
-I said whoa, whoa, whoa, whoa
-Don''t piss in the fountain
-I said hey-ey-ey-ey
-Don''t piss in the fountain
-I said whoa, whoa, whoa, whoa
-Don''t piss in the fountain
-It''s Nomatterday, I call up all my friends
-And we go dancing at the show
-But when the spirits call
-It''s all shenanigans
-Feast of burden that-away
-Beast of famine that-away
-Easter bunny that-away
-I said hey-ey-ey-ey
-Don''t piss in the fountain
-I said whoa, whoa, whoa, whoa
-Don''t piss in the fountain
-I said hey-ey-ey-ey
-Don''t piss in the fountain
-I said whoa, whoa, whoa, whoa
-Don''t piss in the fountain
-I said hey
-I said whoa
-I said hey
-I said whoa
-    You know, I know that you don''t really hate me
+[08:57.45] I said whoa', 'You know, I know that you don''t really hate me
 But I suppose that I probably irritate you
 And furthermore, I know that I can''t relate to you
 I''ll say I''m sorry in advance for all of my hyperbole

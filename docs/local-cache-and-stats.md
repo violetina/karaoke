@@ -32,14 +32,16 @@ Live modes (`--radio`, `--listen`, `--output`, `--spotify`, player/browser modes
 
 ```mermaid
 flowchart TD
-    A[Need lyrics for artist/title or URL] --> B{use_cache?}
-    B -- yes --> L[1. Local SQLite tracks/sources/lyrics]
-    L -- hit --> Z[Return lyrics offline]
-    L -- miss --> F[2. LRCLIB online]
-    F -- found --> W[Write-through to SQLite] --> Z
-    F -- none + local file + --transcribe --> WH[Whisper transcription] --> W
-    F -- none --> G[Log lyric_gaps row for backfill]
-    B -- no --> F
+    A["Need lyrics for artist/title or URL"] --> B{"use_cache?"}
+    B -->|"yes"| L["1. Local SQLite tracks/sources/lyrics"]
+    L -->|"hit"| Z["Return lyrics offline"]
+    L -->|"miss"| F["2. LRCLIB online"]
+    F -->|"found"| W["Write-through to SQLite"]
+    W --> Z
+    F -->|"none + local file + --transcribe"| WH["Whisper transcription"]
+    WH --> W
+    F -->|"none"| G["Log lyric_gaps row for backfill"]
+    B -->|"no"| F
 ```
 
 OpenSearch is deliberately not in this hot path. Reintroducing vector search should happen as a separate indexing command that learns from SQLite and writes derived documents to OpenSearch. See [Vector search and training plan](vector-search-plan.md).
