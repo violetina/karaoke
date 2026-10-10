@@ -34,7 +34,7 @@ audio — the same discipline as :mod:`karaoke.source_select` and
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import Iterable, Optional
 
@@ -230,7 +230,7 @@ def segments(marks: Iterable[Mark], conn=None) -> list[Segment]:
         if known_duration:
             max_end = seg.start_wall + known_duration + 2.0
             if max_end < seg.end_wall:
-                seg.end_wall = max_end
+                seg = replace(seg, end_wall=max_end)
                 
         out.append(seg)
     return out
