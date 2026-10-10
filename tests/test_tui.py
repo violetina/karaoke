@@ -60,6 +60,46 @@ def test_default_sync_offset_spotify_is_zero(monkeypatch):
     assert _default_sync_offset("spotify") == 0.0
 
 
+def test_sync_queue_highlight_updates_queue_at():
+    from unittest.mock import MagicMock
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui()
+    app._queue = [
+        {"artist": "Daft Punk", "title": "Get Lucky", "url": "https://music.youtube.com/watch?v=5NV6Rdv1a3I"},
+        {"artist": "Gorillaz", "title": "Feel Good Inc", "url": "https://music.youtube.com/watch?v=0123456789a"},
+    ]
+    app._queue_at = 0
+    app._render_queue = MagicMock()
+    app.query_one = MagicMock()
+
+    app._sync_queue_highlight("Gorillaz", "Feel Good Inc")
+
+    assert app._queue_at == 1
+    app._render_queue.assert_called_once()
+
+
+def test_startup_auto_follow_playing_track():
+    from unittest.mock import MagicMock
+    from karaoke import detect
+    from karaoke.tui import KaraokeTui
+
+    app = KaraokeTui()
+    app._det = detect.Detection(mode="spotify", artist="Radiohead", title="Karma Police")
+    app._queue = []
+    app._render_queue = MagicMock()
+    app.notify = MagicMock()
+    app.query_one = MagicMock()
+
+    app._sync_queue_highlight("Radiohead", "Karma Police")
+
+    assert app._play_once is True
+    assert app._auto_followed_on_startup is True
+    assert len(app._queue) == 1
+    assert app._queue[0]["artist"] == "Radiohead"
+    assert app._queue_at == 0
+
+
 def test_default_sync_offset_spotify_env_override(monkeypatch):
     monkeypatch.setenv("KARAOKE_SYNC_OFFSET_SPOTIFY", "0.3")
     assert _default_sync_offset("spotify") == 0.3

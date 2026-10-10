@@ -1933,6 +1933,15 @@ class KaraokeTui(App):
             import random
             random.SystemRandom().shuffle(rows)
         self._queue = rows
+
+        # If a player is currently active, align queue highlight with it instead of defaulting to row 0
+        if getattr(self, "_det", None) and self._det.is_active:
+            self._sync_queue_highlight(self._det.artist, self._det.title, self._det.url or "")
+        elif getattr(self, "_current_song", None):
+            cur_art, cur_title, cur_url = self._current_song
+            if cur_art or cur_title:
+                self._sync_queue_highlight(cur_art, cur_title, cur_url)
+
         table = self.query_one("#queue", DataTable)
         try:
             lib_table = self.query_one("#library", DataTable)
@@ -1974,6 +1983,71 @@ class KaraokeTui(App):
                               f"{'  (follow queue)' if self._play_once else ''}"
                               f"  [sort: {self._sort}]")
 
+    def _sync_queue_highlight(self, artist: str, title: str, url: str = "") -> None:
+        """Keep the local queue and library table highlights aligned with the playing MPRIS track."""
+        if not artist and not title:
+            return
+
+        c_artist = (artist or "").strip().lower()
+        c_title = (title or "").strip().lower()
+
+        if url:
+            self._last_finished_url = url
+
+        # On startup/reload, if a player is active, enable follow-queue mode automatically
+        if getattr(self, "_det", None) and self._det.is_active and not getattr(self, "_auto_followed_on_startup", False):
+            self._auto_followed_on_startup = True
+            self._play_once = True
+            self.notify(f"Auto-following active player: {artist} - {title}")
+
+        # 1. Update queue highlight index
+        if self._queue is not None:
+            matched_idx = -1
+            for idx, item in enumerate(self._queue):
+                item_art = str(item.get("artist") or "").strip().lower()
+                item_title = str(item.get("title") or "").strip().lower()
+                item_url = str(item.get("url") or "")
+
+                if url and item_url and url.strip() == item_url.strip():
+                    matched_idx = idx
+                    break
+                if (c_artist and c_title and
+                    (c_artist in item_art or item_art in c_artist) and
+                    (c_title in item_title or item_title in c_title)):
+                    matched_idx = idx
+                    break
+
+            # If track is active but missing from current queue, prepend to follow it
+            if matched_idx == -1 and getattr(self, "_det", None) and self._det.is_active:
+                new_row = {"artist": artist, "title": title, "url": url}
+                self._queue.insert(0, new_row)
+                matched_idx = 0
+
+            if matched_idx != -1:
+                self._queue_at = matched_idx
+                self._render_queue()
+                try:
+                    table = self.query_one("#queue", DataTable)
+                    if 0 <= matched_idx < len(table.rows):
+                        table.move_cursor(row=matched_idx, animate=False)
+                except Exception:
+                    pass
+
+        # 2. Update library table cursor highlight if matched
+        try:
+            lib_table = self.query_one("#library", DataTable)
+            for row_idx, song in enumerate(self._song_data):
+                s_art = str(song.get("artist") or "").strip().lower()
+                s_title = str(song.get("title") or "").strip().lower()
+                if (c_artist and c_title and
+                    (c_artist in s_art or s_art in c_artist) and
+                    (c_title in s_title or s_title in c_title)):
+                    if 0 <= row_idx < len(lib_table.rows):
+                        lib_table.move_cursor(row=row_idx, animate=False)
+                    break
+        except Exception:
+            pass
+
     def action_toggle_play_once(self) -> None:
         """`o`: play the queue through once, or let the player carry on.
 
@@ -2002,6 +2076,12 @@ class KaraokeTui(App):
         if not (self._play_once and self._queue and self._queue_at >= 0):
             return
         state = browser_playback()
+        if not track_finished(state) and not track_idle(state):
+            self._idle_since = 0.0
+            if state and state.get("url") and not getattr(self, "_last_finished_url", ""):
+                self._last_finished_url = state.get("url")
+            return
+
         if not track_finished(state):
             # The window can also come to rest holding nothing at all: the
             # site navigated off the watch URL, or the load never took. That
@@ -2009,9 +2089,6 @@ class KaraokeTui(App):
             # be set -- so without this the queue waits for an end that cannot
             # arrive. A fresh watch URL looks the same for a moment, so let it
             # hold before treating it as the end of the track.
-            if not track_idle(state):
-                self._idle_since = 0.0
-                return
             now = time.monotonic()
             if not self._idle_since:
                 self._idle_since = now
@@ -2023,7 +2100,7 @@ class KaraokeTui(App):
         # Only act once per track: after advancing, the new track is short of
         # its end again, but a stalled read could otherwise fire repeatedly.
         url = (state or {}).get("url", "")
-        if url and url == self._last_finished_url:
+        if url and url == getattr(self, "_last_finished_url", ""):
             return
         self._last_finished_url = url
         self.action_queue_next()
@@ -3062,6 +3139,7 @@ class KaraokeTui(App):
         # Remembered so `A` can post-process whatever is playing without
         # re-resolving it.
         self._current_song = (display_artist, display_title, det.url or "")
+        self._sync_queue_highlight(display_artist, display_title, det.url or "")
         self._refresh_cover_art(det.url or "")
         if lyrics is not None and (lyrics.synced_raw or lyrics.plain):
             self._last_error = ""      # resolved fine; drop any stale error

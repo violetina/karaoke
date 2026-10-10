@@ -142,9 +142,13 @@ def test_deployable_modules_do_not_require_textual():
         "import karaoke.api, karaoke.ctrl_api;"
         "print('OK')"
     )
+    env = {"PYTHONPATH": str(src), "PATH": ""}
+    import os
+    if "KARAOKE_DATA_DIR" in os.environ:
+        env["KARAOKE_DATA_DIR"] = os.environ["KARAOKE_DATA_DIR"]
     result = subprocess.run(
         [sys.executable, "-c", script],
-        capture_output=True, text=True, env={"PYTHONPATH": str(src), "PATH": ""},
+        capture_output=True, text=True, env=env,
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout

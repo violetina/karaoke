@@ -89,6 +89,9 @@ nav:
   - Vectors: vectors.md
   - Search how-to: search-howto.md
   - Troubleshooting: troubleshooting.md
+  - Releases:
+      - 0.8.0: releases/0.8.0.md
+      - 0.7.0: releases/0.7.0.md
   - Roadmap / TODO: todo.md
   - Tools:
       - karaoke: '!include ./src/karaoke/mkdocs.yml'

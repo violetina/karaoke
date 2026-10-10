@@ -187,3 +187,36 @@ def test_dismiss_kiosk_dialogs():
         dismissed = player_open.dismiss_kiosk_dialogs()
         assert dismissed is True
         assert mock_send.call_count >= 1
+
+
+def test_bidirectional_sync_ytmusic_playlist(tmp_path):
+    client = MagicMock(spec=YTMusicClient)
+    client.is_authenticated = True
+    client.get_library_playlists.return_value = [{"title": "Karaoke (synced lyrics)", "playlistId": "PL_EXISTING_456"}]
+    client.get_playlist_tracks.return_value = [
+        {
+            "artist": "New Artist",
+            "title": "New Remote Song",
+            "album": "Remote Album",
+            "duration_seconds": 210,
+            "url": "https://music.youtube.com/watch?v=remote123",
+            "videoId": "remote123",
+        }
+    ]
+
+    c = _conn(tmp_path)
+    _add_track(c, "Local Artist", "Local Song", synced=True, url="https://music.youtube.com/watch?v=local123", kind="youtube_music")
+
+    with patch("karaoke.lyrics.fetch_lrclib", return_value=Lyrics(plain="hello", synced_raw="[00:01.00] hello", source="lrclib")):
+        res = yp.bidirectional_sync_ytmusic_playlist(
+            name="Karaoke (synced lyrics)",
+            dry_run=False,
+            client=client,
+            conn=c,
+        )
+
+    assert res.playlist_id == "PL_EXISTING_456"
+    assert res.remote_total == 1
+    assert res.remote_imported == 1
+    assert res.remote_synced_lyrics == 1
+    assert res.local_candidates == 2  # Local + Remote imported

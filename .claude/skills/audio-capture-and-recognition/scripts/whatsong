@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# whatsong - identify the song currently playing through the speakers.
+#
+# Captures the PulseAudio/PipeWire *monitor* of the ACTIVE output sink and
+# fingerprints it with songrec (open-source Shazam client). Audio is streamed
+# straight into songrec, so no recording is ever written to disk.
+#
+# Install: copy to ~/.local/bin/whatsong && chmod +x
+# Requires: media-sound/songrec, pactl (pipewire-pulse or pulseaudio)
+#
+# Usage:
+#   whatsong              identify what is playing now
+#   whatsong -j           full song info as JSON
+#   whatsong -d <source>  use a specific monitor source
+#   whatsong -l           list available capture devices
+#   whatsong -t <secs>    give up after N seconds (default 30)
+
+set -uo pipefail
+
+TIMEOUT=30
+DEVICE=""
+JSON=""
+
+die() { printf 'whatsong: %s\n' "$1" >&2; exit 1; }
+
+# Print only the leading comment block, stripped of '# '.
+usage() { sed -n '2,18p' "$0" | sed -n '/^#/s/^# \{0,1\}//p'; exit 0; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -j|--json)    JSON="-j"; shift ;;
+    -d|--device)  DEVICE="${2:-}"; [[ -n $DEVICE ]] || die "-d needs a source name"; shift 2 ;;
+    -t|--timeout) TIMEOUT="${2:-}"; [[ $TIMEOUT =~ ^[0-9]+$ ]] || die "-t needs seconds"; shift 2 ;;
+    -l|--list)    exec songrec recognize --list-devices ;;
+    -h|--help)    usage ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+done
+
+command -v songrec >/dev/null || die "songrec not installed (emerge media-sound/songrec)"
+command -v pactl   >/dev/null || die "pactl not found (install pipewire-pulse or pulseaudio)"
+
+# Resolve which sink to listen to, unless one was given explicitly.
+#
+# Prefer the sink that is ACTUALLY playing audio: with several outputs (e.g. an
+# internal speaker plus a USB DAC) the default sink is often not where the music
+# is routed, which would leave us fingerprinting silence and reporting a
+# misleading "no match".
+#
+# Known sharp edges:
+#   - `pactl list short sink-inputs` column positions vary by pactl version;
+#     `pactl -f json list sink-inputs` is more robust where available.
+#   - A CORKED (paused) stream still shows up here. We prefer a RUNNING one.
+if [[ -z $DEVICE ]]; then
+  sink=""
+  # Prefer a RUNNING stream; fall back to the first stream of any state.
+  sink_idx="$(pactl list short sink-inputs 2>/dev/null \
+                | awk '$0 ~ /RUNNING/ {print $2; exit}')"
+  [[ -n $sink_idx ]] || \
+    sink_idx="$(pactl list short sink-inputs 2>/dev/null | awk 'NR==1{print $2}')"
+
+  if [[ -n $sink_idx ]]; then
+    sink="$(pactl list short sinks 2>/dev/null | awk -v i="$sink_idx" '$1==i{print $2}')"
+  fi
+  # Nothing playing (or the lookup failed) -> fall back to the default sink.
+  if [[ -z $sink ]]; then
+    sink="$(pactl get-default-sink 2>/dev/null)"
+  fi
+  [[ -n $sink && $sink != "@DEFAULT_SINK@" ]] || \
+    die "could not resolve an output sink; pick one with -d (see -l)"
+  DEVICE="${sink}.monitor"
+fi
+
+# Confirm the monitor actually exists before handing it to songrec, so a renamed
+# or unplugged sink gives a clear error instead of a silent no-match.
+if ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qxF "$DEVICE"; then
+  die "monitor source not found: $DEVICE
+try 'whatsong -l' to list devices, then 'whatsong -d <name>'"
+fi
+
+# Warn when nothing is actually playing - otherwise songrec just times out.
+if ! pactl list short sink-inputs 2>/dev/null | grep -q .; then
+  printf 'whatsong: nothing seems to be playing right now - listening anyway...\n' >&2
+fi
+
+printf 'Listening on %s (up to %ss)...\n' "${DEVICE##*.HiFi__}" "$TIMEOUT" >&2
+
+# songrec logs device chatter to stderr and the match to stdout.
+out="$(timeout "$TIMEOUT" songrec recognize -d "$DEVICE" $JSON 2>/dev/null)"
+rc=$?
+
+if [[ -n ${out//[[:space:]]/} ]]; then
+  printf '%s\n' "$out"
+  exit 0
+fi
+
+# Empty stdout: distinguish "ran out of time" from "heard it, no match".
+if [[ $rc -eq 124 ]]; then
+  die "no match within ${TIMEOUT}s - is the volume up? try a longer -t"
+fi
+
+die "no match. Shazam did not recognise it (or the track is too quiet/obscure)."

@@ -67,6 +67,7 @@ def test_escape_inside_a_session_goes_back_rather_than_closing(monkeypatch):
 def test_selecting_a_track_opens_it_in_the_existing_window(monkeypatch):
     """The whole design: hand a URL to the browser that is already playing."""
     opened = []
+    monkeypatch.setattr("karaoke.tui._playback_endpoint_problem", lambda url: None)
     monkeypatch.setattr("karaoke.player_open.open_song_url",
                         lambda url, kind: opened.append((url, kind)))
     screen = _screen(rows=[_row(index=2)])
@@ -84,6 +85,7 @@ def test_selecting_a_track_opens_it_in_the_existing_window(monkeypatch):
 def test_a_pruned_track_is_not_played_and_says_why(monkeypatch):
     """Retention deletes audio after a week; the marks outlive it."""
     opened = []
+    monkeypatch.setattr("karaoke.tui._playback_endpoint_problem", lambda url: None)
     monkeypatch.setattr("karaoke.player_open.open_song_url",
                         lambda url, kind: opened.append(url))
     app = _FakeApp()
@@ -98,6 +100,7 @@ def test_a_pruned_track_is_not_played_and_says_why(monkeypatch):
 def test_a_silent_track_is_still_playable(monkeypatch):
     """Marked, not blocked: hearing the silence is how it gets confirmed."""
     opened = []
+    monkeypatch.setattr("karaoke.tui._playback_endpoint_problem", lambda url: None)
     monkeypatch.setattr("karaoke.player_open.open_song_url",
                         lambda url, kind: opened.append(url))
     screen = _screen(rows=[_row(index=1, silent=True)])

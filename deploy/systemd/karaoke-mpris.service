@@ -1,0 +1,18 @@
+[Unit]
+Description=Karaoke MPRIS D-Bus Controller Service (org.mpris.MediaPlayer2.karaoke)
+Documentation=file:///home/tina/karaoke/docs/architecture.md
+After=network-online.target
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.mpris_service --daemon
+Restart=on-failure
+RestartSec=3
+SyslogIdentifier=karaoke-mpris
+
+[Install]
+WantedBy=karaoke.target

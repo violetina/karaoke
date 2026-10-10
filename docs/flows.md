@@ -357,3 +357,45 @@ against the track's 194.5s), and alignment produced 1630 characters of LRC.
 Note that adding `sync` to the queue required **restarting the workers**: they
 are long-running, and until they were restarted they accepted the task, ran the
 `analysis` half they knew about, and silently skipped the rest.
+
+## MPRIS D-Bus Event Flow (`org.mpris.MediaPlayer2.karaoke`)
+
+The virtual MPRIS D-Bus service (`karaoke-mpris`) acts as a bridge between Linux OS desktop media controls (system tray, media keys, KDE Connect) and the Karaoke playback targets (Chrome CDP, Spotify API, or local players).
+
+```mermaid
+flowchart TD
+    A[Desktop Media Keys / System Tray] -->|D-Bus Calls: Play, Pause, Next, Prev| B[org.mpris.MediaPlayer2.karaoke]
+    B -->|CDP Command| C[Chrome CDP Kiosk]
+    B -->|Publish Event| D[RabbitMQ Exchange: celeryev\nrouting: karaoke.control.*]
+    D -->|Mirror Event| E[Argo Events AMQP EventSource]
+    E -->|PUT Event| F[OpenSearch karaoke-events Ledger]
+    F -->|Poll Ledger /api/events/recent| G[WebTUI / Admin TUI\nReactive In-Place Refresh]
+```
+
+## Bi-Directional YouTube Music Playlist Sync Flow
+
+`karaoke-ytmusic-playlist --sync --bidirectional` performs differential synchronization between local SQLite (`karaoke.db`) and YouTube Music playlists.
+
+```mermaid
+flowchart TD
+    A[YT Music Playlist API] <-->|get_playlist_tracks| B[bidirectional_sync_ytmusic_playlist]
+    B -->|Remote Additions| C[Import Track & Source into SQLite]
+    C -->|Auto-Fetch| D[LRCLIB / Whisper Synced Lyrics]
+    B -->|Local Additions| E[Export Synced Tracks to YT Music]
+    D -->|Emit Task Event| F[RabbitMQ / Argo Events Ledger]
+```
+
+## WebTUI Live Queue Highlight & Auto-Follow Flow
+
+On startup or page reload, WebTUI detects active desktop player playback, locks onto the playing playlist, and moves the local queue table cursor in real time.
+
+```mermaid
+flowchart TD
+    A[WebTUI Mount / Page Reload] --> B[detect.detect_active]
+    B -->|Track Active| C[Enable Follow Queue Mode: play_once=True]
+    C --> D[Match Track in Queue or Prepend Row 0]
+    D --> E[Update _queue_at Index]
+    E --> F[Render Queue '>' Indicator]
+    F --> G[Move DataTable Cursor to Active Row]
+```
+

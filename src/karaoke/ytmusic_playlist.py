@@ -264,6 +264,111 @@ def import_ytmusic_playlist_to_library(
     return stats
 
 
+@dataclass
+class BiSyncResult:
+    """Outcome of a bi-directional YouTube Music playlist sync."""
+
+    playlist_id: str = ""
+    name: str = ""
+    remote_total: int = 0
+    remote_imported: int = 0
+    remote_synced_lyrics: int = 0
+    local_candidates: int = 0
+    local_added_to_remote: int = 0
+    already_synced: int = 0
+    dry_run: bool = False
+
+
+def bidirectional_sync_ytmusic_playlist(
+    *,
+    name: str = DEFAULT_PLAYLIST_NAME,
+    playlist_id: Optional[str] = None,
+    dry_run: bool = False,
+    resolve_lyrics: bool = True,
+    client: Optional[YTMusicClient] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> BiSyncResult:
+    """Perform a bi-directional sync between local SQLite library and a YouTube Music playlist.
+
+    1. Imports any tracks present on YT Music into local SQLite + fetches lyrics.
+    2. Exports local karaoke-ready tracks back to the YT Music playlist.
+    """
+    yt = client or YTMusicClient()
+    result = BiSyncResult(name=name, dry_run=dry_run)
+
+    own_conn = conn is None
+    c = conn or localcache.connect()
+
+    try:
+        # Step 1: Resolve target playlist ID
+        target_id = playlist_id
+        if not target_id:
+            yt.require_auth()
+            playlists = yt.get_library_playlists(limit=100)
+            for pl in playlists:
+                if pl.get("title", "").strip().lower() == name.strip().lower():
+                    target_id = pl.get("playlistId")
+                    break
+
+        if not target_id and not dry_run:
+            candidates = karaoke_tracks(c)
+            vids = [cand.video_id for cand in candidates if cand.video_id]
+            target_id = yt.create_playlist(
+                title=name,
+                description=DEFAULT_DESCRIPTION,
+                privacy_status="PRIVATE",
+                video_ids=vids[:50],
+            )
+            result.local_added_to_remote = len(vids[:50])
+
+        result.playlist_id = target_id or "dry-run"
+
+        # Step 2: Remote -> Local Sync (Import items added on YT Music)
+        if target_id and target_id != "dry-run":
+            remote_tracks = yt.get_playlist_tracks(target_id, limit=500)
+            result.remote_total = len(remote_tracks)
+
+            for t in remote_tracks:
+                artist = t["artist"]
+                title = t["title"]
+                album = str(t.get("album") or "")
+                duration = t.get("duration_seconds")
+                url = t["url"]
+
+                if not dry_run:
+                    localcache.add_track_source(
+                        artist, title, album=album, duration=duration,
+                        url=url, kind="youtube_music", conn=c
+                    )
+
+                    if resolve_lyrics:
+                        from . import lyrics
+                        ly = lyrics.fetch_lrclib(artist, title, album, duration)
+                        if ly and ly.synced_raw:
+                            result.remote_synced_lyrics += 1
+                        localcache.add_track_and_lyrics(
+                            artist, title, ly, album=album, duration=duration, conn=c
+                        )
+                result.remote_imported += 1
+
+        # Step 3: Local -> Remote Sync (Export local karaoke-ready tracks)
+        export_res = export_synced_tracks_to_ytmusic(
+            name=name,
+            dry_run=dry_run,
+            client=yt,
+            conn=c,
+        )
+        result.local_candidates = export_res.candidates
+        result.local_added_to_remote += export_res.added
+        result.already_synced = export_res.already_present
+
+    finally:
+        if own_conn:
+            c.close()
+
+    return result
+
+
 def interactive_setup_auth() -> None:
     """Interactively setup authentication headers using ytmusicapi.setup()."""
     from ytmusicapi import setup
@@ -298,6 +403,7 @@ def ytmusic_playlist_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--list", action="store_true", help="List YouTube Music playlists in your library")
     parser.add_argument("--sync", action="store_true", help="Sync karaoke-ready tracks to YouTube Music playlist")
+    parser.add_argument("--bidirectional", action="store_true", help="Perform bi-directional sync (remote <-> local)")
     parser.add_argument("--import-playlist", metavar="PLAYLIST_ID", help="Import a YouTube Music playlist into local library")
     parser.add_argument("--name", default=DEFAULT_PLAYLIST_NAME, help=f"Playlist name (default: '{DEFAULT_PLAYLIST_NAME}')")
     parser.add_argument("--limit", type=int, help="Limit number of tracks to export")
@@ -335,6 +441,28 @@ def ytmusic_playlist_main(argv: list[str] | None = None) -> None:
         print(f"Imported {stats['added_tracks']}/{stats['total_tracks']} tracks:")
         print(f" - Synced lyrics matched: {stats['synced_lyrics']}")
         print(f" - Plain lyrics matched:  {stats['plain_lyrics']}")
+        return
+
+    if args.bidirectional:
+        print(f"Bi-directional syncing playlist '{args.name}'...")
+        try:
+            res = bidirectional_sync_ytmusic_playlist(
+                name=args.name,
+                dry_run=args.dry_run,
+                client=client,
+            )
+            print(f"Playlist: {res.name} (ID: {res.playlist_id})")
+            print(f" - Remote Total:        {res.remote_total}")
+            print(f" - Remote Imported:     {res.remote_imported}")
+            print(f" - Remote Synced Lyrics: {res.remote_synced_lyrics}")
+            print(f" - Local Candidates:    {res.local_candidates}")
+            print(f" - Added to Remote:     {res.local_added_to_remote}")
+            print(f" - Already Synced:      {res.already_synced}")
+            if res.dry_run:
+                print("[DRY RUN] No changes were made.")
+        except YTMusicAuthError as exc:
+            print(f"Authentication required: {exc}")
+            sys.exit(1)
         return
 
     if args.sync or not (args.list or args.import_playlist):

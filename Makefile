@@ -33,7 +33,7 @@ K8S_NAMESPACE ?= karaoke
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
-        install-audio analyze api ctrl-api \
+        install-audio analyze api ctrl-api mpris ytmusic-sync \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run folder-scan \
@@ -269,6 +269,15 @@ vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without wr
 
 health: ## Run the karaoke platform health check (services, ports, cluster, DB)
 	$(PYTHON) scripts/healthcheck.py
+healthz: ## Verify systemd karaoke services and K3s apps are healthy
+	@echo "Running systemd service health check..."
+	@systemctl --user is-active karaoke-webtui.service >/dev/null && \
+	  systemctl --user is-active karaoke-mpris.service >/dev/null && \
+	  systemctl --user is-active karaoke-queue.service >/dev/null || \
+	  (echo "❌ One or more karaoke systemd services are not active" && exit 1)
+	@echo "Running K3s apps health check..."
+	@SCRIPT_DIR=$$(dirname $$0)/scripts && \
+	  $$SCRIPT_DIR/health_check.sh
 
 webtui: web ## Alias for make web
 
@@ -278,10 +287,17 @@ admin: ## Run the backend operations & worker management TUI
 web: ## Serve the TUI in a web browser using textual-serve
 	$(PYTHON) scripts/web_serve.py
 
+mpris: ## Run the Karaoke MPRIS D-Bus Controller service daemon
+	$(PYTHON) -m karaoke.mpris_service --daemon
+
+ytmusic-sync: ## Perform bi-directional playlist sync with YouTube Music
+	$(PYTHON) -m karaoke.ytmusic_playlist --sync --bidirectional
+
 systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
 	mkdir -p $(HOME)/.config/systemd/user
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-ctrl-api.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-mpris.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
@@ -298,7 +314,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower karaoke-kiosk karaoke-webtui 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mpris karaoke-mq-forward karaoke-celery-worker karaoke-celery-flower karaoke-kiosk karaoke-webtui 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \
