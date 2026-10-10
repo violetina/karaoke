@@ -66,7 +66,7 @@ def rows_missing(conn) -> list:
     return conn.execute(
         """
         SELECT t.track_id, t.artist, t.title, t.album, t.duration,
-               (SELECT group_concat(s.url, char(10)) FROM sources s
+               (SELECT string_agg(s.url, chr(10)) FROM sources s
                  WHERE s.track_id = t.track_id) AS urls
         FROM tracks t
         WHERE t.duration IS NULL OR t.duration <= 0
@@ -82,9 +82,9 @@ def store(conn, track_id: int, *, duration: Optional[float] = None,
     conn.execute(
         """
         UPDATE tracks
-        SET duration = COALESCE(duration, ?),
-            album = COALESCE(NULLIF(album, ''), NULLIF(?, ''))
-        WHERE track_id = ?
+        SET duration = COALESCE(duration, %s),
+            album = COALESCE(NULLIF(album, ''), NULLIF(%s, ''))
+        WHERE track_id = %s
         """,
         (duration, album, track_id),
     )

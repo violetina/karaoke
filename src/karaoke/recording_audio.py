@@ -63,7 +63,7 @@ def track_segment(recording_id: int, index: int, conn=None):
     from . import recorder, recording_slice
 
     marks = [m for m in recorder.load_marks(recording_id, conn) if m.ok]
-    found = recording_slice.segments(marks)
+    found = recording_slice.segments(marks, conn=conn)
     if index < 0 or index >= len(found):
         return None
     return found[index]
@@ -140,7 +140,7 @@ def browse_rows(recording_id: int, conn=None) -> list[dict]:
 
         marks = [m for m in recorder.load_marks(recording_id, conn) if m.ok]
         rows = []
-        for index, segment in enumerate(recording_slice.segments(marks)):
+        for index, segment in enumerate(recording_slice.segments(marks, conn=conn)):
             window = recording_worker.clamp(segment, span) if span else None
             rows.append({
                 "index": index,
