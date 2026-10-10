@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS lyrics (
     source          TEXT, -- lrclib | youtube_caption | whisper | user_submitted
     synced_lyrics   TEXT,
     plain_lyrics    TEXT,
+    media_type      TEXT NOT NULL DEFAULT 'audio',
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 
@@ -118,13 +119,14 @@ CREATE TABLE IF NOT EXISTS spotify_lookups (
 );
 
 CREATE TABLE IF NOT EXISTS track_sync_offsets (
-    track_id    INTEGER PRIMARY KEY,
+    track_id    INTEGER NOT NULL,
     offset_s    REAL NOT NULL,
     updated_at  REAL NOT NULL,
     -- Which clock the offset was tuned against: 'radio' (dead-reckoned from
     -- songrec, carries DEFAULT_LEAD_S) or 'player' (MPRIS position, no lead).
     -- An offset is only valid for its own clock; see offset_mode().
     mode        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (track_id, mode),
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 
@@ -958,44 +960,112 @@ def is_album_upload(duration) -> bool:
 def offset_mode(mode: str) -> str:
     """Collapse a detection mode to the clock its sync offset belongs to.
 
-    Radio dead-reckons the playhead from songrec and adds ``DEFAULT_LEAD_S`` to
-    cover the listening latency; every other mode reads an MPRIS position with
-    no such lead. An offset tuned against one clock is wrong by roughly that
-    lead on the other, so the two are stored and matched separately. Modes that
-    share the MPRIS position (scan, spotify, listen) share an offset.
+    - "radio": dead-reckoned playhead from songrec (carries DEFAULT_LEAD_S).
+    - "video": YouTube music video / live video with visual intro/outro offset.
+    - "audio": studio audio / album cut / Spotify / YT Music ATV.
+    - "player": generic desktop player.
     """
-    return "radio" if mode == "radio" else "player"
+    if mode == "radio":
+        return "radio"
+    if mode in ("video", "youtube_video", "scan_video"):
+        return "video"
+    if mode in ("audio", "youtube_audio", "scan_audio"):
+        return "audio"
+    return "player"
 
 
 def ensure_sync_offset_columns(conn: Connection) -> None:
-    """Add the ``mode`` column to databases created before it existed."""
-    cols = {r["name"] for r in conn.execute("SELECT column_name as name FROM information_schema.columns WHERE table_name = %s", ("track_sync_offsets",))}
-    if "mode" not in cols:
-        conn.execute("ALTER TABLE track_sync_offsets ADD COLUMN "
-                     "mode TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+    """Add the ``mode`` column and update primary key to (track_id, mode) if needed."""
+    try:
+        cur = conn.cursor()
+        if getattr(conn, "_is_pg", True):
+            cur.execute("SELECT column_name as name FROM information_schema.columns WHERE table_name = 'track_sync_offsets'")
+            cols = {r["name"] for r in cur.fetchall()}
+            if cols and "mode" not in cols:
+                cur.execute("ALTER TABLE track_sync_offsets ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
+            try:
+                cur.execute("""
+                    SELECT pg_get_constraintdef(c.oid) as condef
+                    FROM pg_constraint c
+                    JOIN pg_class t ON c.conrelid = t.oid
+                    WHERE t.relname = 'track_sync_offsets' AND c.contype = 'p'
+                """)
+                row = cur.fetchone()
+                pk_def = row["condef"] if row else ""
+                if pk_def and "track_id, mode" not in pk_def:
+                    cur.execute("ALTER TABLE track_sync_offsets DROP CONSTRAINT IF EXISTS track_sync_offsets_pkey")
+                    cur.execute("ALTER TABLE track_sync_offsets ADD PRIMARY KEY (track_id, mode)")
+            except Exception as e:
+                log.debug("ensure_sync_offset_columns constraint update skipped: %s", e)
+            conn.commit()
+    except Exception as exc:
+        log.debug("ensure_sync_offset_columns skipped/failed: %s", exc)
 
 
 def get_sync_offset(track_id: Optional[int], conn: Connection,
                     mode: Optional[str] = None) -> Optional[float]:
     """Return the saved lyric sync offset (seconds) for a track, or None.
 
-    When ``mode`` is given, an offset saved against a different clock is
-    ignored rather than misapplied — the caller then falls back to its default.
-    Rows predating the ``mode`` column store ``''`` and are honoured for any
-    mode: they cannot be attributed, and the alternative is silently discarding
-    tuning the user did by hand.
+    When ``mode`` is given, looks for an offset tuned for that mode/clock:
+    - If mode is 'video', prefers 'video', falls back to 'player' or ''
+    - If mode is 'audio', prefers 'audio', falls back to 'player' or ''
+    - If mode is 'radio', checks 'radio' or ''
     """
     if track_id is None:
         return None
-    row = conn.execute(
-        "SELECT offset_s, mode FROM track_sync_offsets WHERE track_id = %s",
-        (track_id,),
-    ).fetchone()
+
+    ensure_sync_offset_columns(conn)
+    target_mode = offset_mode(mode) if mode is not None else None
+    cur = conn.cursor()
+
+    if target_mode == "video":
+        cur.execute(
+            """
+            SELECT offset_s, mode FROM track_sync_offsets
+            WHERE track_id = %s AND mode IN ('video', 'player', '')
+            ORDER BY CASE mode WHEN 'video' THEN 1 WHEN 'player' THEN 2 ELSE 3 END
+            LIMIT 1
+            """,
+            (track_id,),
+        )
+    elif target_mode == "audio":
+        cur.execute(
+            """
+            SELECT offset_s, mode FROM track_sync_offsets
+            WHERE track_id = %s AND mode IN ('audio', 'player', '')
+            ORDER BY CASE mode WHEN 'audio' THEN 1 WHEN 'player' THEN 2 ELSE 3 END
+            LIMIT 1
+            """,
+            (track_id,),
+        )
+    elif target_mode == "radio":
+        cur.execute(
+            """
+            SELECT offset_s, mode FROM track_sync_offsets
+            WHERE track_id = %s AND mode IN ('radio', '')
+            ORDER BY CASE mode WHEN 'radio' THEN 1 ELSE 2 END
+            LIMIT 1
+            """,
+            (track_id,),
+        )
+    elif target_mode == "player":
+        cur.execute(
+            """
+            SELECT offset_s, mode FROM track_sync_offsets
+            WHERE track_id = %s AND mode IN ('player', 'audio', '')
+            ORDER BY CASE mode WHEN 'player' THEN 1 WHEN 'audio' THEN 2 ELSE 3 END
+            LIMIT 1
+            """,
+            (track_id,),
+        )
+    else:
+        cur.execute(
+            "SELECT offset_s, mode FROM track_sync_offsets WHERE track_id = %s LIMIT 1",
+            (track_id,),
+        )
+
+    row = cur.fetchone()
     if row is None:
-        return None
-    saved = row["mode"] or ""
-    if mode is not None and saved and saved != offset_mode(mode):
         return None
     return float(row["offset_s"])
 
@@ -1003,18 +1073,32 @@ def get_sync_offset(track_id: Optional[int], conn: Connection,
 def set_sync_offset(track_id: int, offset_s: float, conn: Connection,
                     mode: str = "") -> None:
     """Persist (upsert) the per-track lyric sync offset in seconds."""
-    conn.execute(
-        """
-        INSERT INTO track_sync_offsets (track_id, offset_s, updated_at, mode)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT(track_id) DO UPDATE SET
-            offset_s = excluded.offset_s,
-            updated_at = excluded.updated_at,
-            mode = excluded.mode
-        """,
-        (track_id, float(offset_s), time.time(),
-         offset_mode(mode) if mode else ""),
-    )
+    ensure_sync_offset_columns(conn)
+    saved_mode = offset_mode(mode) if mode else ""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO track_sync_offsets (track_id, offset_s, updated_at, mode)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(track_id, mode) DO UPDATE SET
+                offset_s = excluded.offset_s,
+                updated_at = excluded.updated_at
+            """,
+            (track_id, float(offset_s), time.time(), saved_mode),
+        )
+    except Exception:
+        cur.execute(
+            """
+            INSERT INTO track_sync_offsets (track_id, offset_s, updated_at, mode)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(track_id) DO UPDATE SET
+                offset_s = excluded.offset_s,
+                updated_at = excluded.updated_at,
+                mode = excluded.mode
+            """,
+            (track_id, float(offset_s), time.time(), saved_mode),
+        )
     conn.commit()
 
 
@@ -1447,22 +1531,67 @@ def find_track_by_url(url: str, conn: Connection) -> Optional[tuple[int, str, st
     return None
 
 
-def get_lyrics_by_track_id(track_id: int, conn: Connection) -> Optional[Lyrics]:
-    """Get approved lyrics for a given track ID."""
+def ensure_lyrics_media_type_column(conn: Connection) -> None:
+    """Ensure lyrics table carries media_type ('audio' | 'video')."""
+    try:
+        cur = conn.cursor()
+        if getattr(conn, "_is_pg", True):
+            cur.execute("SELECT column_name as name FROM information_schema.columns WHERE table_name = 'lyrics'")
+            cols = {r["name"] for r in cur.fetchall()}
+            if "media_type" not in cols:
+                cur.execute("ALTER TABLE lyrics ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'")
+                conn.commit()
+    except Exception as exc:
+        log.debug("ensure_lyrics_media_type_column skipped: %s", exc)
+
+
+def get_lyrics_by_track_id(
+    track_id: int, conn: Connection, media_type: Optional[str] = None
+) -> Optional[Lyrics]:
+    """Get approved lyrics for a given track ID, with optional media_type ('audio' | 'video') preference."""
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM lyrics WHERE track_id = %s AND kind = 'approved'",
-        (track_id,)
-    )
-    row = cur.fetchone()
+    ensure_lyrics_media_type_column(conn)
+    row = None
+
+    if media_type == "video":
+        cur.execute(
+            """
+            SELECT * FROM lyrics
+            WHERE track_id = %s AND kind = 'approved'
+              AND (media_type = 'video' OR source IN ('youtube_caption', 'video', 'video_caption'))
+            ORDER BY lyric_id DESC LIMIT 1
+            """,
+            (track_id,),
+        )
+        row = cur.fetchone()
+
+    elif media_type == "audio":
+        cur.execute(
+            """
+            SELECT * FROM lyrics
+            WHERE track_id = %s AND kind = 'approved'
+              AND (media_type = 'audio' OR source NOT IN ('youtube_caption', 'video', 'video_caption'))
+            ORDER BY lyric_id DESC LIMIT 1
+            """,
+            (track_id,),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        cur.execute(
+            "SELECT * FROM lyrics WHERE track_id = %s AND kind = 'approved' ORDER BY lyric_id DESC LIMIT 1",
+            (track_id,),
+        )
+        row = cur.fetchone()
+
     if not row:
         return None
-    
+
     synced = row["synced_lyrics"] or ""
     plain = row["plain_lyrics"] or ""
     if not synced and not plain:
         return None
-        
+
     return Lyrics(
         plain=plain,
         synced_raw=synced,
@@ -1474,6 +1603,7 @@ def get_cached_lyrics(
     artist: str,
     title: str,
     *,
+    media_type: Optional[str] = None,
     conn: Optional[Connection] = None,
 ) -> Optional[Lyrics]:
     """Return approved cached lyrics for artist/title, or None on miss.
@@ -1487,7 +1617,7 @@ def get_cached_lyrics(
         track_id = find_track_id(artist, title, c)
         if not track_id:
             return None
-        return get_lyrics_by_track_id(track_id, c)
+        return get_lyrics_by_track_id(track_id, c, media_type=media_type)
     finally:
         if own:
             c.close()
@@ -1500,19 +1630,21 @@ def put_cached_lyrics(
     *,
     album: str = "",
     duration: Optional[float] = None,
+    media_type: Optional[str] = None,
     conn: Optional[Connection] = None,
 ) -> None:
     """Upsert approved lyrics for artist/title.
 
-    Empty lyrics are ignored. Existing approved lyrics for the track are replaced
-    so a Whisper/synced result can upgrade an earlier plain LRCLIB/caption entry.
+    Supports storing separate audio and video versions without clobbering each other.
     """
     if not (lyrics.synced_raw or lyrics.plain):
         return
+    mtype = media_type or ("video" if lyrics.source in ("youtube_caption", "video", "video_caption") else "audio")
     own = conn is None
     c = conn or connect()
     try:
         cur = c.cursor()
+        ensure_lyrics_media_type_column(c)
         track_id = find_track_id(artist, title, c)
         if track_id is None:
             cur.execute(
@@ -1534,15 +1666,15 @@ def put_cached_lyrics(
             )
 
         cur.execute(
-            "DELETE FROM lyrics WHERE track_id = %s AND kind = 'approved'",
-            (track_id,),
+            "DELETE FROM lyrics WHERE track_id = %s AND kind = 'approved' AND media_type = %s",
+            (track_id, mtype),
         )
         cur.execute(
             """
-            INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics)
-            VALUES (%s, 'approved', %s, %s, %s)
+            INSERT INTO lyrics (track_id, kind, source, synced_lyrics, plain_lyrics, media_type)
+            VALUES (%s, 'approved', %s, %s, %s, %s)
             """,
-            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain),
+            (track_id, lyrics.source, lyrics.synced_raw, lyrics.plain, mtype),
         )
         c.commit()
     finally:

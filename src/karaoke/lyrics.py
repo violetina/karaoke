@@ -338,6 +338,96 @@ def fetch_lrclib(
     return Lyrics()
 
 
+def _format_stamp(secs: float, is_word: bool = False) -> str:
+    secs = max(0.0, float(secs))
+    mm = int(secs // 60)
+    ss = int(secs % 60)
+    ms = int(round((secs - int(secs)) * 100))
+    if is_word:
+        return f"<{mm:02d}:{ss:02d}.{ms:02d}>"
+    return f"[{mm:02d}:{ss:02d}.{ms:02d}]"
+
+
+def shift_lrc(lrc: str, offset_seconds: float) -> str:
+    """Shift all line and word timestamps in LRC text by ``offset_seconds``.
+
+    Positive offset shifts stamps forward in time (e.g. for a music video with an intro).
+    Negative offset shifts stamps backward in time. Stamps are bounded at >= 0.0.
+    """
+    if not lrc:
+        return ""
+    out_lines: list[str] = []
+    for line in lrc.splitlines():
+        # Shift line timestamps [mm:ss.xx]
+        def repl_line(m: re.Match) -> str:
+            t = _stamp_seconds(m) + offset_seconds
+            return _format_stamp(t, is_word=False)
+
+        shifted = _TS.sub(repl_line, line)
+
+        # Shift word timestamps <mm:ss.xx> (Enhanced LRC)
+        def repl_word(m: re.Match) -> str:
+            t = _stamp_seconds(m) + offset_seconds
+            return _format_stamp(t, is_word=True)
+
+        shifted = _WORD_TS.sub(repl_word, shifted)
+        out_lines.append(shifted)
+    return "\n".join(out_lines)
+
+
+def sync_video_from_audio(audio_lrc: str, offset_seconds: float) -> str:
+    """Derive video-synced LRC from audio LRC by shifting forward by ``offset_seconds``."""
+    return shift_lrc(audio_lrc, offset_seconds)
+
+
+def sync_audio_from_video(video_lrc: str, offset_seconds: float) -> str:
+    """Derive audio-synced LRC from video LRC by shifting backward by ``offset_seconds``."""
+    return shift_lrc(video_lrc, -offset_seconds)
+
+
+def align_audio_and_video_lyrics(audio_lrc: str, video_lrc: str) -> Optional[float]:
+    """Calculate the time offset in seconds (video_time - audio_time) between audio and video lyrics.
+
+    Returns the median time delta across matching lines, or None if fewer than 2 matching lines are found.
+    """
+    from difflib import SequenceMatcher
+    from statistics import median
+
+    def parse_plain_lines(lrc: str) -> list[tuple[float, str]]:
+        res: list[tuple[float, str]] = []
+        for line in lrc.splitlines():
+            m = _TS.search(line)
+            if m:
+                t = _stamp_seconds(m)
+                txt = _TS.sub("", line)
+                txt = _WORD_TS.sub("", txt).strip().lower()
+                clean = re.sub(r"[^a-z0-9 ]", "", txt)
+                if clean:
+                    res.append((t, clean))
+        return res
+
+    a_lines = parse_plain_lines(audio_lrc)
+    v_lines = parse_plain_lines(video_lrc)
+    if not a_lines or not v_lines:
+        return None
+
+    diffs: list[float] = []
+    for a_t, a_txt in a_lines:
+        best_match_time = None
+        best_ratio = 0.0
+        for v_t, v_txt in v_lines:
+            ratio = SequenceMatcher(None, a_txt, v_txt).ratio()
+            if ratio > best_ratio and ratio >= 0.7:
+                best_ratio = ratio
+                best_match_time = v_t
+        if best_match_time is not None:
+            diffs.append(best_match_time - a_t)
+
+    if len(diffs) < 2:
+        return None
+    return round(float(median(diffs)), 2)
+
+
 def _cli() -> int:  # pragma: no cover - thin manual smoke test
     import argparse
 

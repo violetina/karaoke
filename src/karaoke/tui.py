@@ -4313,13 +4313,14 @@ class KaraokeTui(App):
             # falling back to the session default when none has been saved.
             self._current_track_id = self._resolve_track_id(det, artist, title, conn)
             self._sync_queue_to_detection(det, self._current_track_id)
+            effective_offset_mode = "video" if getattr(det, "media_type", "") == "video" else det.mode
             saved = (
-                localcache.get_sync_offset(self._current_track_id, conn, det.mode)
+                localcache.get_sync_offset(self._current_track_id, conn, effective_offset_mode)
                 if self._current_track_id is not None else None
             )
             self._sync_offset = saved if saved is not None else _default_sync_offset(det.mode)
             self._offset_dirty = False
-            self._offset_mode = det.mode
+            self._offset_mode = effective_offset_mode
             # Needed by mic_elapsed to wrap the dead-reckoned playhead on repeat.
             self._track_duration = self._load_duration(self._current_track_id, conn)
             # Radio identifies songs MPRIS never sees, so this is where a
@@ -4404,10 +4405,11 @@ class KaraokeTui(App):
                 lyrics_widget.border_subtitle = f"synced · {lyrics.source if lyrics else ''}"
             except Exception:
                 pass
+            mtype_tag = f" [{det.media_type}]" if getattr(det, "media_type", "") else ""
             now.update(
                 f"{banner}\n"
                 f"{det.mode} · {det.player or '—'} · {keybpm_line} · "
-                f"{lyrics.source} · offset {self._sync_offset:+.1f}s (, / .)"
+                f"{lyrics.source}{mtype_tag} · offset {self._sync_offset:+.1f}s (, / .)"
             )
         elif state == "unsynced":
             # Words without timings. Previously this fell through to "no

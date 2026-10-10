@@ -547,6 +547,334 @@ def sounds_like_track(track_id: int, k: int = 10,
     return _clap_hits(res, exclude={track_id}, k=k, query_vector=vector)
 
 
+def similar_chords_for_track(
+    track_id: int,
+    k: int = 10,
+    os_client: Any = None,
+) -> list[dict[str, Any]]:
+    """Find tracks with similar chord root-motion or harmonic form via OpenSearch k-NN."""
+    from . import key_progression
+    from .osclient import client
+
+    c = os_client or client()
+    if c is None:
+        return []
+
+    try:
+        if not c.indices.exists(index=key_progression.PROGRESSION_INDEX):
+            return []
+    except Exception:
+        return []
+
+    target_id = track_id
+    vector = None
+    field = "chord_motion"
+
+    try:
+        doc = c.get(index=key_progression.PROGRESSION_INDEX, id=key_progression.doc_id(track_id), ignore=404)
+        if doc and doc.get("found"):
+            src = doc["_source"]
+            if src.get("chord_motion"):
+                vector = src["chord_motion"]
+                field = "chord_motion"
+            elif src.get("progression_vector"):
+                vector = src["progression_vector"]
+                field = "progression_vector"
+    except Exception:
+        pass
+
+    # Fallback: if track lacks indexed progression, find a representative in same key/genre
+    if vector is None:
+        try:
+            from . import localcache
+            with localcache.connect() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT t.artist, t.title, a.detected_key, g.genre FROM tracks t "
+                    "LEFT JOIN track_analysis a ON a.track_id = t.track_id "
+                    "LEFT JOIN track_genre g ON g.track_id = t.track_id "
+                    "WHERE t.track_id = %s",
+                    (track_id,),
+                )
+                row = cur.fetchone()
+                if row and row["detected_key"]:
+                    rep = c.search(index=key_progression.PROGRESSION_INDEX, body={
+                        "size": 1,
+                        "query": {
+                            "bool": {
+                                "must": [
+                                    {"term": {"home_key": row["detected_key"]}},
+                                    {"exists": {"field": "chord_motion"}},
+                                ]
+                            }
+                        }
+                    })
+                    if rep["hits"]["hits"]:
+                        src = rep["hits"]["hits"][0]["_source"]
+                        vector = src["chord_motion"]
+                        target_id = src["track_id"]
+        except Exception:
+            pass
+
+    if vector is None:
+        return []
+
+    try:
+        res = c.search(index=key_progression.PROGRESSION_INDEX, body={
+            "size": max(k * 2, k + 5),
+            "query": {
+                "knn": {
+                    field: {
+                        "vector": vector,
+                        "k": max(k * 2, k + 5),
+                    }
+                }
+            }
+        })
+    except Exception:
+        return []
+
+    hits: list[dict[str, Any]] = []
+    for hit in res.get("hits", {}).get("hits", []):
+        s = hit.get("_source", {})
+        tid = s.get("track_id")
+        if tid == track_id or tid == target_id:
+            continue
+        hits.append({
+            "track_id": tid,
+            "artist": s.get("artist", ""),
+            "title": s.get("title", ""),
+            "score": round(hit.get("_score", 0.0), 3),
+            "form": s.get("form", "unknown"),
+            "fifth_ratio": round(s.get("fifth_ratio", 0.0), 3) if s.get("fifth_ratio") is not None else None,
+            "distinct_chords": s.get("distinct_chords"),
+            "chord_changes_per_minute": s.get("chord_changes_per_minute"),
+            "space": field,
+        })
+        if len(hits) >= k:
+            break
+    return hits
+
+
+def similar_lyrics_for_track(
+    track_id: int,
+    k: int = 5,
+    os_client: Any = None,
+) -> list[dict[str, Any]]:
+    """Find tracks with semantically similar lyric content, theme, or topic (Context).
+
+    Uses the 384-dimensional dense semantic embedding (lyrics_vector) in the OpenSearch
+    tracks index, performing approximate k-NN nearest-neighbor search.
+    """
+    from .osclient import client
+    c = os_client or client()
+    if c is None:
+        return []
+
+    vector = None
+    try:
+        doc = c.get(index="tracks", id=f"sqlite:{track_id}", ignore=404)
+        if doc and doc.get("found"):
+            vector = doc["_source"].get("lyrics_vector")
+        if not vector:
+            s_res = c.search(index="tracks", body={"size": 1, "query": {"term": {"track_id": track_id}}})
+            hits = s_res.get("hits", {}).get("hits", [])
+            if hits:
+                vector = hits[0]["_source"].get("lyrics_vector")
+        if not vector:
+            try:
+                from . import localcache
+                with localcache.connect() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (track_id,))
+                    prow = cur.fetchone()
+                    if prow:
+                        s_res = c.search(index="tracks", body={
+                            "size": 1,
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {"match": {"artist": prow["artist"]}},
+                                        {"match_phrase": {"title": prow["title"]}},
+                                    ]
+                                }
+                            }
+                        })
+                        hits = s_res.get("hits", {}).get("hits", [])
+                        if hits:
+                            vector = hits[0]["_source"].get("lyrics_vector")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not vector:
+        return []
+
+    try:
+        res = c.search(index="tracks", body={
+            "size": max(k * 2, k + 5),
+            "query": {
+                "knn": {
+                    "lyrics_vector": {
+                        "vector": vector,
+                        "k": max(k * 2, k + 5),
+                    }
+                }
+            }
+        })
+    except Exception:
+        return []
+
+    hits: list[dict[str, Any]] = []
+    for hit in res.get("hits", {}).get("hits", []):
+        s = hit.get("_source", {})
+        tid = s.get("track_id")
+        if tid == track_id:
+            continue
+        hits.append({
+            "track_id": tid,
+            "artist": s.get("artist", ""),
+            "title": s.get("title", ""),
+            "score": round(hit.get("_score", 0.0), 3),
+            "dominant_mood": s.get("dominant_mood", "neutral"),
+            "sentiment_hits": s.get("sentiment_hits", 0),
+            "space": "lyrics_semantic",
+        })
+        if len(hits) >= k:
+            break
+    return hits
+
+
+def similar_mood_for_track(
+    track_id: int,
+    k: int = 5,
+    os_client: Any = None,
+) -> list[dict[str, Any]]:
+    """Find tracks with similar emotional feeling and mood shape (Mood).
+
+    Matches on dominant_mood and computes cosine similarity across the 4D sentiment
+    vector distribution (happy, sad, angry, tender).
+    """
+    from .osclient import client
+    from . import smartlist
+    c = os_client or client()
+    if c is None:
+        return []
+
+    seed_src = None
+    try:
+        doc = c.get(index="tracks", id=f"sqlite:{track_id}", ignore=404)
+        if doc and doc.get("found"):
+            seed_src = doc["_source"]
+        if not seed_src:
+            s_res = c.search(index="tracks", body={"size": 1, "query": {"term": {"track_id": track_id}}})
+            hits = s_res.get("hits", {}).get("hits", [])
+            if hits:
+                seed_src = hits[0]["_source"]
+        if not seed_src:
+            try:
+                from . import localcache
+                with localcache.connect() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (track_id,))
+                    prow = cur.fetchone()
+                    if prow:
+                        s_res = c.search(index="tracks", body={
+                            "size": 1,
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {"match": {"artist": prow["artist"]}},
+                                        {"match_phrase": {"title": prow["title"]}},
+                                    ]
+                                }
+                            }
+                        })
+                        hits = s_res.get("hits", {}).get("hits", [])
+                        if hits:
+                            seed_src = hits[0]["_source"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not seed_src:
+        return []
+
+    s_vec = tuple(seed_src.get("sentiment_vector") or [0.0, 0.0, 0.0, 0.0])
+    s_mood = seed_src.get("dominant_mood") or "neutral"
+
+    query: dict[str, Any]
+    if any(v > 0 for v in s_vec) and s_mood != "neutral":
+        query = {
+            "bool": {
+                "must": [
+                    {"range": {"sentiment_hits": {"gt": 2}}},
+                ],
+                "should": [
+                    {"term": {"dominant_mood.keyword": s_mood}},
+                ],
+                "must_not": [
+                    {"term": {"track_id": track_id}},
+                ],
+            }
+        }
+    else:
+        query = {
+            "bool": {
+                "must_not": [
+                    {"term": {"track_id": track_id}},
+                ],
+                "should": [
+                    {"term": {"dominant_mood.keyword": s_mood}},
+                ],
+            }
+        }
+
+    try:
+        res = c.search(index="tracks", body={
+            "size": max(k * 4, 30),
+            "query": query,
+        })
+    except Exception:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen_artists: dict[str, int] = {}
+    for hit in res.get("hits", {}).get("hits", []):
+        s = hit.get("_source", {})
+        tid = s.get("track_id")
+        if tid == track_id:
+            continue
+        art = (s.get("artist") or "").casefold()
+        if seen_artists.get(art, 0) >= 2:
+            continue
+        seen_artists[art] = seen_artists.get(art, 0) + 1
+
+        o_vec = tuple(s.get("sentiment_vector") or [0.0, 0.0, 0.0, 0.0])
+        score = 0.8
+        if any(v > 0 for v in s_vec) and any(v > 0 for v in o_vec):
+            score = round(smartlist.cosine(s_vec, o_vec), 3)
+            if s.get("dominant_mood") == s_mood:
+                score = min(1.0, score + 0.05)
+        elif s.get("dominant_mood") == s_mood and s_mood != "neutral":
+            score = 0.85
+
+        candidates.append({
+            "track_id": tid,
+            "artist": s.get("artist", ""),
+            "title": s.get("title", ""),
+            "score": round(score, 3),
+            "dominant_mood": s.get("dominant_mood", "neutral"),
+            "sentiment_hits": s.get("sentiment_hits", 0),
+            "space": "sentiment_mood",
+        })
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates[:k]
+
+
 def describe_main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
     """CLI: find tracks by describing how they sound.
 

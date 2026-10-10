@@ -35,8 +35,19 @@ FRAME_SECONDS = 0.25
 #: melody, not harmony.
 MIN_CHORD_SECONDS = 0.5
 
-#: Semitone offsets from the root for major and minor triads.
+#: Semitone offsets from the root for triads and 7th / suspended chords.
 _TRIADS = {"maj": (0, 4, 7), "min": (0, 3, 7)}
+
+_CHORD_TEMPLATES = {
+    "maj": (0, 4, 7),
+    "min": (0, 3, 7),
+    "7": (0, 4, 7, 10),        # Dominant 7th (key in blues, jazz, funk)
+    "maj7": (0, 4, 7, 11),     # Major 7th (smooth jazz, neo-soul)
+    "min7": (0, 3, 7, 10),     # Minor 7th (soul, funk, jazz)
+    "dim7": (0, 3, 6, 9),      # Diminished 7th
+    "m7b5": (0, 3, 6, 10),     # Half-diminished (ii in minor ii-V-i)
+    "sus4": (0, 5, 7),         # Suspended 4th (pop/rock tensions)
+}
 
 _NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -51,12 +62,20 @@ class Chord:
 
     at_s: float
     root: int                  # pitch class 0-11
-    quality: str               # maj | min
+    quality: str               # maj | min | 7 | maj7 | min7 | dim7 | m7b5 | sus4
     strength: float
 
     @property
     def name(self) -> str:
-        return f"{_NOTE[self.root]}{'m' if self.quality == 'min' else ''}"
+        root_name = _NOTE[self.root]
+        if self.quality == "maj":
+            return root_name
+        elif self.quality == "min":
+            return f"{root_name}m"
+        elif self.quality == "min7":
+            return f"{root_name}m7"
+        else:
+            return f"{root_name}{self.quality}"
 
 
 @dataclass
@@ -90,11 +109,11 @@ class ChordAnalysis:
 
 
 def _templates():
-    """24 unit-norm triad templates, indexed (root, quality)."""
+    """Unit-norm chord templates, indexed (root, quality)."""
     import numpy as np
 
     out = {}
-    for quality, intervals in _TRIADS.items():
+    for quality, intervals in _CHORD_TEMPLATES.items():
         for root in range(12):
             vec = np.zeros(12, dtype=float)
             for i in intervals:

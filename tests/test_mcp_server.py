@@ -19,6 +19,7 @@ def test_mcp_server_definition():
     assert "analyze_lyric_vibe" in tool_names
     assert "get_dj_stats" in tool_names
     assert "play_track" in tool_names
+    assert "get_similarity_graph" in tool_names
 
 
 def test_search_songs():
@@ -345,3 +346,107 @@ def test_search_songs_offset_is_clamped(paging_library):
     data = json.loads(mcp_server.search_songs(limit=3, offset=-5))
     assert data["offset"] == 0
     assert len(data["tracks"]) == 3
+
+
+def test_suggest_structural_strategy(paging_library, monkeypatch):
+    """Verify suggest_next_tracks supports 'structural' harmonic root-motion strategy."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_chords_for_track", lambda track_id, k: [
+        {"track_id": 9999, "artist": "Jazz Artist", "title": "Jazz Song", "score": 0.95, "form": "modulating"}
+    ])
+    res_str = mcp_server.suggest_next_tracks(track_id=paging_library[0], strategy="structural", limit=3)
+    data = json.loads(res_str)
+    assert data["strategy"] == "structural_chord_motion"
+    assert "seed" in data
+    assert "suggestions" in data
+    assert len(data["suggestions"]) == 1
+
+
+def test_get_similarity_graph(paging_library, monkeypatch):
+    """Verify get_similarity_graph returns nodes, edges, and valid web graph URL."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_chords_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Artist 01", "title": "Song 01", "score": 0.95, "form": "static"}
+    ])
+    res_str = mcp_server.get_similarity_graph(track_id=paging_library[0], strategy="structural", hops=2)
+    data = json.loads(res_str)
+    assert "nodes" in data
+    assert "edges" in data
+    assert "stats" in data
+    assert "graph_url" in data
+    assert data["stats"]["node_count"] >= 1
+    assert "http://localhost:8888/graph" in data["graph_url"]
+
+
+def test_suggest_context_strategy(paging_library, monkeypatch):
+    """Verify suggest_next_tracks supports 'context' semantic lyrics strategy."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_lyrics_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Lyricist", "title": "Poetic Song", "score": 0.88, "space": "lyrics_semantic"}
+    ])
+    res_str = mcp_server.suggest_next_tracks(track_id=paging_library[0], strategy="context", limit=3)
+    data = json.loads(res_str)
+    assert data["strategy"] == "context_lyrics_semantic"
+    assert len(data["suggestions"]) == 1
+
+
+def test_suggest_mood_strategy(paging_library, monkeypatch):
+    """Verify suggest_next_tracks supports 'mood' emotional feeling strategy."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_mood_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Emotive Artist", "title": "Sad Ballad", "score": 0.92, "dominant_mood": "sad", "space": "sentiment_mood"}
+    ])
+    res_str = mcp_server.suggest_next_tracks(track_id=paging_library[0], strategy="mood", limit=3)
+    data = json.loads(res_str)
+    assert data["strategy"] == "mood_emotion_sentiment"
+    assert len(data["suggestions"]) == 1
+
+
+def test_get_similarity_graph_context_and_mood(paging_library, monkeypatch):
+    """Verify get_similarity_graph builds graphs for context and mood strategies."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_lyrics_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Artist 01", "title": "Song 01", "score": 0.85, "space": "lyrics_semantic"}
+    ])
+    monkeypatch.setattr(search, "similar_mood_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Artist 01", "title": "Song 01", "score": 0.89, "dominant_mood": "tender", "space": "sentiment_mood"}
+    ])
+
+    ctx_graph = json.loads(mcp_server.get_similarity_graph(track_id=paging_library[0], strategy="context", hops=1))
+    assert ctx_graph["stats"]["strategy"] == "context"
+    assert len(ctx_graph["nodes"]) >= 1
+
+    mood_graph = json.loads(mcp_server.get_similarity_graph(track_id=paging_library[0], strategy="mood", hops=1))
+    assert mood_graph["stats"]["strategy"] == "mood"
+    assert len(mood_graph["nodes"]) >= 1
+
+
+def test_api_play_endpoint(paging_library, monkeypatch):
+    """Verify ASGI route /api/play accepts both GET and POST requests."""
+    from starlette.testclient import TestClient
+    app = mcp_server.create_asgi_app()
+    client = TestClient(app)
+
+    # Mock play_track to avoid spawning actual desktop browser during test
+    monkeypatch.setattr(mcp_server, "play_track", lambda track_id: json.dumps({
+        "status": "launched",
+        "track_id": track_id,
+        "title": "Mock Song",
+        "artist": "Mock Artist",
+    }))
+
+    # 1. POST with query parameter (as sent by Cytoscape UI)
+    post_res = client.post(f"/api/play?track_id={paging_library[0]}")
+    assert post_res.status_code == 200
+    assert post_res.json()["status"] == "launched"
+
+    # 2. POST with JSON body
+    post_json = client.post("/api/play", json={"track_id": paging_library[0]})
+    assert post_json.status_code == 200
+    assert post_json.json()["status"] == "launched"
+
+    # 3. GET with query param
+    get_res = client.get(f"/api/play?track_id={paging_library[0]}")
+    assert get_res.status_code == 200
+    assert get_res.json()["status"] == "launched"
+

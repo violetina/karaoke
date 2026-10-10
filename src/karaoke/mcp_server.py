@@ -233,6 +233,21 @@ def get_now_playing() -> str:
                     "genre": row["genre"] or "",
                 }
 
+            if key_info is not None and track_id:
+                try:
+                    from .key_progression import PROGRESSION_INDEX, doc_id
+                    from .osclient import client as get_os_client
+                    osc = get_os_client()
+                    if osc and osc.indices.exists(index=PROGRESSION_INDEX):
+                        pdoc = osc.get(index=PROGRESSION_INDEX, id=doc_id(track_id), ignore=404)
+                        if pdoc.get("found"):
+                            psrc = pdoc["_source"]
+                            key_info["form"] = psrc.get("form")
+                            key_info["fifth_ratio"] = round(psrc["fifth_ratio"], 3) if psrc.get("fifth_ratio") is not None else None
+                            key_info["distinct_chords"] = psrc.get("distinct_chords")
+                except Exception:
+                    pass
+
             return json.dumps({
                 "status": "playing",
                 "player": meta.player or active_player or "mpris",
@@ -280,6 +295,7 @@ def suggest_next_tracks(
             - 'energy_up': Step up the party tempo (+5 to +20 BPM) and higher energy score.
             - 'cool_down': Wind down with slower tempo and softer energy.
             - 'acoustic': Timbre / sound similarity via CLAP vector embeddings.
+            - 'structural': Harmonic shape and chord progression root-motion similarity (via OpenSearch chord_motion / progression_vector k-NN).
         limit: Number of recommendations (default 5, max 20).
     """
     limit = max(1, min(limit, 20))
@@ -347,6 +363,57 @@ def suggest_next_tracks(
                 }
             except Exception as exc:
                 log.warning("Could not read playlist %s for exclusion: %s", exclude_playlist, exc)
+
+        if strategy in ("structural", "chords", "chord_progression"):
+            from . import search
+            raw = search.similar_chords_for_track(seed_id, k=limit + len(excluded))
+            suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
+            return json.dumps({
+                "seed": {
+                    "track_id": seed_id,
+                    "artist": seed_track["artist"],
+                    "title": seed_track["title"],
+                    "key": seed_key_str,
+                    "camelot": seed_camelot,
+                    "bpm": seed_bpm,
+                },
+                "strategy": "structural_chord_motion",
+                "suggestions": suggestions,
+            }, indent=2)
+
+        if strategy in ("context", "lyrics", "meaning"):
+            from . import search
+            raw = search.similar_lyrics_for_track(seed_id, k=limit + len(excluded))
+            suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
+            return json.dumps({
+                "seed": {
+                    "track_id": seed_id,
+                    "artist": seed_track["artist"],
+                    "title": seed_track["title"],
+                    "key": seed_key_str,
+                    "camelot": seed_camelot,
+                    "bpm": seed_bpm,
+                },
+                "strategy": "context_lyrics_semantic",
+                "suggestions": suggestions,
+            }, indent=2)
+
+        if strategy in ("mood", "feeling", "sentiment"):
+            from . import search
+            raw = search.similar_mood_for_track(seed_id, k=limit + len(excluded))
+            suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
+            return json.dumps({
+                "seed": {
+                    "track_id": seed_id,
+                    "artist": seed_track["artist"],
+                    "title": seed_track["title"],
+                    "key": seed_key_str,
+                    "camelot": seed_camelot,
+                    "bpm": seed_bpm,
+                },
+                "strategy": "mood_emotion_sentiment",
+                "suggestions": suggestions,
+            }, indent=2)
 
         if strategy == "acoustic":
             from . import queue_suggest
@@ -847,6 +914,37 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
     }, indent=2)
 
 
+@dj_mcp.tool()
+def get_similarity_graph(
+    track_id: Optional[int] = None,
+    playlist_id: Optional[str] = None,
+    strategy: str = "structural",
+    hops: int = 2,
+    limit_per_node: int = 4,
+) -> str:
+    """Generate a musical similarity graph (nodes and edges) for a track or playlist.
+
+    Args:
+        track_id: Center the constellation on this track ID (optional if playlist_id provided).
+        playlist_id: Generate graph spanning songs in a saved playlist (e.g. 'dj-list', 'jazz-funk-happy').
+        strategy: 'structural' (chord motion), 'context' (lyric topics & meaning), 'mood' (emotion & sentiment), 'acoustic' (CLAP timbre), or 'harmonic' (Camelot wheel).
+        hops: Number of neighbor traversal hops from seed (1-3, default 2).
+        limit_per_node: Maximum similarity edges drawn per node (default 4, max 8).
+
+    Returns:
+        JSON with 'nodes', 'edges', 'stats', and a link to the visual graph at http://localhost:8888/graph.
+    """
+    from . import graph_view
+    data = graph_view.build_similarity_graph(
+        track_id=track_id,
+        playlist_id=playlist_id,
+        strategy=strategy,
+        hops=hops,
+        limit_per_node=limit_per_node,
+    )
+    return json.dumps(data, indent=2)
+
+
 class CombinedMCPApp:
     """Dispatches requests between MCP Streamable HTTP, Server-Sent Events (SSE), and health checks.
 
@@ -888,6 +986,8 @@ class CombinedMCPApp:
 
 def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
     """Build the unified Starlette ASGI application supporting SSE and Streamable HTTP."""
+    from . import graph_view
+
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=False,
         allowed_hosts=["*"],
@@ -903,6 +1003,10 @@ def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
     routes = [
         Route("/", endpoint=lambda r: JSONResponse({"status": "ok", "server": "karaoke-dj"})),
         Route("/health", endpoint=lambda r: JSONResponse({"status": "ok"})),
+        Route("/graph", endpoint=graph_view.serve_graph_ui),
+        Route("/api/graph_data", endpoint=graph_view.api_graph_data),
+        Route("/api/play", endpoint=graph_view.api_play, methods=["GET", "POST"]),
+        Route("/api/now_playing", endpoint=lambda r: JSONResponse(json.loads(get_now_playing()))),
         Route("/sse", endpoint=combined),
         Route("/sse/", endpoint=combined),
         Route("/mcp", endpoint=combined),

@@ -59,13 +59,52 @@ text/event-stream"`, or just hit `/health`.
 |---|---|---|
 | `search_songs` | Search tracks in the library with Camelot codes, BPM, energy, and lyrics | `query`, `genre`, `key`, `min_bpm`, `max_bpm`, `only_synced_lyrics` |
 | `get_now_playing` | Inspect currently playing audio on Spotify/Chromium/VLC/MPRIS | — |
-| `suggest_next_tracks` | Harmonic transitions (Camelot wheel) or energy-up / cool-down, skipping songs already queued | `track_id`, `strategy` (`harmonic`, `energy_up`, `cool_down`, `acoustic`), `exclude_playlist` |
+| `suggest_next_tracks` | Harmonic transitions (Camelot wheel), energy flow, timbre (CLAP), structural chords, lyric context, or emotional mood | `track_id`, `strategy` (`harmonic`, `energy_up`, `cool_down`, `acoustic`, `structural`, `context`, `mood`), `exclude_playlist` |
 | `analyze_lyric_vibe` | Lyric mood arc, sentiment breakdown, and singer delivery tips | `track_id` |
 | `get_dj_stats` | Play counts, top artists, crowd favorites, and discovery history | — |
 | `play_track` | Trigger playback via the host karaoke player | `track_id`, `prefer_audio_only` |
 | `add_to_dj_playlist` | Add track to the persistent `dj-list` playlist by ID or title/artist; re-adding is a no-op | `track_id`, `artist`, `title`, `playlist_id` |
 | `get_dj_playlist` | Retrieve tracks, positions, and metadata from the DJ playlist | `playlist_id` (default `dj-list`) |
 | `clear_dj_playlist` | Empty all tracks from the DJ playlist | `playlist_id` (default `dj-list`) |
+| `get_similarity_graph` | Generate node-link graph data across chord motion, semantic lyrics, emotional mood, CLAP timbre, or Camelot keys | `track_id`, `playlist_id`, `strategy` (`structural`, `context`, `mood`, `acoustic`, `harmonic`), `hops`, `limit_per_node` |
+
+### Interactive Similarity Constellation (`/graph`)
+
+The server mounts an interactive **Cytoscape.js** graph explorer directly on:
+* **`http://localhost:8888/graph`**
+* Parameterized views: `http://localhost:8888/graph?track_id=14945&strategy=structural`, `http://localhost:8888/graph?track_id=18227&strategy=context`, `http://localhost:8888/graph?playlist_id=jazz-funk-happy`
+
+Features:
+* **Multi-Modal Similarity Dimensions:**
+  * **Structural (Chord Motion):** CQT chroma 96-chord template matching and root-motion k-NN in OpenSearch (`karaoke-progression`).
+  * **Context (Lyrics & Meaning):** Dense 384-dimensional semantic embeddings (`lyrics_vector` in OpenSearch `tracks` index) across 18,700+ songs, connecting tracks by lyrical narrative, theme, and storytelling.
+  * **Mood (Emotion & Feeling):** 4D emotional arc distribution (`sentiment_vector` [happy, sad, angry, tender]) and `dominant_mood` valence matching.
+  * **Acoustic (CLAP Timbre):** Contrastive audio-language pretraining sound embeddings.
+  * **Harmonic (Camelot Key):** Circle of fifths key compatibility (+/- 1 hour or relative major/minor).
+* **Physics-based CoSE Layout:** Nodes naturally cluster into stylistic, thematic, and harmonic constellations.
+* **Dual Color Encodings:** Color-coded by Camelot harmonic code (1A–12B wheel) or emotional mood (`happy` amber, `tender` emerald, `sad` blue, `angry` crimson, `neutral` slate).
+* **Interactive Inspection & Desktop Playback:** Clicking any node reveals its detected key, BPM, macro form (`diatonic-vamp`, `modulating`), fifths ratio, mood, sentiment hits, and distinct chord count, with one-click **"▶ Play on Desktop"** playback triggering (supporting both POST and GET `/api/play`).
+* **Obot Integration:** Obot agents can call `get_similarity_graph` via JSON-RPC to discover multi-hop bridges between musical genres or render the graph inside web frames.
+
+### Structural & Chord Progression Intelligence
+
+The MCP server connects to OpenSearch's `karaoke-progression` index (~7,400+ indexed tracks) to support two levels of harmonic analysis:
+
+1. **Macro Key Movement (Song Form)**:
+   * **`diatonic-vamp`**: Tracks that sit in one key and loop diatonic chords (IV, V, vi), typical of blues and rock.
+   * **`static`**: Pure tonal stability without key modulation.
+   * **`modulating`**: Definite travel between tonal centers.
+   * **`static-with-mixture`**: Modal mixture (e.g. borrowing parallel minor chords in a major key).
+   * **`truck-driver`**: Classic late modulation up a half/whole step in the final chorus.
+   * **`restless` & `oscillating`**: Frequent key shifts (>1.5/min) or back-and-forth vamping between two centers.
+
+2. **Micro Root Motion (`chord_motion`)**:
+   * Evaluated every 0.25 seconds using CQT chroma matched against an expanded 96-template chord vocabulary:
+     * Triads: `maj`, `min`, `sus4`
+     * 7th Chords: Dominant `7`, `maj7`, Minor `min7`, Half-diminished `m7b5`, Diminished `dim7`
+   * Key-invariant 12-dimensional root motion histogram modulo 12.
+   * **`fifth_ratio`**: Measures descending-fifth motion (the engine of ii-V-I progressions in jazz and funk).
+   * The **`structural`** strategy in `suggest_next_tracks` performs cosine k-NN vector search over `chord_motion` in OpenSearch, surfacing tracks that share the exact chord movement architecture (e.g. linking Art Blakey to Django Reinhardt).
 
 ### The set never repeats itself
 
@@ -140,6 +179,18 @@ Directly, bypassing the gateway:
 
 ```bash
 claude mcp add --scope local --transport sse karaoke http://localhost:8888/sse
+```
+
+In **Antigravity**, add the server to `~/.gemini/config/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "karaoke": {
+      "serverUrl": "http://localhost:8888/sse"
+    }
+  }
+}
 ```
 
 Or through Obot when you want its audit log and access policies in the path.
