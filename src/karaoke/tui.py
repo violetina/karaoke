@@ -36,6 +36,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+try:
+    from tqdm import tqdm
+
+    tqdm.set_lock(threading.RLock())
+except Exception:
+    pass
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -48,6 +58,7 @@ from . import (detect, localcache, playerctl, recorder, sample_audio,
                staging, track_analysis, visuals)
 from .api_client import ApiClient
 from .browse import open_song_url
+from .dj_chat import DJChatScreen
 from .player_open import (browser_playback, close_cdp, track_finished,
                           track_idle)
 from .logger import LOG_FILE, log, stream_logs
@@ -98,27 +109,41 @@ MOOD_FILTER_OPTIONS = [
 
 
 def genre_filter_options() -> list[tuple[str, str]]:
-    """Build the genre filter from the current CLAP classifications."""
+    """Build the genre filter from canonical broad genres and active classifications."""
+    from .artist_classifier import BROAD_GENRES
     options = [("All Genres", "all")]
+    seen = set()
+    # 1. First add the 16 canonical broad genres in a clean, curated order
+    for bg in BROAD_GENRES:
+        key = bg.casefold()
+        seen.add(key)
+        options.append((bg.title(), bg))
+
+    # 2. Add any additional subgenres found in track_genre or artist_genres
     try:
         with localcache.connect() as conn:
-            rows = conn.execute(
+            cur = conn.execute(
                 """
                 SELECT DISTINCT genre FROM track_genre
                 WHERE genre IS NOT NULL AND length(trim(genre)) > 0
-                ORDER BY lower(genre)
+                UNION
+                SELECT DISTINCT broad_genre FROM artist_genres
+                WHERE broad_genre IS NOT NULL AND length(trim(broad_genre)) > 0
+                UNION
+                SELECT DISTINCT genre FROM artist_genres
+                WHERE genre IS NOT NULL AND length(trim(genre)) > 0
+                ORDER BY 1
                 """
-            ).fetchall()
+            )
+            for row in cur.fetchall():
+                genre = str(list(row.values())[0] if hasattr(row, "values") else row[0] or "").strip()
+                key = genre.casefold()
+                if not genre or key in seen:
+                    continue
+                seen.add(key)
+                options.append((genre.title(), genre))
     except Exception:
-        return options
-    seen = set()
-    for row in rows:
-        genre = str(row[0] or "").strip()
-        key = genre.casefold()
-        if not genre or key in seen:
-            continue
-        seen.add(key)
-        options.append((genre.title(), genre))
+        pass
     return options
 
 
@@ -278,7 +303,8 @@ def classification_line(genre_row, tone_row) -> str:
 
 def track_info(*, source: str = "", duration: float | None = None,
                offset: float = 0.0, pending: "list[str] | None" = None,
-               lyric_lines: int = 0, error: str = "", genre: str = "") -> str:
+               lyric_lines: int = 0, error: str = "", genre: str = "",
+               sound: str = "") -> str:
     """Compact per-track read-out for under the cover art.
 
     A label column wide enough for the longest label, ASCII throughout, so the
@@ -294,6 +320,8 @@ def track_info(*, source: str = "", duration: float | None = None,
     rows: list[tuple[str, str]] = []
     if genre:
         rows.append(("genre", genre))
+    if sound:
+        rows.append(("sound", sound))
     if source:
         # Say plainly when the words are Whisper's guess rather than a real
         # lyric. Nothing else on screen distinguishes them, and the failure is
@@ -723,6 +751,222 @@ class RecordingBrowseScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class SavedPlaylistsScreen(ModalScreen[None]):
+    """Browse and manage saved YouTube Music playlists.
+
+    Playlists created by queue sync (or imported) are stored in SQLite.
+    From here, you can:
+    - Enter: Load the playlist into the TUI queue and follow it
+    - space / o: Open the playlist in YouTube Music (browser)
+    - r: Reconcile with remote YouTube Music to fetch new/deleted tracks
+    - d: Delete playlist from local database
+    - esc / q / P: Close modal
+    """
+
+    CSS = """
+    SavedPlaylistsScreen { align: center middle; }
+    #playlists-dialog {
+        width: 100; height: auto; max-height: 90%;
+        border: thick $accent; padding: 1 2; background: $surface;
+        border-title-align: center;
+    }
+    #playlists-table { height: auto; max-height: 24; }
+    #playlists-hint { color: $text-muted; height: 1; }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("L", "dismiss", "Close"),
+        ("o", "open_browser", "Open in Browser"),
+        ("space", "open_browser", "Open in Browser"),
+        ("r", "reconcile", "Reconcile Remote"),
+        ("d", "delete_playlist", "Delete"),
+    ]
+
+    def __init__(self, playlists: list[dict]) -> None:
+        super().__init__()
+        self._playlists = list(playlists)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="playlists-dialog") as dialog:
+            dialog.border_title = "Saved Playlists"
+            dialog.border_subtitle = "enter: load & follow · space: open in browser · r: reconcile · d: delete · esc: close"
+            yield DataTable(id="playlists-table", cursor_type="row")
+            yield Static("", id="playlists-hint")
+
+    def on_mount(self) -> None:
+        self._populate_table()
+        self.run_worker(self._auto_sync_remote_playlists, thread=True)
+
+    def _auto_sync_remote_playlists(self) -> None:
+        try:
+            from . import ytmusic_playlist
+            with localcache.connect() as conn:
+                dj_pid, _ = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
+                if dj_pid and dj_pid.startswith(("PL", "VL", "RD", "OLAK5")):
+                    local_tracks = localcache.get_saved_playlist_tracks(dj_pid, conn=conn)
+                    client = ytmusic_playlist.get_ytmusic_client()
+                    ytmusic_playlist.reconcile_playlist_with_remote(
+                        dj_pid, local_tracks, client=client, conn=conn
+                    )
+            self.app.call_from_thread(self._refresh_playlists)
+        except Exception:
+            pass
+
+    def _populate_table(self) -> None:
+        table = self.query_one("#playlists-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Name", "Tracks", "Search Query", "Updated")
+        for pl in self._playlists:
+            when = (
+                time.strftime("%d %b %H:%M", time.localtime(pl["updated_at"]))
+                if pl.get("updated_at")
+                else ""
+            )
+            name = str(pl.get("name") or pl.get("playlist_id") or "")
+            tracks_count = str(pl.get("track_count") or 0)
+            query = str(pl.get("search_query") or "")
+            table.add_row(name, tracks_count, query, when, key=str(pl["playlist_id"]))
+
+        hint = self.query_one("#playlists-hint", Static)
+        if self._playlists:
+            hint.update(f"{len(self._playlists)} saved playlist(s)")
+        else:
+            hint.update("No saved playlists found. Use 'Y' on any queue to create one.")
+
+    def _refresh_playlists(self) -> None:
+        with localcache.connect() as conn:
+            self._playlists = localcache.get_saved_playlists(100, conn=conn)
+        self._populate_table()
+
+    def _selected_playlist(self) -> Optional[dict]:
+        table = self.query_one("#playlists-table", DataTable)
+        if 0 <= table.cursor_row < len(self._playlists):
+            return self._playlists[table.cursor_row]
+        return None
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        key = event.row_key.value
+        if not key:
+            return
+        self._load_playlist(str(key))
+
+    def _load_playlist(self, playlist_id: str) -> None:
+        self.app.notify(f"Syncing & opening playlist in YouTube Music…")
+
+        def _bg() -> None:
+            try:
+                from . import ytmusic_playlist, player_open
+                with localcache.connect() as conn:
+                    client = ytmusic_playlist.get_ytmusic_client()
+                    local_tracks = localcache.get_saved_playlist_tracks(playlist_id, conn=conn)
+                    if playlist_id.startswith(("PL", "VL", "RD", "OLAK5")):
+                        reconciled_rows, _ = ytmusic_playlist.reconcile_playlist_with_remote(
+                            playlist_id, local_tracks, client=client, conn=conn
+                        )
+                    else:
+                        reconciled_rows = local_tracks
+                    pl = localcache.find_saved_playlist_by_id(playlist_id, conn=conn)
+
+                tracks_to_load = reconciled_rows or local_tracks
+                if not tracks_to_load:
+                    self.app.call_from_thread(
+                        self.app.notify, f"Playlist {playlist_id} has no tracks", severity="warning"
+                    )
+                    return
+
+                rows = [
+                    {
+                        "track_id": t.get("track_id"),
+                        "artist": t.get("artist") or "",
+                        "title": t.get("title") or "",
+                        "url": t.get("url") or (f"https://music.youtube.com/watch?v={t['video_id']}" if t.get("video_id") else ""),
+                        "kind": "ytmusic",
+                        "key": str(t.get("key") or "—"),
+                    }
+                    for t in tracks_to_load
+                ]
+                pl_name = (pl.get("name") if pl else "") or playlist_id
+                first_vid = next((r.get("video_id") or localcache.extract_youtube_id(r.get("url", "")) for r in rows if (r.get("video_id") or r.get("url"))), "")
+
+                # Load into player queue so TUI follows
+                self.app.call_from_thread(self.app._apply_restored_playlist, rows, playlist_id, pl_name, 0)
+
+                # Open the playlist in YouTube Music so player plays it & TUI follows
+                play_url = (
+                    f"https://music.youtube.com/watch?v={first_vid}&list={playlist_id}"
+                    if first_vid and playlist_id.startswith(("PL", "VL", "RD", "OLAK5"))
+                    else (pl.get("url") if pl and pl.get("url") else f"https://music.youtube.com/playlist?list={playlist_id}")
+                )
+                player_open.open_song_url(play_url, "youtube_music_playlist", prefer_audio=True)
+                self.app.call_from_thread(
+                    self.app.notify, f"Loaded & opened '{pl_name}' in YouTube Music ({len(rows)} tracks)"
+                )
+            except Exception as exc:
+                log.warning("Could not sync and load playlist %s: %s", playlist_id, exc)
+                self.app.call_from_thread(
+                    self.app.notify, f"Load failed: {exc}", severity="error"
+                )
+
+        self.run_worker(_bg, thread=True)
+        self.dismiss(None)
+
+    def action_open_browser(self) -> None:
+        pl = self._selected_playlist()
+        if not pl:
+            return
+        self._load_playlist(str(pl["playlist_id"]))
+
+    def action_delete_playlist(self) -> None:
+        pl = self._selected_playlist()
+        if not pl:
+            return
+        pid = pl["playlist_id"]
+        name = pl.get("name") or pid
+        with localcache.connect() as conn:
+            localcache.delete_saved_playlist(pid, conn=conn)
+        self.app.notify(f"Deleted playlist '{name}'")
+        self._refresh_playlists()
+
+    def action_reconcile(self) -> None:
+        pl = self._selected_playlist()
+        if not pl:
+            return
+        pid = pl["playlist_id"]
+        name = pl.get("name") or pid
+        self.app.notify(f"Reconciling '{name}' with YouTube Music…")
+
+        def _bg() -> None:
+            try:
+                from . import ytmusic_playlist
+                with localcache.connect() as conn:
+                    local_tracks = localcache.get_saved_playlist_tracks(pid, conn=conn)
+                    client = ytmusic_playlist.get_ytmusic_client()
+                    reconciled_rows, has_drift = ytmusic_playlist.reconcile_playlist_with_remote(
+                        pid, local_tracks, client=client, conn=conn
+                    )
+                self.app.call_from_thread(self._on_reconciled, pid, name, reconciled_rows, has_drift)
+            except Exception as exc:
+                self.app.call_from_thread(
+                    self.app.notify, f"Reconcile failed: {exc}", severity="error"
+                )
+
+        self.run_worker(_bg, thread=True)
+
+    def _on_reconciled(self, pid: str, name: str, rows: list[dict], has_drift: bool) -> None:
+        if has_drift:
+            self.app.notify(f"Reconciled '{name}': synced {len(rows)} tracks from remote")
+            if getattr(self.app, "_active_playlist_id", "") == pid:
+                self.app._queue = list(rows)
+                self.app._unfiltered_queue = list(rows)
+                self.app._ytmusic_video_to_queue_index = self.app._queue_video_map()
+                self.app._render_queue()
+        else:
+            self.app.notify(f"'{name}' is up to date with YouTube Music")
+        self._refresh_playlists()
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """A tiny yes/no modal used for the staging whitelist confirmation."""
 
@@ -849,8 +1093,6 @@ class KaraokeTui(App):
     /* Hidden until there is a list, so the lyrics keep the full pane. */
     #queue { display: none; height: 10; border: round cyan; margin-top: 1; }
     #queue.-on { display: block; }
-    #library { display: block; height: 10; border: round cyan; margin-top: 1; }
-    #library.-off { display: none; }
     /* In the left column now, with the other per-track facts. Auto height
        because it holds two or three lines depending on what is known, and a
        fixed 6 left a gap under the short case. */
@@ -897,9 +1139,9 @@ class KaraokeTui(App):
        `align` is unavailable) — if width/height change, offset must too. */
     #browse-overlay {
         layer: overlay; display: none;
-        width: 80%; height: 80%; offset: 10% 10%;
+        width: 96%; height: 94%; offset: 2% 1%;
         border: round cyan; border-title-align: center;
-        background: $surface; padding: 1 2;
+        background: $surface; padding: 0 1;
     }
     #browse-overlay.-visible { display: block; }
 
@@ -921,11 +1163,62 @@ class KaraokeTui(App):
     Screen.-focus #transport-bar { display: none; }
     Screen.-focus #statusbar { display: none; }
     Screen.-focus Header { display: none; }
-    #browse-head { height: auto; margin-bottom: 1; }
-    #browse-head Static { width: 8; content-align: left middle; }
+
+    /* Dance mode: visuals pane takes the whole screen for a dance floor. */
+    Screen.-dance #sidebar { display: none; }
+    Screen.-dance #main { display: none; }
+    Screen.-dance Header { display: none; }
+    Screen.-dance #statusbar { display: none; }
+    Screen.-dance #visuals {
+        width: 1fr;
+        border: none;
+        padding: 0;
+    }
+    Screen.-dance #mood-square { display: none; }
+    Screen.-dance #mood-label { display: none; }
+    Screen.-dance #ascii-visual {
+        height: 1fr;
+        border: round magenta;
+        padding: 1 2;
+    }
+
+    #browse-head { height: 3; margin-bottom: 0; }
+    #browse-head Static { width: auto; min-width: 6; content-align: left middle; padding-right: 1; }
     #filter-select, #mood-select, #genre-select, #sort-select { width: 34; }
-    #library { height: 1fr; }
-    #log-label, #log-path { color: $text-muted; height: 1; }
+    #browse-head Select {
+        width: 1fr; min-width: 12; height: 3; max-height: 3;
+    }
+    #library {
+        height: 1fr;
+        border: round cyan;
+        margin-top: 0;
+        display: block;
+    }
+    #browse-toolbar {
+        height: 3;
+        margin-top: 0;
+        layout: horizontal;
+    }
+    #browse-toolbar Button {
+        min-width: 10;
+        height: 3;
+        margin-right: 1;
+        padding: 0 1;
+    }
+    #browse-count {
+        width: 1fr;
+        height: 3;
+        content-align: right middle;
+        color: $text-muted;
+        padding-right: 1;
+    }
+    #log-label {
+        width: auto;
+        height: 3;
+        content-align: right middle;
+        color: $text-muted;
+        margin-right: 1;
+    }
     """
 
     BINDINGS = [
@@ -940,6 +1233,10 @@ class KaraokeTui(App):
         ("C", "clear_queue", "Clear queue"),
         ("U", "shuffle_queue", "Shuffle queue"),
         ("G", "suggest_queue", "Keep vibe going"),
+        ("M", "more_like_this", "More like this"),
+        ("Y", "ytmusic_playlist_queue", "YT playlist"),
+        ("L", "browse_playlists", "Playlists"),
+        ("u", "queue_rollback", "Rollback"),
         ("minus", "mood_down", "Mood-"),
         ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
@@ -949,8 +1246,11 @@ class KaraokeTui(App):
         ("o", "toggle_play_once", "Follow Queue (o)"),
         ("R", "toggle_mic", "Mic/radio"),
         ("F", "toggle_focus", "Focus"),
+        ("W", "toggle_dance", "Dance"),
         ("B", "browse_recordings", "Recordings"),
         ("T", "stats", "Stats"),
+        ("D", "ai_dj_chat", "AI DJ"),
+        ("v", "lyric_vibe", "Lyric Vibe"),
         ("question_mark", "help", "Keys"),
         # NOT priority: a priority app binding shadows every modal's own
         # escape, which stopped Stats and Help from closing. The
@@ -1036,6 +1336,14 @@ class KaraokeTui(App):
         self._mood_level = 0.0  # slider floor: show tracks with energy >= this
         self._sort = "energy_desc"
         self._queue_is_wildcard = False
+        self._ytmusic_queue_follow = False
+        self._ytmusic_video_to_queue_index: dict[str, int] = {}
+        self._active_playlist_id = ""
+        self._active_playlist_name = ""
+        self._last_notified_playlist_id = ""
+        self._attempted_external_playlists: set[str] = set()
+        self._dance_mode = False
+        self._dance_num_dancers = 4
 
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1099,17 +1407,25 @@ class KaraokeTui(App):
         # lyrics no space and does not reflow them.
         with Container(id="browse-overlay") as overlay:
             overlay.border_title = "Library"
-            overlay.border_subtitle = "H close · ? keys"
+            overlay.border_subtitle = "Enter open · a add to queue · M more like this · H close"
             with Horizontal(id="browse-head"):
                 yield Static("Filter")
                 yield Select(FILTER_OPTIONS, value="working", id="filter-select",
+                             allow_blank=False)
+                yield Static("Genre", classes="browse-label")
+                yield Select(genre_filter_options(), value="all", id="browse-genre-select",
                              allow_blank=False)
                 yield Static("Sort", classes="browse-label")
                 yield Select(SORT_OPTIONS, value="energy_desc", id="browse-sort-select",
                              allow_blank=False)
             yield DataTable(id="library", cursor_type="row")
-            yield Static(f"log: {self._log_level}", id="log-label")
-            yield Static(f"logs: {LOG_FILE}", id="log-path")
+            with Horizontal(id="browse-toolbar"):
+                yield Button("▶ Open (Enter)", id="btn-browse-open", variant="primary")
+                yield Button("➕ Queue (a)", id="btn-browse-enqueue", variant="default")
+                yield Button("✨ Similar (M)", id="btn-browse-more", variant="default")
+                yield Button("🎤 Lyric Vibe (v)", id="btn-browse-vibe", variant="default")
+                yield Static(f"log: {self._log_level}", id="log-label")
+                yield Static("", id="browse-count")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1118,13 +1434,8 @@ class KaraokeTui(App):
         self.load_songs()
         self._render_mood_slider()
         self._show_selected_song()
-        # Default search to '*' so the entire playable library loads into the queue
-        try:
-            self.query_one("#search-input", Input).value = "*"
-            self._queue_is_wildcard = True
-            self.run_worker(lambda: self._background_search("*", start_playing=False), thread=True)
-        except Exception:
-            pass
+        # On startup/reload: restore the latest playlist & sync with player or last played song
+        self.run_worker(self._restore_or_sync_latest_playlist, thread=True)
         self.set_interval(1.5, self._poll_detection)
         self.set_interval(0.2, self._tick_lyrics)
         self.set_interval(3.0, self._refresh_worker_load)
@@ -1154,6 +1465,99 @@ class KaraokeTui(App):
         self._poll_detection()
         self._refresh_worker_load()
 
+    def _restore_or_sync_latest_playlist(self) -> None:
+        """Restore the latest playlist on reload, sync with player or last played song."""
+        try:
+            saved = localcache.load_active_queue()
+            rows: list[dict[str, Any]] = []
+            playlist_id: str = ""
+            playlist_name: str = ""
+
+            if saved and saved.get("rows"):
+                rows = saved["rows"]
+                playlist_id = saved.get("playlist_id") or ""
+                playlist_name = saved.get("name") or ""
+            else:
+                from . import ytmusic_playlist
+                latest_pl = ytmusic_playlist.get_latest_temp_queue_playlist()
+                if latest_pl and latest_pl.get("rows"):
+                    rows = latest_pl["rows"]
+                    playlist_id = latest_pl.get("playlist_id") or ""
+                    playlist_name = latest_pl.get("name") or ""
+                    localcache.save_active_queue(playlist_id, playlist_name, rows)
+
+            if not rows:
+                return
+
+            self.call_from_thread(self._apply_restored_playlist, rows, playlist_id, playlist_name)
+        except Exception as exc:
+            log.debug("Failed restoring latest playlist on mount: %s", exc)
+
+    def _apply_restored_playlist(
+        self,
+        rows: list[dict[str, Any]],
+        playlist_id: str = "",
+        playlist_name: str = "",
+        target_index: int | None = None,
+    ) -> None:
+        self._queue = list(rows)
+        self._unfiltered_queue = list(rows)
+        self._active_playlist_id = playlist_id
+        self._active_playlist_name = playlist_name
+        self._ytmusic_video_to_queue_index = self._queue_video_map()
+        self._ytmusic_queue_follow = True
+        self._play_once = False
+
+        if target_index is not None and self._queue:
+            target_index = max(0, min(target_index, len(self._queue) - 1))
+            self._queue_at = target_index
+            self._render_queue()
+            self.notify(f"Playing '{playlist_name or playlist_id}' ({target_index + 1}/{len(rows)})", severity="information")
+            return
+
+        chosen_index: int = 0
+        from . import playerctl
+        is_playing = False
+        try:
+            active = playerctl.playing_player()
+            if active and (playerctl.status(active) or "").strip() == "Playing":
+                is_playing = True
+        except Exception:
+            pass
+
+        if is_playing and self._det.is_active:
+            vid = localcache.extract_youtube_id(getattr(self._det, "url", "") or "")
+            if vid and vid in self._ytmusic_video_to_queue_index:
+                chosen_index = self._ytmusic_video_to_queue_index[vid]
+            else:
+                det_title = (getattr(self._det, "title", "") or "").strip().casefold()
+                for i, r in enumerate(self._queue):
+                    if (r.get("title") or "").strip().casefold() == det_title:
+                        chosen_index = i
+                        break
+            self._queue_at = chosen_index
+            self._render_queue()
+            self.notify(f"Synced queue with active playback ({chosen_index + 1}/{len(rows)})", severity="information")
+        else:
+            last_played = localcache.get_last_played_track()
+            if last_played:
+                lp_title = last_played["title"].strip().casefold()
+                lp_artist = last_played["artist"].strip().casefold()
+                for i, r in enumerate(self._queue):
+                    r_title = (r.get("title") or "").strip().casefold()
+                    r_artist = (r.get("artist") or "").strip().casefold()
+                    if r_title == lp_title and (not lp_artist or not r_artist or lp_artist == r_artist):
+                        chosen_index = i
+                        break
+            self._queue_at = chosen_index
+            self._render_queue()
+            label = (
+                f"Resumed queue at #{chosen_index + 1}: {self._queue[chosen_index]['artist']} - {self._queue[chosen_index]['title']}"
+                if self._queue
+                else "Loaded latest playlist"
+            )
+            self.notify(label, severity="information")
+
     # -- library ----------------------------------------------------------
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "filter-select":
@@ -1168,19 +1572,25 @@ class KaraokeTui(App):
             elif self._mood_filter in ("mellow", "all"):
                 self._mood_level = 0.0
             self._apply_mood_change()
-        elif event.select.id == "genre-select":
+        elif event.select.id in ("genre-select", "browse-genre-select"):
             self._genre_filter = str(event.value)
+            for sel_id in ("#genre-select", "#browse-genre-select"):
+                try:
+                    sel = self.query_one(sel_id, Select)
+                    if sel.value != self._genre_filter:
+                        sel.value = self._genre_filter
+                except Exception:
+                    pass
             self._apply_mood_change()
         elif event.select.id in ("sort-select", "browse-sort-select"):
             self._sort = str(event.value)
-            try:
-                self.query_one("#sort-select", Select).value = self._sort
-            except Exception:
-                pass
-            try:
-                self.query_one("#browse-sort-select", Select).value = self._sort
-            except Exception:
-                pass
+            for sel_id in ("#sort-select", "#browse-sort-select"):
+                try:
+                    sel = self.query_one(sel_id, Select)
+                    if sel.value != self._sort:
+                        sel.value = self._sort
+                except Exception:
+                    pass
             self._apply_mood_change()
 
     def _render_mood_slider(self) -> None:
@@ -1208,7 +1618,13 @@ class KaraokeTui(App):
         try:
             self.load_songs()
             self._show_selected_song()
-            if hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
+            if getattr(self, "_last_search_query", ""):
+                self.run_worker(
+                    lambda q=self._last_search_query: self._background_search(q, start_playing=False),
+                    exclusive=False,
+                    thread=True,
+                )
+            elif hasattr(self, "_unfiltered_queue") and self._unfiltered_queue:
                 self._filter_and_set_queue()
         except Exception as exc:
             log.warning("mood/filter refresh deferred: %s", exc)
@@ -1216,7 +1632,10 @@ class KaraokeTui(App):
 
 
     def load_songs(self) -> None:
-        table = self.query_one("#library", DataTable)
+        try:
+            table = self.query_one("#library", DataTable)
+        except Exception:
+            return
         table.clear()
         self._song_data.clear()
         with localcache.connect() as conn:
@@ -1257,7 +1676,7 @@ class KaraokeTui(App):
                 continue
             if self._mood_filter == "mellow" and energy > 0.40:
                 continue
-            if not self._genre_matches(song.get("genre")):
+            if not self._genre_matches(song):
                 continue
             filtered.append(song)
 
@@ -1298,8 +1717,9 @@ class KaraokeTui(App):
                 ),
             )
         self._song_data = filtered
+        self._update_browse_count()
 
-    def _load_spotify(self, conn) -> None:
+    def _load_spotify(self, conn, *, limit: int | None = None) -> None:
         """Tracks that have a Spotify source, joined to that source.
 
         _load_tracks deliberately ranks spotify *below* every browser-openable
@@ -1310,8 +1730,17 @@ class KaraokeTui(App):
         them to the web player and navigates the existing Chrome window.
         """
         cur = conn.cursor()
+        sort_mode = getattr(self, "_sort", "artist")
+        if sort_mode == "most_played":
+            order_sql = "t.play_count DESC, lower(t.artist), lower(t.title)"
+        elif sort_mode == "least_played":
+            order_sql = "t.play_count ASC, lower(t.artist), lower(t.title)"
+        else:
+            order_sql = "lower(t.artist), lower(t.title)"
+
+        limit_sql = f"LIMIT {int(limit)}" if limit is not None else ""
         cur.execute(
-            """
+            f"""
             SELECT t.track_id, t.artist, t.title,
                    s.url AS url, s.kind AS kind,
                    COALESCE(l.source, '') AS lyric_source,
@@ -1322,11 +1751,10 @@ class KaraokeTui(App):
               ON s.track_id = t.track_id AND s.kind = 'spotify'
             LEFT JOIN lyrics l
               ON t.track_id = l.track_id AND l.kind = 'approved'
-            GROUP BY t.track_id
-            ORDER BY t.artist, t.title
-            LIMIT :browse_limit
+            
+            ORDER BY {order_sql}
+            {limit_sql}
             """,
-            {"browse_limit": INITIAL_BROWSE_LIMIT},
         )
         for row in cur.fetchall():
             self._song_data.append({
@@ -1340,12 +1768,71 @@ class KaraokeTui(App):
                 "plain_lyrics": row["plain_lyrics"],
             })
 
-    def _load_tracks(self, conn, *, only_working: bool) -> None:
+    def _load_tracks(self, conn, *, only_working: bool, limit: int | None = None) -> None:
         cur = conn.cursor()
+        try:
+            from .track_analysis import ensure_schema
+            ensure_schema(conn)
+        except Exception:
+            pass
+        has_artist_genres = localcache.table_exists(conn, "artist_genres")
+        artist_genres_map = localcache.get_all_artist_genres_map(conn) if has_artist_genres else {}
+
+        where_clauses = []
+        params = {}
+        if limit is not None:
+            params["browse_limit"] = limit
+        genre_filter = str(getattr(self, "_genre_filter", "all") or "all").strip()
+        if genre_filter != "all":
+            params["genre_filter"] = genre_filter
+            if has_artist_genres:
+                where_clauses.append(
+                    """(
+                        EXISTS (
+                            SELECT 1 FROM artist_genres ag
+                            WHERE (lower(trim(ag.broad_genre)) = lower(trim(%(genre_filter)s))
+                                   OR lower(trim(ag.genre)) = lower(trim(%(genre_filter)s)))
+                              AND ag.artist_normalized = lower(trim(t.artist))
+                        )
+                        OR (
+                            NOT EXISTS (
+                                SELECT 1 FROM artist_genres ag
+                                WHERE ag.artist_normalized = lower(trim(t.artist))
+                            )
+                            AND lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(genre_filter)s))
+                        )
+                    )"""
+                )
+            else:
+                where_clauses.append("lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(genre_filter)s))")
+        if only_working:
+            where_clauses.append("(COALESCE(l.synced_lyrics, '') != '' OR COALESCE(l.plain_lyrics, '') != '')")
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        sort_mode = getattr(self, "_sort", "artist")
+        if sort_mode == "most_played":
+            order_sql = "t.play_count DESC, lower(t.artist), lower(t.title)"
+        elif sort_mode == "least_played":
+            order_sql = "t.play_count ASC, lower(t.artist), lower(t.title)"
+        elif sort_mode == "energy_desc":
+            order_sql = "a.energy DESC NULLS LAST, a.bpm DESC NULLS LAST, lower(t.artist), lower(t.title)"
+        elif sort_mode == "energy_asc":
+            order_sql = "a.energy ASC NULLS LAST, a.bpm ASC NULLS LAST, lower(t.artist), lower(t.title)"
+        elif sort_mode == "bpm_desc":
+            order_sql = "a.bpm DESC NULLS LAST, lower(t.artist), lower(t.title)"
+        elif sort_mode == "bpm_asc":
+            order_sql = "a.bpm ASC NULLS LAST, lower(t.artist), lower(t.title)"
+        elif sort_mode == "key":
+            order_sql = "a.detected_key ASC NULLS LAST, lower(t.artist), lower(t.title)"
+        else:
+            order_sql = "lower(t.artist), lower(t.title)"
+
+        limit_sql = "LIMIT %(browse_limit)s" if limit is not None else ""
+
         # Prefer a browser-openable source (youtube/http) over spotify so Enter
         # opens in the browser. Deterministic per track (see browse.py).
         cur.execute(
-            """
+            f"""
             SELECT t.track_id, t.artist, t.title, t.play_count,
                    COALESCE(s.url, '') AS url,
                    COALESCE(s.kind, '') AS kind,
@@ -1353,7 +1840,7 @@ class KaraokeTui(App):
                    COALESCE(l.synced_lyrics, '') AS synced_lyrics,
                    COALESCE(l.plain_lyrics, '') AS plain_lyrics,
                    a.detected_key AS key, a.bpm, a.energy, a.brightness,
-                   g.genre AS genre
+                   g.genre AS genre, g.runner_up AS runner_up
             FROM tracks t
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
@@ -1362,7 +1849,7 @@ class KaraokeTui(App):
                     CASE
                         WHEN s2.kind = 'youtube_music' THEN 0
                         WHEN s2.kind = 'youtube' THEN 1
-                        WHEN s2.url LIKE 'http%' THEN 2
+                        WHEN s2.url LIKE 'http%%' THEN 2
                         WHEN s2.kind = 'spotify' THEN 3
                         ELSE 4
                     END,
@@ -1375,16 +1862,19 @@ class KaraokeTui(App):
               ON a.track_id = t.track_id
             LEFT JOIN track_genre g
               ON g.track_id = t.track_id
-            GROUP BY t.track_id
-            ORDER BY t.artist, t.title
-            LIMIT :browse_limit
+            {where_sql}
+            
+            ORDER BY {order_sql}
+            {limit_sql}
             """,
-            {"browse_limit": INITIAL_BROWSE_LIMIT},
+            params,
         )
         for row in cur.fetchall():
             has_lyrics = bool(row["synced_lyrics"] or row["plain_lyrics"])
             if only_working and not has_lyrics:
                 continue
+            norm_art = str(row["artist"] or "").strip().casefold()
+            a_info = artist_genres_map.get(norm_art, {})
             self._song_data.append({
                 "track_id": row["track_id"],
                 "artist": row["artist"],
@@ -1396,6 +1886,9 @@ class KaraokeTui(App):
                 "energy": row["energy"],
                 "brightness": row["brightness"],
                 "genre": row["genre"],
+                "runner_up": row["runner_up"] if "runner_up" in row.keys() else "",
+                "broad_genres": a_info.get("broad", []),
+                "artist_genres": a_info.get("specific", []),
                 "play_count": row["play_count"],
                 "lyric_source": row["lyric_source"],
                 "synced_lyrics": row["synced_lyrics"],
@@ -1418,7 +1911,8 @@ class KaraokeTui(App):
 
     # -- selection / previews --------------------------------------------
     def on_data_table_row_highlighted(self, _e: DataTable.RowHighlighted) -> None:
-        self._show_selected_song()
+        if getattr(_e.data_table, "id", "") == "library":
+            self._show_selected_song()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # One handler for both tables: the queue plays its row directly, the
@@ -1439,12 +1933,29 @@ class KaraokeTui(App):
         except Exception:
             return False
 
+    def _update_browse_count(self) -> None:
+        """Update live track count and filter info in the browse toolbar."""
+        try:
+            lbl = self.query_one("#browse-count", Static)
+            count = len(getattr(self, "_song_data", []) or [])
+            desc = getattr(self, "_filter", "working")
+            genre = str(getattr(self, "_genre_filter", "all") or "all").strip()
+            if genre and genre != "all":
+                desc = f"{desc} · {genre}"
+            lbl.update(f"{count:,} tracks ({desc})")
+        except Exception:
+            pass
+
     def _show_browse(self) -> None:
         try:
             self.query_one("#browse-overlay").add_class(self._BROWSE_OPEN)
-            self.query_one("#library", DataTable).focus()
+            lib = self.query_one("#library", DataTable)
+            if hasattr(lib, "remove_class"):
+                lib.remove_class("-off")
+            lib.focus()
         except Exception:
             pass
+        self._update_browse_count()
 
     def _hide_browse(self) -> None:
         try:
@@ -1568,9 +2079,26 @@ class KaraokeTui(App):
 
     def action_toggle_focus(self) -> None:
         """`F`: lyrics only, hiding every other panel."""
+        if self._dance_mode:
+            self.screen.remove_class("-dance")
+            self._dance_mode = False
         on = not self.screen.has_class("-focus")
         self.screen.set_class(on, "-focus")
         self.notify("Focus mode" if on else "Focus mode off")
+
+    def action_toggle_dance(self) -> None:
+        """`W`: dance floor mode — visuals pane fills the whole screen."""
+        if self.screen.has_class("-focus"):
+            self.screen.remove_class("-focus")
+        self._dance_mode = not self._dance_mode
+        self.screen.set_class(self._dance_mode, "-dance")
+        if self._dance_mode:
+            self.notify(
+                f"Dance mode! {self._dance_num_dancers} dancers · "
+                "[ / ] to add/remove dancers · W to exit"
+            )
+        else:
+            self.notify("Dance mode off")
 
     # -- mic / radio mode -------------------------------------------------
     def mic_elapsed(self, now: float | None = None) -> float | None:
@@ -1690,9 +2218,35 @@ class KaraokeTui(App):
             pending = needs_postprocessing(track_id, conn)
         if not pending:
             return False, f"{title} is already fully processed"
-        if not publish_postprocess_task(artist, title, url):
+        # "A" is the explicit ask, so this is the one path that opts into the
+        # rate-limited word-timing upgrade.
+        if not publish_postprocess_task(artist, title, url, include_timings=True):
             return False, "Broker unreachable — nothing queued"
         return True, f"Queued {title}: {', '.join(pending)}"
+
+    def _trigger_postprocess_if_needed(self, artist: str, title: str, url: str = "") -> None:
+        """Asynchronously enqueue background postprocessing if missing BPM/key/timings."""
+        artist = (artist or "").strip()
+        title = (title or "").strip()
+        if not (artist and title):
+            return
+        if not hasattr(self, "_postprocess_enqueued"):
+            self._postprocess_enqueued = set()
+        pp_key = (artist.lower(), title.lower())
+        if pp_key in self._postprocess_enqueued:
+            return
+        self._postprocess_enqueued.add(pp_key)
+        if not hasattr(self, "run_worker"):
+            return
+        try:
+            from .postprocess_queue import enqueue_if_needed
+            self.run_worker(
+                lambda a=artist, t=title, u=url: enqueue_if_needed(a, t, u),
+                exclusive=False,
+                thread=True,
+            )
+        except Exception:
+            log.debug("postprocess enqueue dispatch failed", exc_info=True)
 
     # -- search and the play queue ----------------------------------------
 
@@ -1700,11 +2254,24 @@ class KaraokeTui(App):
         """`/`: jump to the search box."""
         self.query_one("#search-input", Input).focus()
 
-    def _genre_matches(self, genre: object) -> bool:
-        selected = str(getattr(self, "_genre_filter", "all") or "all").strip()
+    def _genre_matches(self, song_or_genre: object) -> bool:
+        selected = str(getattr(self, "_genre_filter", "all") or "all").strip().casefold()
         if selected == "all":
             return True
-        return str(genre or "").strip().casefold() == selected.casefold()
+        if isinstance(song_or_genre, dict):
+            audio_g = str(song_or_genre.get("genre") or "").strip().casefold()
+            if audio_g == selected:
+                return True
+            broad_genres = song_or_genre.get("broad_genres") or []
+            if isinstance(broad_genres, (list, tuple, set)):
+                if any(str(bg).strip().casefold() == selected for bg in broad_genres):
+                    return True
+            artist_genres = song_or_genre.get("artist_genres") or []
+            if isinstance(artist_genres, (list, tuple, set)):
+                if any(str(ag).strip().casefold() == selected for ag in artist_genres):
+                    return True
+            return False
+        return str(song_or_genre or "").strip().casefold() == selected
 
     def _sort_rows(self, rows: list) -> list:
         """Sort library or queue rows by the active sort setting (self._sort)."""
@@ -1734,12 +2301,15 @@ class KaraokeTui(App):
         if not rows:
             return rows
         ids = [r.get("track_id") for r in rows if r.get("track_id") is not None]
-        placeholders = ",".join("?" * len(ids)) if ids else ""
+        placeholders = ",".join(["%s"] * len(ids)) if ids else ""
         energies: dict = {}
         genres: dict = {}
         keys: dict = {}
         bpms: dict = {}
         plays: dict = {}
+        has_artist_genres = localcache.table_exists(conn, "artist_genres")
+        artist_genres_map = localcache.get_all_artist_genres_map(conn) if has_artist_genres else {}
+
         if placeholders:
             try:
                 cur = conn.execute(
@@ -1790,8 +2360,13 @@ class KaraokeTui(App):
                 r["key"] = keys.get(tid)
             if r.get("bpm") is None and tid in bpms:
                 r["bpm"] = bpms.get(tid)
-            if r.get("genre") is None and tid in genres:
+            if not r.get("genre") and tid in genres:
                 r["genre"] = genres.get(tid)
+            if not r.get("broad_genres") or not r.get("artist_genres"):
+                norm_art = str(r.get("artist") or "").strip().casefold()
+                a_info = artist_genres_map.get(norm_art, {})
+                r["broad_genres"] = a_info.get("broad", [])
+                r["artist_genres"] = a_info.get("specific", [])
             if r.get("play_count") is None and tid in plays:
                 r["play_count"] = plays.get(tid, 0)
 
@@ -1803,7 +2378,7 @@ class KaraokeTui(App):
                 continue
             if mood_filter == "mellow" and e > 0.40:
                 continue
-            if genre_filter != "all" and not self._genre_matches(r.get("genre")):
+            if genre_filter != "all" and not self._genre_matches(r):
                 continue
             kept.append(r)
 
@@ -1820,6 +2395,7 @@ class KaraokeTui(App):
         # empty box did not release either.
         self.set_focus(None)
         query = (event.value or "").strip()
+        self._last_search_query = query
         if not query:
             self._queue_is_wildcard = False
             self._set_queue([])
@@ -1832,15 +2408,31 @@ class KaraokeTui(App):
         """Search off the UI thread; scoring reads every track's lyrics."""
         from . import librarysearch
 
+        start_playing = True
+        try:
+            from .player_mpv import is_playing
+            if is_playing():
+                start_playing = False
+        except Exception:
+            pass
+
         try:
             with localcache.connect() as conn:
                 if query.strip() == "*":
                     rows = self._all_queue_rows(conn)
                 else:
-                    hits = librarysearch.search(query, conn)
+                    genre_filter = str(getattr(self, "_genre_filter", "all") or "all").strip()
+                    hits = librarysearch.search(
+                        query,
+                        conn,
+                        limit=INITIAL_BROWSE_LIMIT,
+                        genre=genre_filter if genre_filter != "all" else None,
+                    )
                     rows = [{"track_id": h.track_id, "artist": h.artist,
                              "title": h.title, "score": h.score,
                              "fields": h.fields,
+                             "genre": h.genre,
+                             "broad_genres": list(h.broad_genres),
                              "url": librarysearch.playable_url(h.track_id, conn) or ""}
                             for h in hits]
                 rows = self._apply_mood_filter(rows, conn)
@@ -1859,8 +2451,42 @@ class KaraokeTui(App):
             ensure_schema(conn)
         except Exception:
             pass
+        has_artist_genres = localcache.table_exists(conn, "artist_genres")
+
+        where_clauses = [
+            "(t.duration IS NULL OR t.duration <= %(album_seconds)s)",
+            "(COALESCE(l.synced_lyrics, '') != '' OR COALESCE(l.plain_lyrics, '') != '')",
+        ]
+        params = {
+            "album_seconds": localcache.ALBUM_UPLOAD_SECONDS,
+            "wildcard_limit": INITIAL_BROWSE_LIMIT,
+        }
+        genre_filter = str(getattr(self, "_genre_filter", "all") or "all").strip()
+        if genre_filter != "all":
+            params["genre_filter"] = genre_filter
+            if has_artist_genres:
+                where_clauses.append(
+                    """(
+                        EXISTS (
+                            SELECT 1 FROM artist_genres ag
+                            WHERE (lower(trim(ag.broad_genre)) = lower(trim(%(genre_filter)s))
+                                   OR lower(trim(ag.genre)) = lower(trim(%(genre_filter)s)))
+                              AND ag.artist_normalized = lower(trim(t.artist))
+                        )
+                        OR (
+                            NOT EXISTS (
+                                SELECT 1 FROM artist_genres ag
+                                WHERE ag.artist_normalized = lower(trim(t.artist))
+                            )
+                            AND lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(genre_filter)s))
+                        )
+                    )"""
+                )
+            else:
+                where_clauses.append("lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(genre_filter)s))")
+
         cur.execute(
-            """
+            f"""
             SELECT t.track_id, t.artist, t.title, t.play_count,
                    COALESCE(s.url, '') AS url,
                    g.genre AS genre,
@@ -1875,7 +2501,7 @@ class KaraokeTui(App):
                     CASE
                         WHEN s2.kind = 'youtube_music' THEN 0
                         WHEN s2.kind = 'youtube' THEN 1
-                        WHEN s2.url LIKE 'http%' THEN 2
+                        WHEN s2.url LIKE 'http%%' THEN 2
                         WHEN s2.kind = 'spotify' THEN 3
                         ELSE 4
                     END,
@@ -1888,17 +2514,12 @@ class KaraokeTui(App):
               ON a.track_id = t.track_id
             LEFT JOIN track_genre g
               ON g.track_id = t.track_id
-            WHERE (t.duration IS NULL OR t.duration <= :album_seconds)
-              AND (COALESCE(l.synced_lyrics, '') != ''
-                   OR COALESCE(l.plain_lyrics, '') != '')
-            GROUP BY t.track_id
+            WHERE {' AND '.join(where_clauses)}
+            
             ORDER BY RANDOM()
-            LIMIT :wildcard_limit
+            LIMIT %(wildcard_limit)s
             """,
-            {
-                "album_seconds": localcache.ALBUM_UPLOAD_SECONDS,
-                "wildcard_limit": INITIAL_BROWSE_LIMIT,
-            },
+            params,
         )
         return [{"track_id": row["track_id"], "artist": row["artist"] or "",
                  "title": row["title"] or "", "url": row["url"] or "",
@@ -1913,8 +2534,16 @@ class KaraokeTui(App):
         A populated local queue always becomes authoritative. This prevents a
         stale YouTube Music temporary queue from taking over after a search.
         """
+        if query:
+            self._last_search_query = query
+            try:
+                localcache.record_search_query(query, len(rows))
+            except Exception as exc:
+                log.debug("record_search_query failed: %s", exc)
         if rows:
             self._play_once = True
+        self._ytmusic_queue_follow = False
+        self._ytmusic_video_to_queue_index = {}
         self._unfiltered_queue = list(rows)
         self._filter_and_set_queue(query=query, start_playing=start_playing)
 
@@ -1943,22 +2572,14 @@ class KaraokeTui(App):
                 self._sync_queue_highlight(cur_art, cur_title, cur_url)
 
         table = self.query_one("#queue", DataTable)
-        try:
-            lib_table = self.query_one("#library", DataTable)
-        except Exception:
-            lib_table = None
 
         if not rows:
             table.set_class(False, "-on")
-            if lib_table:
-                lib_table.set_class(False, "-off")
             table.clear()
             if query:
                 self.notify(f"No matches for {query!r}", severity="warning")
             return
         table.set_class(True, "-on")
-        if lib_table:
-            lib_table.set_class(True, "-off")
         self._render_queue()
         if query:
             self.notify(f"{len(rows)} match(es) for {query!r}")
@@ -1979,9 +2600,15 @@ class KaraokeTui(App):
             key_val = str(row.get("key") or "—")
             table.add_row(">" if playing else str(i + 1),
                           row["artist"][:18], row["title"][:28], key_val, note)
+        follow_label = "  (YT Music follows)" if getattr(self, "_ytmusic_queue_follow", False) else (
+            "  (follow queue)" if self._play_once else "")
         table.border_title = (f"queue  {self._queue_at + 1}/{len(self._queue)}"
-                              f"{'  (follow queue)' if self._play_once else ''}"
+                              f"{follow_label}"
                               f"  [sort: {self._sort}]")
+        
+        # Keep cursor on currently playing item, which scrolls it into view
+        if self._queue_at >= 0:
+            table.move_cursor(row=self._queue_at, animate=False)
 
     def _sync_queue_highlight(self, artist: str, title: str, url: str = "") -> None:
         """Keep the local queue and library table highlights aligned with the playing MPRIS track."""
@@ -2073,15 +2700,34 @@ class KaraokeTui(App):
         metadata simply changes, which looks the same as the user picking
         something. The page's video element reports that it ended.
         """
+        if getattr(self, "_ytmusic_queue_follow", False):
+            return
         if not (self._play_once and self._queue and self._queue_at >= 0):
             return
-        state = browser_playback()
+        try:
+            state = browser_playback(timeout=0.2)
+        except TypeError:
+            state = browser_playback()
+
+        if not state:
+            return
+
+        is_casting = bool(state.get("casting"))
+        if is_casting:
+            url = str(state.get("url") or "")
+            if "list=" in url:
+                self._ytmusic_queue_follow = True
+                return
+            # While casting, remote device manages buffering and idle transitions
+            if not track_finished(state):
+                self._idle_since = 0.0
+                return
+
         if not track_finished(state) and not track_idle(state):
             self._idle_since = 0.0
             if state and state.get("url") and not getattr(self, "_last_finished_url", ""):
                 self._last_finished_url = state.get("url")
             return
-
         if not track_finished(state):
             # The window can also come to rest holding nothing at all: the
             # site navigated off the watch URL, or the load never took. That
@@ -2128,9 +2774,34 @@ class KaraokeTui(App):
             log.exception("queue play failed")
             self.notify(f"Play failed: {exc}", severity="error")
             return False
+        if not getattr(self, "_ytmusic_queue_follow", False):
+            # Drop older played items, keep last 2 for history (so current is 3rd)
+            if index > 2:
+                drop_count = index - 2
+                self._queue = self._queue[drop_count:]
+                index = 2
+
         self._queue_at = index
         self._render_queue()
+        localcache.save_active_queue(
+            getattr(self, "_active_playlist_id", ""),
+            getattr(self, "_active_playlist_name", ""),
+            self._queue,
+            current_index=index,
+        )
+        localcache.record_queue_event(
+            "advance",
+            row.get("track_id"),
+            str(row.get("artist") or ""),
+            str(row.get("title") or ""),
+            index,
+        )
         self.notify(f"Playing {row['artist']} - {row['title']}")
+        self._trigger_postprocess_if_needed(
+            str(row.get("artist") or ""),
+            str(row.get("title") or ""),
+            url,
+        )
         return True
 
     def action_queue_next(self) -> None:
@@ -2143,6 +2814,51 @@ class KaraokeTui(App):
                 return
             index += 1
         self.notify("End of queue")
+
+    def action_queue_rollback(self) -> None:
+        """`u`: Rollback to previously played track/state in the queue."""
+        if not self._queue:
+            self.notify("Queue is empty", severity="warning")
+            return
+        events = localcache.get_recent_queue_events(limit=15)
+        target_idx: int | None = None
+        for ev in events:
+            idx = ev.get("queue_index")
+            if idx is not None and isinstance(idx, int) and 0 <= idx < len(self._queue) and idx != self._queue_at:
+                target_idx = idx
+                break
+
+        if target_idx is None:
+            if self._queue_at > 0:
+                target_idx = self._queue_at - 1
+
+        if target_idx is not None and 0 <= target_idx < len(self._queue):
+            row = self._queue[target_idx]
+            self._queue_at = target_idx
+            self._render_queue()
+            if self._play_once:
+                self.play_queue_index(target_idx)
+            else:
+                from . import player_open
+                if not player_open.cdp_previous_track():
+                    if self._det.is_active:
+                        self.api.player_previous(self._control_player())
+            localcache.save_active_queue(
+                getattr(self, "_active_playlist_id", ""),
+                getattr(self, "_active_playlist_name", ""),
+                self._queue,
+                current_index=target_idx,
+            )
+            localcache.record_queue_event(
+                "rollback",
+                row.get("track_id"),
+                str(row.get("artist") or ""),
+                str(row.get("title") or ""),
+                target_idx,
+            )
+            self.notify(f"Rolled back to #{target_idx + 1}: {row.get('artist')} - {row.get('title')}")
+        else:
+            self.notify("No earlier queue state to roll back to", severity="warning")
 
     def action_enqueue_selected(self) -> None:
         """`a`: Add the currently selected track to the end of the queue."""
@@ -2169,6 +2885,7 @@ class KaraokeTui(App):
             pass
         self._render_queue()
         self.notify(f"Enqueued {row['artist']} - {row['title']} (queue: {len(self._queue)})")
+        self._sync_enqueued_to_ytmusic([row])
 
     def action_shuffle_queue(self) -> None:
         """`U`: Shuffle upcoming items in the queue."""
@@ -2186,6 +2903,10 @@ class KaraokeTui(App):
         """`C`: Clear the current queue."""
         self._queue = []
         self._queue_at = -1
+        self._ytmusic_queue_follow = False
+        self._active_playlist_id = ""
+        self._active_playlist_name = ""
+        self._ytmusic_video_to_queue_index = {}
         try:
             table = self.query_one("#queue", DataTable)
             table.set_class(False, "-on")
@@ -2227,14 +2948,17 @@ class KaraokeTui(App):
                         severity="warning")
             return
         self._play_once = True
+        new_rows = []
         for p in picks:
-            self._queue.append({
+            r = {
                 "track_id": p.get("track_id"),
                 "artist": str(p.get("artist") or ""),
                 "title": str(p.get("title") or ""),
                 "url": str(p.get("url") or ""),
                 "kind": "",
-            })
+            }
+            self._queue.append(r)
+            new_rows.append(r)
         try:
             self.query_one("#queue", DataTable).set_class(True, "-on")
         except Exception:
@@ -2243,6 +2967,445 @@ class KaraokeTui(App):
         space = picks[0].get("space", "audio") if picks else "audio"
         self.notify(f"Added {len(picks)} tracks to keep the vibe going "
                     f"({space}); queue: {len(self._queue)}")
+        self._sync_enqueued_to_ytmusic(new_rows)
+
+    def action_more_like_this(self) -> None:
+        """`M`: Find and enqueue tracks that sound acoustically similar via CLAP.
+
+        Seeds on the currently selected song in the library table, or the
+        currently playing track if no table row is highlighted.
+        """
+        # DataTable.cursor_row is 0, not None, when no row was ever
+        # highlighted, so _selected_song() always returns something -- the
+        # first row of the current filter. Seeding on it unconditionally meant
+        # M always searched from that same track no matter what was playing,
+        # and the branches below were unreachable. Only trust the library
+        # selection when the user is actually in the library table.
+        song = self._selected_song() if self._library_has_focus() else None
+        target_id = None
+        target_label = ""
+        if song and song.get("track_id"):
+            target_id = int(song["track_id"])
+            target_label = f"{song.get('artist')} - {song.get('title')}"
+        elif self._current_track_id is not None:
+            target_id = self._current_track_id
+            if getattr(self._det, "artist", None) and getattr(self._det, "title", None):
+                target_label = f"{self._det.artist} - {self._det.title}"
+            else:
+                target_label = f"track #{target_id}"
+        elif self._queue and self._queue_at < len(self._queue):
+            q_song = self._queue[self._queue_at]
+            if q_song.get("track_id"):
+                target_id = int(q_song["track_id"])
+                target_label = f"{q_song.get('artist')} - {q_song.get('title')}"
+
+        if not target_id:
+            # Nothing playing and nothing queued: fall back to the highlighted
+            # library row even without focus, so M still does something useful
+            # rather than refusing.
+            fallback = self._selected_song()
+            if fallback and fallback.get("track_id"):
+                target_id = int(fallback["track_id"])
+                target_label = f"{fallback.get('artist')} - {fallback.get('title')}"
+
+        if not target_id:
+            self.notify("No track selected or playing to find similar songs for",
+                        severity="warning")
+            return
+
+        self.notify(f"Finding tracks that sound like '{target_label}'…")
+
+        def _bg() -> None:
+            try:
+                picks = self.api.sounds_like(target_id, limit=5)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.notify, f"Sound search failed: {exc}", severity="error")
+                return
+            self.call_from_thread(self._apply_more_like_this, picks, target_label)
+
+        self.run_worker(_bg, thread=True)
+
+    def _apply_more_like_this(self, picks: list, seed_label: str) -> None:
+        """Append tracks matching seed sound to the queue (called on UI thread)."""
+        if not picks:
+            self.notify(f"No acoustic matches found for '{seed_label}'",
+                        severity="warning")
+            return
+        self._play_once = True
+        new_rows = []
+        for p in picks:
+            r = {
+                "track_id": p.get("track_id"),
+                "artist": str(p.get("artist") or ""),
+                "title": str(p.get("title") or ""),
+                "url": str(p.get("url") or ""),
+                "kind": "",
+            }
+            self._queue.append(r)
+            new_rows.append(r)
+        try:
+            self.query_one("#queue", DataTable).set_class(True, "-on")
+        except Exception:
+            pass
+        self._render_queue()
+        space = picks[0].get("space", "audio") if picks else "audio"
+        self.notify(f"Added {len(new_rows)} tracks sounding like '{seed_label}' "
+                    f"({space}); queue: {len(self._queue)}")
+        self._sync_enqueued_to_ytmusic(new_rows)
+
+    def _queue_video_map(self) -> dict[str, int]:
+        """Map YouTube video IDs in the current queue to their row index."""
+        mapping: dict[str, int] = {}
+        for idx, row in enumerate(self._queue):
+            vid = localcache.extract_youtube_id(str(row.get("url") or ""))
+            if vid and vid not in mapping:
+                mapping[vid] = idx
+        return mapping
+
+    def action_ytmusic_playlist_queue(self) -> None:
+        """`Y`: mirror the current search queue into a private YT Music playlist.
+
+        Only queue rows with already-known YouTube/YT Music video IDs are added;
+        missing/Spotify/local-only rows are skipped rather than guessed by search.
+        Playlists are capped to max 50 tracks, given a clean name matching the active search,
+        persisted to SQLite DB, and synced via a background event-driven worker.
+        Once the playlist is opened, YT Music owns playback advancement and the
+        TUI follows detected video changes to keep lyrics/highlight in sync.
+        """
+        if not self._queue:
+            self.notify("Queue is empty — search first", severity="warning")
+            return
+
+        MAX_PLAYLIST_TRACKS = 50
+        capped_rows = list(self._queue)[:MAX_PLAYLIST_TRACKS]
+        query = getattr(self, "_last_search_query", "")
+        from . import ytmusic_playlist
+        clean_name = ytmusic_playlist.clean_playlist_name_for_query(query)
+
+        self.notify(f"Syncing '{clean_name}' (max {MAX_PLAYLIST_TRACKS} tracks)…")
+
+        def _bg() -> None:
+            try:
+                from . import ytmusic_playlist
+                from .postprocess_queue import orchestrator
+
+                candidates = ytmusic_playlist.queue_rows_to_ytmusic_candidates(capped_rows)
+                if not candidates:
+                    self.call_from_thread(
+                        self.notify,
+                        "No YouTube/YT Music rows in current queue",
+                        severity="warning",
+                    )
+                    return
+
+                playlist_id = ""
+                playlist_title = clean_name
+                unresolved = []
+
+                if orchestrator() != "legacy":
+                    try:
+                        from .tasks import sync_ytmusic_playlist
+                        async_task = sync_ytmusic_playlist.delay({
+                            "name": clean_name,
+                            "query": query,
+                            "rows": capped_rows,
+                            "max_tracks": MAX_PLAYLIST_TRACKS,
+                        })
+                        res = async_task.get(timeout=25)
+                        playlist_id = res.get("playlist_id") or ""
+                        playlist_title = res.get("name") or clean_name
+                    except Exception as exc:
+                        log.debug("Celery sync_ytmusic_playlist fell back: %s", exc)
+
+                if not playlist_id:
+                    result = ytmusic_playlist.create_temp_queue_playlist(
+                        capped_rows,
+                        name=clean_name,
+                        search_query=query,
+                        max_tracks=MAX_PLAYLIST_TRACKS,
+                    )
+                    playlist_id = result.playlist_id
+                    playlist_title = result.name
+                    unresolved = result.unresolved
+
+                if not playlist_id:
+                    self.call_from_thread(
+                        self.notify,
+                        "YouTube Music playlist was not created",
+                        severity="error",
+                    )
+                    return
+
+                first = candidates[0].video_id
+                playlist_url = (
+                    f"https://music.youtube.com/watch?v={first}"
+                    f"&list={playlist_id}"
+                )
+                open_song_url(playlist_url, "youtube_music_playlist", prefer_audio=True)
+            except Exception as exc:
+                log.exception("YT Music playlist sync failed")
+                self.call_from_thread(
+                    self.notify, f"YT Music playlist failed: {exc}", severity="error")
+                return
+            self.call_from_thread(
+                self._enable_ytmusic_queue_follow,
+                playlist_id,
+                len(candidates),
+                unresolved,
+                playlist_title,
+            )
+
+        self.run_worker(_bg, thread=True)
+
+    def _sync_enqueued_to_ytmusic(self, new_rows: list[dict[str, Any]]) -> None:
+        """If currently following a YT Music playlist, append new track(s) to DB and remote."""
+        if not getattr(self, "_ytmusic_queue_follow", False):
+            return
+        playlist_id = getattr(self, "_active_playlist_id", "")
+        if not playlist_id:
+            return
+
+        self._ytmusic_video_to_queue_index = self._queue_video_map()
+        with localcache.connect() as conn:
+            for r in new_rows:
+                localcache.append_playlist_track(playlist_id, r, conn=conn)
+            localcache.save_active_queue(
+                playlist_id,
+                getattr(self, "_active_playlist_name", ""),
+                self._queue,
+                current_index=self._queue_at,
+                conn=conn,
+            )
+
+        def _bg() -> None:
+            from .postprocess_queue import orchestrator
+            from . import ytmusic_playlist
+
+            for r in new_rows:
+                artist = str(r.get("artist") or "")
+                title = str(r.get("title") or "")
+                vid = localcache.extract_youtube_id(str(r.get("url") or ""))
+                added = False
+                if orchestrator() != "legacy":
+                    try:
+                        from .tasks import add_to_ytmusic_playlist_task
+                        res = add_to_ytmusic_playlist_task.delay({
+                            "playlist_id": playlist_id,
+                            "artist": artist,
+                            "title": title,
+                            "video_id": vid or None,
+                        }).get(timeout=15)
+                        added = bool(res.get("ok"))
+                    except Exception as exc:
+                        log.debug("Celery add_to_ytmusic_playlist_task fell back: %s", exc)
+                if not added:
+                    try:
+                        ok, _ = ytmusic_playlist.add_track_to_ytmusic_playlist(
+                            playlist_id, artist, title, video_id=vid or "",
+                        )
+                        added = ok
+                    except Exception as exc:
+                        log.warning("Failed to add track to remote YT Music playlist: %s", exc)
+                if added:
+                    log.info("Synced track '%s - %s' to remote YT Music playlist %s", artist, title, playlist_id)
+
+        if playlist_id.startswith(("PL", "VL", "RD", "OLAK5")):
+            self.run_worker(_bg, thread=True, exclusive=False)
+
+    def _enable_ytmusic_queue_follow(self, playlist_id: str, count: int, unresolved: list, name: str = "") -> None:
+        self._ytmusic_queue_follow = True
+        self._active_playlist_id = playlist_id
+        self._active_playlist_name = name
+        # YT Music is now the player queue. Do not force-open local next tracks
+        # when one finishes; just mirror detected watch URL changes back to the
+        # local queue highlight/lyrics.
+        self._play_once = False
+        self._ytmusic_video_to_queue_index = self._queue_video_map()
+        self._render_queue()
+        localcache.save_active_queue(playlist_id, name, self._queue, current_index=self._queue_at)
+        localcache.record_queue_event(
+            "loaded",
+            metadata={"playlist_id": playlist_id, "count": count, "name": name},
+        )
+        skipped = len(unresolved)
+        extra = f"; {skipped} unresolved" if skipped else ""
+        self.notify(
+            f"Playing YT Music playlist {playlist_id} ({count} queued{extra})")
+
+    def _sync_queue_to_detection(self, det, track_id: int | None) -> None:
+        """Move the local queue highlight to the YT Music item now playing."""
+        if not getattr(self, "_ytmusic_queue_follow", False):
+            return
+        index: int | None = None
+        vid = localcache.extract_youtube_id(getattr(det, "url", "") or "")
+        if vid:
+            index = self._ytmusic_video_to_queue_index.get(vid)
+        if index is None and track_id is not None:
+            for i, row in enumerate(self._queue):
+                if row.get("track_id") == track_id:
+                    index = i
+                    break
+        if index is None and getattr(det, "title", ""):
+            d_title = det.title.strip().casefold()
+            d_artist = (getattr(det, "artist", "") or "").strip().casefold()
+            for i, row in enumerate(self._queue):
+                r_title = (row.get("title") or "").strip().casefold()
+                r_artist = (row.get("artist") or "").strip().casefold()
+                if r_title == d_title and (not d_artist or not r_artist or d_artist in r_artist or r_artist in d_artist):
+                    index = i
+                    break
+        if index is None or index == self._queue_at:
+            return
+        self._queue_at = index
+        self._render_queue()
+        row = self._queue[index] if 0 <= index < len(self._queue) else {}
+        localcache.save_active_queue(
+            getattr(self, "_active_playlist_id", ""),
+            getattr(self, "_active_playlist_name", ""),
+            self._queue,
+            current_index=index,
+        )
+        localcache.record_queue_event(
+            "follow",
+            row.get("track_id"),
+            str(row.get("artist") or ""),
+            str(row.get("title") or ""),
+            index,
+        )
+
+    def _check_playlist_detection(self, det: Any, conn: Any) -> None:
+        """Detect if active playback belongs to a synced or saved YouTube Music playlist."""
+        pl_id = getattr(det, "playlist_id", "") or ""
+        if not pl_id:
+            url = getattr(det, "url", "") or ""
+            if url:
+                pl_id = localcache.extract_playlist_id(url)
+
+        saved_pl = None
+        if pl_id:
+            saved_pl = localcache.find_saved_playlist_by_id(pl_id, conn=conn)
+
+        if not saved_pl:
+            vid = localcache.extract_youtube_id(getattr(det, "url", "") or "")
+            if vid:
+                matches = localcache.find_playlist_by_video_id(vid, conn=conn)
+                if matches:
+                    saved_pl = matches[0]
+
+        if not saved_pl:
+            # Check if this is an external/unsynced YouTube Music playlist playing
+            if pl_id and pl_id not in getattr(self, "_attempted_external_playlists", set()):
+                if not hasattr(self, "_attempted_external_playlists"):
+                    self._attempted_external_playlists = set()
+                self._attempted_external_playlists.add(pl_id)
+                self.run_worker(
+                    lambda p=pl_id: self._fetch_and_follow_external_playlist(p),
+                    thread=True,
+                    exclusive=False,
+                )
+            return
+
+        found_id = str(saved_pl.get("playlist_id") or "")
+        pl_name = str(saved_pl.get("name") or found_id)
+        active_id = getattr(self, "_active_playlist_id", "")
+
+        if found_id != active_id:
+            if not self._queue or getattr(self, "_ytmusic_queue_follow", False):
+                tracks = localcache.get_saved_playlist_tracks(found_id, conn=conn)
+                if tracks:
+                    rows = [
+                        {
+                            "track_id": t.get("track_id"),
+                            "artist": t.get("artist") or "",
+                            "title": t.get("title") or "",
+                            "url": t.get("url") or (f"https://music.youtube.com/watch?v={t['video_id']}" if t.get("video_id") else ""),
+                            "kind": "ytmusic",
+                        }
+                        for t in tracks
+                    ]
+                    self._apply_restored_playlist(rows, found_id, pl_name)
+                    self.notify(f"Detected playlist '{pl_name}' — following queue", severity="information")
+            else:
+                if getattr(self, "_last_notified_playlist_id", "") != found_id:
+                    self._last_notified_playlist_id = found_id
+                    self.notify(f"Playing from saved playlist '{pl_name}' (press Shift+L to view)", severity="information")
+
+    def _fetch_and_follow_external_playlist(self, pl_id: str) -> None:
+        """Fetch an external/unsynced YouTube Music playlist from remote and follow it."""
+        try:
+            from . import ytmusic_playlist
+            client = ytmusic_playlist.get_ytmusic_client()
+            remote_tracks = client.get_playlist_tracks(pl_id, limit=200)
+            if not remote_tracks:
+                self.call_from_thread(self._fallback_to_songrec, pl_id)
+                return
+            pl_title = f"YT Music Playlist {pl_id[:8]}"
+            try:
+                pl_info = client.get_playlist(pl_id, limit=1)
+                if pl_info and pl_info.get("title"):
+                    pl_title = pl_info["title"]
+            except Exception:
+                pass
+
+            saved_tracks = []
+            with localcache.connect() as conn:
+                for idx, t in enumerate(remote_tracks):
+                    artist = str(t.get("artist") or (t.get("artists", [{}])[0].get("name") if t.get("artists") else "") or "").strip()
+                    title = str(t.get("title") or "").strip()
+                    vid = str(t.get("videoId") or "").strip()
+                    url = f"https://music.youtube.com/watch?v={vid}" if vid else ""
+                    tid = localcache.find_track_id(artist, title, conn)
+                    if tid is None and url:
+                        found = localcache.find_track_by_url(url, conn)
+                        if found:
+                            tid = found[0]
+                    if tid is None and vid:
+                        tid = localcache.add_track_source(artist, title, url=url, kind="youtube_music", conn=conn)
+                    saved_tracks.append({
+                        "position": idx + 1,
+                        "track_id": tid,
+                        "artist": artist,
+                        "title": title,
+                        "video_id": vid,
+                        "url": url,
+                    })
+                localcache.save_playlist(pl_id, pl_title, search_query="", tracks=saved_tracks, conn=conn)
+
+            rows = [
+                {
+                    "track_id": t.get("track_id"),
+                    "artist": t.get("artist") or "",
+                    "title": t.get("title") or "",
+                    "url": t.get("url") or (f"https://music.youtube.com/watch?v={t['video_id']}" if t.get("video_id") else ""),
+                    "kind": "ytmusic",
+                }
+                for t in saved_tracks
+            ]
+            self.call_from_thread(self._on_external_playlist_loaded, rows, pl_id, pl_title)
+        except Exception as exc:
+            log.debug("Failed fetching external playlist %s: %s", pl_id, exc)
+            self.call_from_thread(self._fallback_to_songrec, pl_id)
+
+    def _fallback_to_songrec(self, pl_id: str = "") -> None:
+        """Fallback when external playlist is inaccessible: listen via songrec and start postprocess."""
+        import shutil
+        if not shutil.which("songrec"):
+            self.notify(f"External playlist {pl_id[:8]} inaccessible and songrec not installed", severity="warning")
+            return
+        if self._mic_running():
+            return
+        self._mic_stop = threading.Event()
+        self._mic_ref = None
+        self.run_worker(self._mic_loop, exclusive=False, thread=True)
+        self.notify("External playlist inaccessible — falling back to radio mode audio recognition", severity="information")
+
+    def _on_external_playlist_loaded(self, rows: list[dict], pl_id: str, title: str) -> None:
+        if not self._queue or getattr(self, "_ytmusic_queue_follow", False):
+            self._apply_restored_playlist(rows, pl_id, title)
+            self.notify(f"Synced & following YT Music playlist '{title}' ({len(rows)} tracks)", severity="information")
+        else:
+            self.notify(f"Imported YT Music playlist '{title}' (press Shift+L to view)", severity="information")
 
     def action_sample_key(self) -> None:
         """`k`: detect key/BPM by recording what is playing.
@@ -2404,6 +3567,13 @@ class KaraokeTui(App):
         except Exception:
             log.debug("closing the CDP channel on exit failed", exc_info=True)
 
+        # Cancel all active Textual workers so background threads don't block
+        # the executor shutdown at exit.
+        try:
+            self.workers.cancel_all()
+        except Exception:
+            pass
+
     def _analyse_recording(self, recording_id: int) -> None:
         """Decompile a finished recording, in a worker thread.
 
@@ -2558,6 +3728,16 @@ class KaraokeTui(App):
             return
         self.push_screen(RecordingBrowseScreen(recordings))
 
+    def action_browse_playlists(self) -> None:
+        """`L`: browse saved YouTube Music playlists, load/follow or open in browser."""
+        try:
+            with localcache.connect() as conn:
+                playlists = localcache.get_saved_playlists(100, conn=conn)
+        except Exception as exc:
+            self.notify(f"Playlists unavailable: {exc}", severity="error")
+            return
+        self.push_screen(SavedPlaylistsScreen(playlists))
+
     def action_stats(self) -> None:
         """`T`: library, pipeline and listening statistics."""
         from . import librarystats
@@ -2576,6 +3756,41 @@ class KaraokeTui(App):
         except Exception:
             pass          # broker down is not a reason to hide the rest
         self.push_screen(StatsScreen(stats_panels(lib, summary, status)))
+
+    def _get_current_or_selected_track_id(self) -> int | None:
+        if self._current_track_id is not None:
+            return self._current_track_id
+        if getattr(self, "_song", None) and self._song.get("track_id"):
+            try:
+                return int(self._song["track_id"])
+            except (ValueError, TypeError):
+                pass
+        if getattr(self, "_queue", None) and 0 <= getattr(self, "_queue_at", -1) < len(self._queue):
+            q_song = self._queue[self._queue_at]
+            if q_song and q_song.get("track_id"):
+                try:
+                    return int(q_song["track_id"])
+                except (ValueError, TypeError):
+                    pass
+        song = self._selected_song()
+        if song and song.get("track_id"):
+            try:
+                return int(song["track_id"])
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def action_ai_dj_chat(self, initial_prompt: Optional[str] = None) -> None:
+        """`D`: open the interactive AI DJ Chat booth."""
+        self.push_screen(DJChatScreen(
+            current_track_provider=self._get_current_or_selected_track_id,
+            current_track_id=self._get_current_or_selected_track_id(),
+            initial_prompt=initial_prompt,
+        ))
+
+    def action_lyric_vibe(self) -> None:
+        """`v`: show lyric sentiment vibe, emotional arc & vocal tips for the currently playing song."""
+        self.action_ai_dj_chat(initial_prompt="/vibe")
 
     def action_help(self) -> None:
         # get_key_display is the app's own formatter, so the help screen and
@@ -2746,7 +3961,28 @@ class KaraokeTui(App):
 
             # 3. Playback queue events (e.g. queue mutated, auto-next queued)
             elif name.startswith("karaoke.playback.") or name.startswith("karaoke.queue."):
+                saved = localcache.load_active_queue()
+                if saved and saved.get("rows"):
+                    self._queue = saved["rows"]
+                    self._unfiltered_queue = list(saved["rows"])
+                    self._queue_at = saved.get("current_index", 0)
                 self._render_queue()
+
+            # 4. YouTube Music playlist sync / remote additions
+            elif (
+                name.startswith("karaoke.playlist.")
+                or "ytmusic_sync" in name
+                or name == "karaoke.tasks.add_to_ytmusic_playlist_task"
+                or name == "karaoke.tasks.sync_ytmusic_playlist"
+            ):
+                if getattr(self, "_ytmusic_queue_follow", False):
+                    saved = localcache.load_active_queue()
+                    if saved and saved.get("rows"):
+                        self._queue = saved["rows"]
+                        self._unfiltered_queue = list(saved["rows"])
+                        self._queue_at = saved.get("current_index", 0)
+                        self._ytmusic_video_to_queue_index = self._queue_video_map()
+                    self._render_queue()
 
         if has_postprocess or has_metadata:
             # Re-read active track lyrics & analysis in-place
@@ -2759,12 +3995,31 @@ class KaraokeTui(App):
                     pass
             self.notify("Track data updated from background event", severity="information")
 
+    def _library_has_focus(self) -> bool:
+        """Whether the library table is the widget the user is driving.
+
+        Distinguishes a deliberate row selection from the table's default
+        cursor position, which sits at row 0 whether or not anything was ever
+        highlighted.
+        """
+        try:
+            return bool(self.query_one("#library", DataTable).has_focus)
+        except Exception:
+            return False
+
     def _selected_song(self) -> SongRow | None:
-        table = self.query_one("#library", DataTable)
+        try:
+            table = self.query_one("#library", DataTable)
+        except Exception:
+            return None
         if not self._song_data:
             return None
-        if 0 <= table.cursor_row < len(self._song_data):
-            return self._song_data[table.cursor_row]
+        try:
+            row_idx = table.cursor_row
+            if 0 <= row_idx < len(self._song_data):
+                return self._song_data[row_idx]
+        except Exception:
+            pass
         return None
 
     def _show_selected_song(self) -> None:
@@ -2772,17 +4027,45 @@ class KaraokeTui(App):
         if self._det.is_active and self._timeline.lines:
             return
         song = self._selected_song()
-        lyrics = self.query_one("#lyrics", Static)
+        try:
+            lyrics = self.query_one("#lyrics", Static)
+        except Exception:
+            return
         lyrics.border_subtitle = None
         if song is None:
             lyrics.update("No songs match this filter yet.")
             self._update_mood("neutral")
             self._update_keybpm(None)
-            self.query_one("#ascii-visual", Static).update("sentiment / rhythm")
+            try:
+                self.query_one("#ascii-visual", Static).update("sentiment / rhythm")
+            except Exception:
+                pass
             return
         preview = lyric_preview(song)
         lyrics.update(preview or "No lyrics cached for this track yet.")
+
+        # Show consensus genre & acoustic sound in border subtitle
+        broad_g = song.get("broad_genres") or []
+        spec_g = song.get("artist_genres") or []
+        audio_g = str(song.get("genre") or "").strip()
+        runner = str(song.get("runner_up") or "").strip()
+        tags = []
+        if broad_g:
+            bg_str = "/".join(broad_g)
+            if spec_g and spec_g[0].lower() != broad_g[0].lower():
+                bg_str = f"{bg_str} ({spec_g[0]})"
+            tags.append(f"Genre: {bg_str}")
+        if audio_g:
+            sound_str = f"{audio_g} ~{runner}" if runner else audio_g
+            tags.append(f"Sound: {sound_str}")
+        lyrics.border_subtitle = " • ".join(tags) if tags else None
+
         self._render_visuals(song, preview, self._elapsed)
+        self._trigger_postprocess_if_needed(
+            str(song.get("artist") or ""),
+            str(song.get("title") or ""),
+            str(song.get("url") or ""),
+        )
 
     # -- opening / whitelist / controls ----------------------------------
     def action_select(self) -> None:
@@ -2845,6 +4128,7 @@ class KaraokeTui(App):
         # `H` (and every other key) was silently dropped until it returned.
         self._hide_browse()
         self.notify(f"Opening {artist} - {title}…")
+        self._trigger_postprocess_if_needed(artist, title, url)
 
         def _bg() -> None:
             try:
@@ -2902,7 +4186,7 @@ class KaraokeTui(App):
 
     def action_next_track(self) -> None:
         """Skip to next track (via active queue or CDP/MPRIS)."""
-        if self._queue and self._queue_at >= 0:
+        if self._queue and self._queue_at >= 0 and not getattr(self, "_ytmusic_queue_follow", False):
             self.action_queue_next()
             return
         from . import player_open
@@ -2913,7 +4197,8 @@ class KaraokeTui(App):
 
     def action_previous_track(self) -> None:
         """Skip to previous track (via active queue or CDP/MPRIS)."""
-        if self._play_once and self._queue and self._queue_at > 0:
+        if (self._play_once and self._queue and self._queue_at > 0
+                and not getattr(self, "_ytmusic_queue_follow", False)):
             self.play_queue_index(self._queue_at - 1)
             return
         from . import player_open
@@ -2994,12 +4279,28 @@ class KaraokeTui(App):
             self.action_toggle_shuffle()
         elif bid == "btn-repeat":
             self.action_toggle_repeat()
+        elif bid == "btn-browse-open":
+            self.action_select()
+        elif bid == "btn-browse-enqueue":
+            self.action_enqueue_selected()
+        elif bid == "btn-browse-more":
+            self.action_more_like_this()
+        elif bid == "btn-browse-vibe":
+            self.action_lyric_vibe()
 
     def action_seek_back(self) -> None:
+        if getattr(self, "_dance_mode", False):
+            self._dance_num_dancers = max(1, self._dance_num_dancers - 1)
+            self.notify(f"Dancers: {self._dance_num_dancers}")
+            return
         if self._det.is_active:
             self.api.player_seek(-5, self._control_player())
 
     def action_seek_fwd(self) -> None:
+        if getattr(self, "_dance_mode", False):
+            self._dance_num_dancers = min(12, self._dance_num_dancers + 1)
+            self.notify(f"Dancers: {self._dance_num_dancers}")
+            return
         if self._det.is_active:
             self.api.player_seek(5, self._control_player())
 
@@ -3082,10 +4383,12 @@ class KaraokeTui(App):
 
         self._sync_key = key
         with localcache.connect() as conn:
+            self._check_playlist_detection(det, conn)
             artist, title, lyrics = detect.resolve_lyrics(det, conn)
             # Resolve the canonical track id and load any saved per-track offset,
             # falling back to the session default when none has been saved.
             self._current_track_id = self._resolve_track_id(det, artist, title, conn)
+            self._sync_queue_to_detection(det, self._current_track_id)
             saved = (
                 localcache.get_sync_offset(self._current_track_id, conn, det.mode)
                 if self._current_track_id is not None else None
@@ -3103,7 +4406,7 @@ class KaraokeTui(App):
                 self.run_worker(
                     lambda tid=self._current_track_id, a=artist, t=title:
                         self._background_fetch_spotify(tid, a, t),
-                    exclusive=False, thread=True,
+                    exclusive=False, thread=True, exit_on_error=False,
                 )
             if lyrics is None or not lyrics.has_synced:
                 # The cache is only what has already been fetched. Radio mode
@@ -3116,6 +4419,7 @@ class KaraokeTui(App):
                         lambda a=det.artist, t=det.title: self._background_fetch_lyrics(a, t),
                         exclusive=False,
                         thread=True,
+                        exit_on_error=False,
                     )
                 if key not in self._gap_logged:
                     detect.record_gap(det, conn)
@@ -3132,6 +4436,7 @@ class KaraokeTui(App):
                             lambda u=det.url, v=vid: self._background_autoload_captions(u, v),
                             exclusive=False,
                             thread=True,
+                            exit_on_error=False,
                         )
         display_artist = artist or det.artist
         display_title = title or det.title
@@ -3156,22 +4461,10 @@ class KaraokeTui(App):
             self._classified.add(self._current_track_id)
             self.run_worker(
                 lambda tid=self._current_track_id: self._background_classify(tid),
-                exclusive=False, thread=True,
+                exclusive=False, thread=True, exit_on_error=False,
             )
 
-        pp_key = (display_artist.lower(), display_title.lower())
-        if pp_key not in self._postprocess_enqueued:
-            self._postprocess_enqueued.add(pp_key)
-            try:
-                from .postprocess_queue import enqueue_if_needed
-                self.run_worker(
-                    lambda a=display_artist, t=display_title, u=det.url or "":
-                        enqueue_if_needed(a, t, u),
-                    exclusive=False,
-                    thread=True,
-                )
-            except Exception:
-                log.debug("postprocess enqueue dispatch failed", exc_info=True)
+        self._trigger_postprocess_if_needed(display_artist, display_title, det.url or "")
         state = lyric_display_state(lyrics)
         # The banner is what is playing, so it is drawn whatever the lyrics
         # turn out to be. It used to appear only on the synced branch, which
@@ -3232,11 +4525,17 @@ class KaraokeTui(App):
         if self._det.mode == "radio":
             pos = self.mic_elapsed()
         else:
-            b_state = browser_playback()
+            try:
+                b_state = browser_playback(timeout=0.08)
+            except TypeError:
+                b_state = browser_playback()
             if b_state and b_state.get("present") and b_state.get("position") is not None:
                 pos = float(b_state["position"])
             else:
-                pos = playerctl.position(self._control_player())
+                try:
+                    pos = playerctl.position(self._control_player(), timeout=0.15)
+                except TypeError:
+                    pos = playerctl.position(self._control_player())
         if pos is None:
             return
         # Pull the highlight back by the sync offset: browser MPRIS position runs
@@ -3424,6 +4723,22 @@ class KaraokeTui(App):
                     genre = str(localcache.genre_for(self._current_track_id, conn) or "")
             except Exception:
                 pass
+                
+        chord_cpm = None
+        fifth_ratio = None
+        if self._current_track_id is not None:
+            try:
+                from . import osclient
+                from .key_progression import PROGRESSION_INDEX, doc_id
+                client = osclient.client()
+                if client:
+                    resp = client.get(index=PROGRESSION_INDEX, id=doc_id(self._current_track_id), ignore=404)
+                    if resp and resp.get("found"):
+                        src = resp["_source"]
+                        chord_cpm = src.get("chord_changes_per_minute")
+                        fifth_ratio = src.get("fifth_ratio")
+            except Exception:
+                pass
 
         if getattr(self, "_mood_pixels", None):
             try:
@@ -3446,6 +4761,30 @@ class KaraokeTui(App):
         arc = visuals.sentiment_arc(profile)
         bars = visuals.sentiment_bars(profile)
         rhythm = visuals.rhythm_bar(bpm, elapsed)
+
+        # Dance mode: full-screen dance floor replaces the normal visuals.
+        if self._dance_mode:
+            try:
+                visual_panel = self.query_one("#ascii-visual", Static)
+                pw = visual_panel.content_size.width or visual_panel.region.width or 80
+                ph = visual_panel.content_size.height or visual_panel.region.height or 20
+                dance = visuals.dance_floor_frame(
+                    bpm,
+                    elapsed,
+                    width=max(20, pw),
+                    height=max(6, ph),
+                    num_dancers=self._dance_num_dancers,
+                    mood=profile.dominant,
+                    genre=genre,
+                    energy=energy,
+                    chord_cpm=chord_cpm,
+                    fifth_ratio=fifth_ratio,
+                )
+                visual_panel.update(dance)
+            except Exception:
+                pass
+            return
+
         duet_width = 32
         try:
             visual_panel = self.query_one("#ascii-visual", Static)
@@ -3499,7 +4838,7 @@ class KaraokeTui(App):
         """Stored track length in seconds, or None when unknown."""
         if track_id is None:
             return None
-        row = conn.execute("SELECT duration FROM tracks WHERE track_id = ?",
+        row = conn.execute("SELECT duration FROM tracks WHERE track_id = %s",
                            (track_id,)).fetchone()
         return float(row["duration"]) if row and row["duration"] else None
 
@@ -3509,14 +4848,31 @@ class KaraokeTui(App):
             pending = None
             duration = None
             genre = ""
+            sound = ""
             if self._current_track_id is not None:
                 from .postprocess_queue import needs_postprocessing
                 with localcache.connect() as conn:
                     pending = needs_postprocessing(self._current_track_id, conn)
                     duration = self._load_duration(self._current_track_id, conn)
-                    genre = classification_line(
+                    # 1. Consensus artist genres
+                    art_row = conn.execute(
+                        "SELECT artist FROM tracks WHERE track_id = %s",
+                        (self._current_track_id,),
+                    ).fetchone()
+                    if art_row and art_row["artist"]:
+                        spec_g, broad_g = localcache.get_artist_genres(art_row["artist"], conn)
+                        if broad_g:
+                            genre = "/".join(broad_g)
+                            if spec_g and spec_g[0].lower() != broad_g[0].lower():
+                                genre = f"{genre} ({spec_g[0]})"
+                    # 2. CLAP acoustic sound / timbre
+                    acoustic = classification_line(
                         localcache.genre_for(self._current_track_id, conn),
                         localcache.tone_for(self._current_track_id, conn))
+                    if acoustic:
+                        sound = f"{acoustic} (acoustic)"
+                    if not genre and acoustic:
+                        genre = acoustic
             text = track_info(
                 source=(lyrics.source if lyrics else ""),
                 duration=duration,
@@ -3525,6 +4881,7 @@ class KaraokeTui(App):
                 lyric_lines=len(self._timeline.lines),
                 error=self._last_error,
                 genre=genre,
+                sound=sound,
             )
         except Exception as exc:
             log.debug("track info refresh failed", exc_info=True)
@@ -3681,7 +5038,7 @@ class KaraokeTui(App):
 
             found = None
             for candidate in {title, clean_title(title)}:
-                ly = fetch_lrclib(artist, candidate)
+                ly = fetch_lrclib(artist, candidate, timeout=3.0)
                 if ly.synced_raw or ly.plain:
                     found = ly
                     break
@@ -3722,7 +5079,7 @@ class KaraokeTui(App):
             log.debug("no fetchable audio to sync %s - %s against", artist, title)
             return
         row = conn.execute(
-            "SELECT url FROM sources WHERE track_id = ? AND url LIKE '%youtu%'"
+            "SELECT url FROM sources WHERE track_id = %s AND url LIKE '%%youtu%%'"
             " LIMIT 1", (track_id,)).fetchone()
         if enqueue_if_needed(artist, title, (row["url"] if row else "") or "", conn):
             log.info("queued %s - %s for lyric alignment", artist, title)

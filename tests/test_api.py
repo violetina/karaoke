@@ -26,12 +26,12 @@ def db(tmp_path, monkeypatch):
     conn = _real_connect(db_path)
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO tracks (artist, title, album, duration) VALUES (?, ?, ?, ?)",
+        "INSERT INTO tracks (artist, title, album, duration) VALUES (%s, %s, %s, %s) RETURNING track_id",
         ("Radiohead", "Creep", "Pablo Honey", 238.0),
     )
-    track_id = cur.lastrowid
+    track_id = cur.fetchone()["track_id"]
     cur.execute(
-        "INSERT INTO sources (track_id, url, kind) VALUES (?, ?, ?)",
+        "INSERT INTO sources (track_id, url, kind) VALUES (%s, %s, %s)",
         (track_id, "https://youtu.be/XFkzRNyygfk", "youtube"),
     )
     conn.commit()
@@ -71,6 +71,18 @@ def test_list_tracks_returns_seeded_track(db, client):
 def test_list_tracks_search_filter(db, client):
     assert len(client.get("/api/tracks", params={"q": "radio"}).json()) == 1
     assert client.get("/api/tracks", params={"q": "nosuchband"}).json() == []
+
+
+def test_list_tracks_genre_filter(db, client):
+    db_path, track_id = db
+    conn = localcache.connect(db_path)
+    conn.execute("INSERT INTO track_genre (track_id, genre, score, labelled_at) VALUES (%s, %s, %s, 1)", (track_id, "alternative", 0.9))
+    conn.commit()
+    conn.close()
+
+    assert len(client.get("/api/tracks", params={"genre": "alternative"}).json()) == 1
+    assert len(client.get("/api/tracks", params={"genre": "all"}).json()) == 1
+    assert client.get("/api/tracks", params={"genre": "jazz"}).json() == []
 
 
 def test_list_tracks_respects_limit(db, client):
@@ -252,3 +264,26 @@ def test_workers_endpoint_degrades_when_broker_is_down(monkeypatch):
     assert body["available"] is False
     assert "unreachable" in body["reason"]
     assert body["workers"]["count"] == 0
+
+
+def test_sounds_like_endpoint(monkeypatch):
+    from fastapi.testclient import TestClient
+    from karaoke.api import app
+    from karaoke import queue_suggest
+
+    fake_sug = [
+        queue_suggest.Suggestion(
+            track_id=42, artist="Muddy Waters", title="Mannish Boy",
+            score=0.91, seeds_matched=1, space="clap"
+        )
+    ]
+    monkeypatch.setattr(queue_suggest, "suggest_for_track", lambda *a, **k: fake_sug)
+
+    resp = TestClient(app).get("/api/tracks/1/sounds-like")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["track_id"] == 42
+    assert data[0]["artist"] == "Muddy Waters"
+    assert data[0]["space"] == "clap"
+

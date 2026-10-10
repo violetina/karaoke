@@ -24,15 +24,25 @@ def main() -> None:
         track_id, artist, title = t["track_id"], t["artist"], t["title"]
         if not (artist or title):
             continue
-        pending = needs_postprocessing(track_id, conn)
+        # Database-derived steps only. The OpenSearch-derived ones (vectors,
+        # chords) are filled per song as it plays, or in bulk from disk by
+        # folder_scan / playlist import -- sweeping them here would queue the
+        # whole library and download audio that is already on the drive.
+        pending = needs_postprocessing(track_id, conn,
+                                       include_search_artefacts=False)
         if not pending:
+            skipped += 1
+            continue
+        # The word-timing upgrade is opt-in and this is a bulk backfill, so a
+        # track with nothing else pending would only queue a chain of no-ops.
+        if pending == ["timings"]:
             skipped += 1
             continue
         # Pick a source URL to attach so the worker can download/analyze.
         row = cur.execute(
             """
             SELECT url FROM sources
-            WHERE track_id = ? AND kind IN ('youtube', 'youtube_music')
+            WHERE track_id = %s AND kind IN ('youtube', 'youtube_music')
             ORDER BY CASE WHEN kind = 'youtube_music' THEN 0 ELSE 1 END
             LIMIT 1
             """,

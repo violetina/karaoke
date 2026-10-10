@@ -102,10 +102,11 @@ def health() -> dict[str, Any]:
 @app.get("/api/tracks", response_model=list[TrackResponse])
 def list_tracks(
     q: Optional[str] = Query(None, description="Search query for artist or title"),
+    genre: Optional[str] = Query(None, description="Filter by genre"),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ) -> list[dict[str, Any]]:
-    """List tracks in the local library with optional search filtering."""
+    """List tracks in the local library with optional search and genre filtering."""
     with localcache.connect() as conn:
         from .track_analysis import ensure_schema
         ensure_schema(conn)
@@ -125,7 +126,7 @@ def list_tracks(
                     CASE
                         WHEN s2.kind = 'youtube_music' THEN 0
                         WHEN s2.kind = 'youtube' THEN 1
-                        WHEN s2.url LIKE 'http%' THEN 2
+                        WHEN s2.url LIKE 'http%%' THEN 2
                         WHEN s2.kind = 'spotify' THEN 3
                         ELSE 4
                     END,
@@ -135,28 +136,27 @@ def list_tracks(
             LEFT JOIN track_analysis a ON a.track_id = t.track_id
             LEFT JOIN track_genre g ON g.track_id = t.track_id
         """
+        where_clauses = []
+        params: list[Any] = []
         if q:
             pattern = f"%{q.strip()}%"
-            cur.execute(
-                base
-                + """
-                WHERE t.artist LIKE ? OR t.title LIKE ?
-                GROUP BY t.track_id
-                ORDER BY t.artist, t.title
-                LIMIT ? OFFSET ?
-                """,
-                (pattern, pattern, limit, offset),
-            )
-        else:
-            cur.execute(
-                base
-                + """
-                GROUP BY t.track_id
-                ORDER BY t.artist, t.title
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            )
+            where_clauses.append("(t.artist ILIKE %s OR t.title ILIKE %s OR t.album ILIKE %s)")
+            params.extend([pattern, pattern, pattern])
+        if genre and genre.strip().lower() != "all":
+            where_clauses.append("LOWER(TRIM(g.genre)) = LOWER(TRIM(%s))")
+            params.append(genre.strip())
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = (
+            base
+            + f"""
+            {where_sql}
+                        ORDER BY t.artist, t.title
+            LIMIT %s OFFSET %s
+            """
+        )
+        params.extend([limit, offset])
+        cur.execute(sql, params)
         return [
             {
                 "track_id": row["track_id"],
@@ -184,7 +184,7 @@ def get_track(track_id: int) -> dict[str, Any]:
     with localcache.connect() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT track_id, artist, title, album, duration FROM tracks WHERE track_id = ?",
+            "SELECT track_id, artist, title, album, duration FROM tracks WHERE track_id = %s",
             (track_id,),
         )
         row = cur.fetchone()
@@ -192,7 +192,7 @@ def get_track(track_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Track not found")
 
         cur.execute(
-            "SELECT url, kind, player_name FROM sources WHERE track_id = ?",
+            "SELECT url, kind, player_name FROM sources WHERE track_id = %s",
             (track_id,),
         )
         sources = [dict(s) for s in cur.fetchall()]
@@ -281,47 +281,45 @@ def list_recordings(
         if status:
             statuses = [s.strip() for s in status.split(",") if s.strip()]
             if len(statuses) == 1:
-                clauses.append("r.status = ?")
+                clauses.append("r.status = %s")
                 params.append(statuses[0])
             elif len(statuses) > 1:
-                placeholders = ",".join(["?"] * len(statuses))
+                placeholders = ",".join(["%s"] * len(statuses))
                 clauses.append(f"r.status IN ({placeholders})")
                 params.extend(statuses)
 
         if source:
-            clauses.append("r.source LIKE ?")
+            clauses.append("r.source ILIKE %s")
             params.append(f"%{source.strip()}%")
 
         if keep_audio is not None:
-            clauses.append("r.keep_audio = ?")
+            clauses.append("r.keep_audio = %s")
             params.append(1 if keep_audio else 0)
 
         if since is not None:
-            clauses.append("r.started_at >= ?")
+            clauses.append("r.started_at >= %s")
             params.append(since)
 
         if until is not None:
-            clauses.append("r.started_at <= ?")
+            clauses.append("r.started_at <= %s")
             params.append(until)
 
         if q:
             pattern = f"%{q.strip()}%"
-            clauses.append("(r.note LIKE ? OR r.source LIKE ?)")
+            clauses.append("(r.note ILIKE %s OR r.source ILIKE %s)")
             params.extend([pattern, pattern])
 
-        having_clauses = []
         if has_marks is True:
-            having_clauses.append("marks > 0")
+            clauses.append("(SELECT count(*) FROM recording_marks m WHERE m.recording_id = r.recording_id) > 0")
         elif has_marks is False:
-            having_clauses.append("marks = 0")
+            clauses.append("(SELECT count(*) FROM recording_marks m WHERE m.recording_id = r.recording_id) = 0")
 
         if identified_only is True:
-            having_clauses.append("identified > 0")
+            clauses.append("(SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m WHERE m.recording_id = r.recording_id) > 0")
         elif identified_only is False:
-            having_clauses.append("identified = 0")
+            clauses.append("(SELECT COALESCE(sum(m.ok), 0) FROM recording_marks m WHERE m.recording_id = r.recording_id) = 0")
 
         where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        having_sql = (" HAVING " + " AND ".join(having_clauses)) if having_clauses else ""
 
         sql = f"""
             SELECT r.recording_id, r.started_at, r.ended_at, r.status,
@@ -332,10 +330,8 @@ def list_recordings(
                      WHERE m.recording_id = r.recording_id) AS identified
              FROM recordings r
              {where_sql}
-             GROUP BY r.recording_id
-             {having_sql}
              ORDER BY r.recording_id DESC
-             LIMIT ? OFFSET ?
+             LIMIT %s OFFSET %s
         """
         params.extend([limit, offset])
         rows = conn.execute(sql, params).fetchall()
@@ -439,10 +435,10 @@ def update_recording(recording_id: int, req: UpdateRecordingRequest) -> dict[str
     updates = []
     params: list[Any] = []
     if req.note is not None:
-        updates.append("note = ?")
+        updates.append("note = %s")
         params.append(req.note)
     if req.keep_audio is not None:
-        updates.append("keep_audio = ?")
+        updates.append("keep_audio = %s")
         params.append(1 if req.keep_audio else 0)
 
     if not updates:
@@ -451,7 +447,7 @@ def update_recording(recording_id: int, req: UpdateRecordingRequest) -> dict[str
     params.append(recording_id)
     with localcache.connect() as conn:
         conn.execute(
-            f"UPDATE recordings SET {', '.join(updates)} WHERE recording_id = ?",
+            f"UPDATE recordings SET {', '.join(updates)} WHERE recording_id = %s",
             params,
         )
         conn.commit()
@@ -465,6 +461,25 @@ def update_recording(recording_id: int, req: UpdateRecordingRequest) -> dict[str
         "keep_audio": bool(updated["keep_audio"]),
         "status": updated["status"],
     }
+
+
+@app.get("/api/radio/sessions")
+def get_radio_sessions(limit: int = 50) -> dict[str, Any]:
+    """List radio listening sessions with metadata and recording details."""
+    with localcache.connect() as conn:
+        sessions = localcache.get_radio_sessions(limit=limit, conn=conn)
+        return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.get("/api/radio/sessions/{session_id}")
+def get_radio_session_detail(session_id: int) -> dict[str, Any]:
+    """Get metadata and discovered tracks for a specific radio session."""
+    with localcache.connect() as conn:
+        session = localcache.get_radio_session(session_id, conn=conn)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Radio session not found")
+        tracks = localcache.get_radio_session_tracks(session_id, conn=conn)
+        return {"session": session, "tracks": tracks, "count": len(tracks)}
 
 
 @app.get("/api/workers")
@@ -533,6 +548,30 @@ def suggest_queue(req: QueueSuggestRequest) -> list[dict[str, Any]]:
 
     suggestions = queue_suggest.suggest_for_queue(
         req.track_ids, limit=req.limit, per_artist=req.per_artist)
+    if not suggestions:
+        return []
+    with localcache.connect() as conn:
+        out: list[dict[str, Any]] = []
+        for s in suggestions:
+            out.append({
+                "track_id": s.track_id,
+                "artist": s.artist,
+                "title": s.title,
+                "score": s.score,
+                "seeds_matched": s.seeds_matched,
+                "space": s.space,
+                "url": queue_suggest.playable_url(s.track_id, conn),
+            })
+    return out
+
+
+@app.get("/api/tracks/{track_id}/sounds-like", response_model=list[SuggestionResponse])
+def sounds_like_track(track_id: int, limit: int = Query(10, ge=1, le=50),
+                      per_artist: int = Query(2, ge=1, le=10)) -> list[dict[str, Any]]:
+    """Return tracks that acoustically sound like the given track via CLAP similarity."""
+    from . import queue_suggest
+
+    suggestions = queue_suggest.suggest_for_track(track_id, limit=limit, per_artist=per_artist)
     if not suggestions:
         return []
     with localcache.connect() as conn:

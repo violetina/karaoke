@@ -16,7 +16,8 @@ karaoke-app-development skill) before trusting artist/title.
 from __future__ import annotations
 
 import shutil
-import sqlite3
+import psycopg
+from psycopg import Connection, Cursor
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
@@ -45,6 +46,7 @@ class Detection:
     # Seconds. Duration is what lets the deduplicator tell a demo or a live
     # take from the studio cut; without it that guard abstains on every pair.
     duration: Optional[float] = None
+    playlist_id: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -70,21 +72,24 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
       YT Music, VLC, local players).
     - Nothing playing -> ``browse`` mode (library-driven, opens the browser).
     """
+    from . import localcache
+
     if meta is None:
         return Detection(mode="browse")
     player = (meta.mpris_name or meta.player or "").lower()
     mpris = meta.mpris_name or meta.player
     ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
+    pl_id = localcache.extract_playlist_id(meta.url) or ""
     if player.startswith("spotify"):
         return Detection("spotify", meta.player, ref.artist, ref.title, meta.url,
                          mpris_name=mpris, album=ref.album,
-                         duration=meta.duration)
+                         duration=meta.duration, playlist_id=pl_id)
     # A desktop or browser player is active: sync to its position. Trust a
     # YouTube URL over the (often stale) browser artist/title for display.
     if ref.title or ref.artist or meta.url:
         return Detection("scan", meta.player, ref.artist, ref.title, meta.url,
                          mpris_name=mpris, album=ref.album,
-                         duration=meta.duration)
+                         duration=meta.duration, playlist_id=pl_id)
     return Detection(mode="browse")
 
 
@@ -154,10 +159,32 @@ def detect_active(mic_artist: str = "", mic_title: str = "") -> Detection:
     The mic hints are used only to break a tie between players that are *all*
     playing; they never invent a detection on their own.
     """
-    from . import playerctl
+    from . import playerctl, player_open, localcache
 
     chosen = preferred_player(playerctl.playing_players(), mic_artist, mic_title)
-    return classify(current_metadata(chosen))
+    det = classify(current_metadata(chosen))
+
+    # If URL lacks playlist_id and playback is in browser kiosk, enrich with CDP location.href
+    if det.is_active and not det.playlist_id:
+        try:
+            b_state = player_open.browser_playback(timeout=0.08)
+            if b_state and b_state.get("url"):
+                pl_id = localcache.extract_playlist_id(b_state["url"])
+                if pl_id:
+                    det = Detection(
+                        mode=det.mode,
+                        player=det.player,
+                        artist=det.artist,
+                        title=det.title,
+                        url=det.url or b_state["url"],
+                        mpris_name=det.mpris_name,
+                        album=det.album,
+                        duration=det.duration,
+                        playlist_id=pl_id,
+                    )
+        except Exception:
+            pass
+    return det
 
 
 def spotify_running() -> bool:
@@ -178,7 +205,7 @@ def launch_spotify() -> tuple[bool, str]:
 
 
 def resolve_lyrics(
-    det: Detection, conn: sqlite3.Connection
+    det: Detection, conn: Connection
 ) -> tuple[str, str, Optional[Lyrics]]:
     """Resolve (artist, title, lyrics) for a detection from the local cache.
 
@@ -211,7 +238,7 @@ def resolve_lyrics(
             track_id = localcache.find_track_id(det.artist, cleaned, conn)
             if track_id is not None:
                 row = conn.execute(
-                    "SELECT artist, title FROM tracks WHERE track_id = ?",
+                    "SELECT artist, title FROM tracks WHERE track_id = %s",
                     (track_id,),
                 ).fetchone()
                 return (
@@ -226,7 +253,7 @@ def resolve_lyrics(
         relaxed = localcache.find_track_id_relaxed(det.artist, det.title, conn)
         if relaxed is not None:
             row = conn.execute(
-                "SELECT artist, title FROM tracks WHERE track_id = ?",
+                "SELECT artist, title FROM tracks WHERE track_id = %s",
                 (relaxed,),
             ).fetchone()
             return (
@@ -240,7 +267,7 @@ def resolve_lyrics(
             cur.execute(
                 """
                 SELECT t.track_id, t.artist, t.title FROM tracks t
-                WHERE lower(t.title) = lower(?)
+                WHERE lower(t.title) = lower(%s)
                 ORDER BY EXISTS(SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id AND l.synced_lyrics != '') DESC, t.track_id DESC
                 LIMIT 1
                 """,
@@ -256,7 +283,7 @@ def resolve_lyrics(
     return det.artist, det.title, None
 
 
-def record_gap(det: Detection, conn: sqlite3.Connection) -> None:
+def record_gap(det: Detection, conn: Connection) -> None:
     """Persist a missing-lyrics detection so it can be backfilled/staged.
 
     Stores the source (track + URL) when we have a real title, and logs a

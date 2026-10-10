@@ -19,10 +19,13 @@ ctrl-api                     Launch the host-side control API (playback; needs a
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 db-cleanup                   Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 deps-make2graph              Fetch and build makefile2graph locally
+dj                           Open the interactive Karaoke AI DJ Chat booth in terminal
+docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)
 docs                         Build MkDocs site
 docs-confluence-prep         Generate Confluence-friendly docs tree
 docs-confluence-publish      Build Confluence export site
 docs-live                    Serve MkDocs locally on http://$(DOCS_ADDR)
+docs-sync                    Auto-sync documentation (API modules and Makefile targets)
 docs-write                   Regenerate generated docs
 folder-scan                  Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 format                       Run formatters
@@ -41,11 +44,14 @@ k8s-seed-db                  Copy the local SQLite library into the cluster PVC
 k8s-status                   Show deployed karaoke resources
 k8s-undeploy                 Remove the karaoke API from the cluster (keeps the PVC)
 lint                         Run lint checks
+mcp                          Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 mic-test                     Live mic VU meter to confirm capture level (SECS=4)
 mq-port-forward              Expose the in-cluster RabbitMQ AMQP on localhost:5672 (management on 15672)
 postprocess-enqueue-all      Enqueue every track missing key/BPM or word-timing for post-processing
 postprocess-worker           Run the host-side post-processing worker (analysis + word-timing)
-recording-analyse            Decompile a recording into the DB (ID=...); needs the audio venv
+radio-playlist-ingest        Download + full pipeline (CLAP/chords) for the Radio Discoveries playlist [FORCE_HARMONY=1]
+radio-playlist               Push radio-discovered songs to the 'Karaoke: Radio Discoveries' YTMusic playlist
+recording-analyse            Decompile a recording into the DB (ID=...)
 recording-show               Show a recording's derived track list (ID=...)
 recordings                   List record-mode sessions
 sample                       Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
@@ -62,9 +68,11 @@ upgrade-timings-dry-run      Preview which cached tracks can gain word-level tim
 upgrade-timings              Upgrade cached lyrics to word-level timing via YouTube captions
 vector-index-dry-run         Preview SQLite -> OpenSearch vector indexing without writing
 vector-index                 Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
+vector-status                Show OpenSearch vector index status and rebuild progress
 venv                         Create virtual environment
 view_makeflow                Open generated SVG locally
 web                          Serve the TUI in a web browser using textual-serve
 webtui                       Alias for make web
+yt-playlist-ingest           Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
 make[1]: Leaving directory '/home/tina/karaoke'
 ```

@@ -45,7 +45,16 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
             context,
             download_audio.s(),
             analyze_audio.s(),
-            upgrade_timings.s(),
+            analyze_harmony.s(),
+        ]
+        # Word-timing upgrade is opt-in, never part of normal processing: it is
+        # rate-limited to 15/m and would otherwise hold the whole chain (and the
+        # worker's prefetch window) hostage behind YouTube caption fetches.
+        # Callers ask for it explicitly -- the TUI's "A" key, or a targeted
+        # re-run for a track whose timings are missing.
+        if payload.get("include_timings"):
+            tasks.append(upgrade_timings.s())
+        tasks += [
             sync_lyrics.s(),
             rebuild_vectors.s(),
         ]
@@ -68,20 +77,28 @@ class PostprocessContext:
     audio_path: Optional[Path] = None
     cookies_from_browser: Optional[str] = None
     pending: list[str] = field(default_factory=list)
+    # Set only for an explicitly requested full run (playlist import). It lets
+    # download_audio fetch audio that only harmony needs -- normally forbidden,
+    # because the library is built from disk and a library-wide chord backfill
+    # would re-download files that are already on the drive.
+    full: bool = False
 
     # Methods for easy serialization/deserialization to/from dict for Celery
     def to_dict(self) -> dict[str, Any]:
-        d = self.__dict__.copy()
+        d = dict(self.__dict__)
         d["audio_path"] = str(self.audio_path) if self.audio_path else None
+        d["pending"] = list(self.pending) if self.pending else []
         # Convert Path objects to strings for serialization
         return d
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "PostprocessContext":
-        # Convert string paths back to Path objects on deserialization
-        d["audio_path"] = Path(d["audio_path"]) if d.get("audio_path") else None
-        d["pending"] = d.get("pending", []) # Ensure pending is always a list
-        return PostprocessContext(**d)
+        # Make a copy so we do not mutate Celery task arguments in-place
+        data = dict(d)
+        raw_path = data.get("audio_path")
+        data["audio_path"] = Path(raw_path) if raw_path else None
+        data["pending"] = list(data.get("pending") or []) # Ensure pending is always a list
+        return PostprocessContext(**data)
 
 
 @app.task(
@@ -105,7 +122,8 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
     cookies = os.environ.get("KARAOKE_COOKIES_FROM_BROWSER")
 
     context = PostprocessContext(
-        artist=artist, title=title, url=url, cookies_from_browser=cookies
+        artist=artist, title=title, url=url, cookies_from_browser=cookies,
+        full=bool(payload.get("full")),
     )
 
     with localcache.connect() as conn:
@@ -149,45 +167,64 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Track not found: {artist} - {title}")
         context.track_id = track_id
 
-        # Prefer a real watch source from the DB over a non-watchable payload URL
-        if not localcache.extract_youtube_id(url):
-            url = ""
-        if not url:
-            row = conn.execute(
-                """
-                SELECT url FROM sources
-                WHERE track_id = ? AND kind IN ('youtube', 'youtube_music')
-                ORDER BY CASE WHEN kind = 'youtube_music' THEN 0 ELSE 1 END
-                LIMIT 1
-                """,
+        # Check if payload URL or stored sources point to a local audio file
+        local_file_path: Optional[Path] = None
+        if url and Path(url).is_file():
+            local_file_path = Path(url)
+        else:
+            local_row = conn.execute(
+                "SELECT url FROM sources WHERE track_id = %s AND kind = 'local' LIMIT 1",
                 (track_id,),
             ).fetchone()
-            if row:
-                context.url = row[0]
-            else:
-                # No youtube source found! Let's do an automatic search to find one.
-                # Only if this track actually needs postprocessing (sync or analysis).
-                pending_temp = needs_postprocessing(track_id, conn)
-                if "analysis" in pending_temp or "sync" in pending_temp:
-                    try:
-                        from . import youtube
-                        log.info("postprocess: searching youtube for %s - %s", artist, title)
-                        results = youtube.search(f"{artist} - {title}", limit=3)
-                        if results:
-                            best_url = results[0]["url"]
-                            # Add this source to the database so it's cached for future use!
-                            localcache.add_track_source(
-                                artist,
-                                title,
-                                url=best_url,
-                                kind="youtube",
-                                conn=conn,
-                            )
-                            context.url = best_url
-                            log.info("postprocess: resolved youtube source for %s - %s -> %s",
-                                     artist, title, best_url)
-                    except Exception as e:
-                        log.debug("postprocess: youtube search failed: %s", e)
+            url_val = local_row.get("url") if isinstance(local_row, dict) else (local_row[0] if local_row else None)
+            if url_val and Path(url_val).is_file():
+                local_file_path = Path(url_val)
+
+        if local_file_path:
+            context.audio_path = local_file_path
+            context.url = str(local_file_path)
+            log.info("postprocess: resolved local audio source for %s - %s -> %s",
+                     artist, title, local_file_path)
+        else:
+            # Prefer a real watch source from the DB over a non-watchable payload URL
+            if not localcache.extract_youtube_id(url):
+                url = ""
+            if not url:
+                row = conn.execute(
+                    """
+                    SELECT url FROM sources
+                    WHERE track_id = %s AND kind IN ('youtube', 'youtube_music')
+                    ORDER BY CASE WHEN kind = 'youtube_music' THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (track_id,),
+                ).fetchone()
+                if row:
+                    context.url = row[0]
+                else:
+                    # No youtube source found! Let's do an automatic search to find one.
+                    # Only if this track actually needs postprocessing (sync or analysis).
+                    pending_temp = needs_postprocessing(track_id, conn)
+                    if "analysis" in pending_temp or "sync" in pending_temp:
+                        try:
+                            from . import youtube
+                            log.info("postprocess: searching youtube for %s - %s", artist, title)
+                            results = youtube.search(f"{artist} - {title}", limit=3)
+                            if results:
+                                best_url = results[0]["url"]
+                                # Add this source to the database so it's cached for future use!
+                                localcache.add_track_source(
+                                    artist,
+                                    title,
+                                    url=best_url,
+                                    kind="youtube",
+                                    conn=conn,
+                                )
+                                context.url = best_url
+                                log.info("postprocess: resolved youtube source for %s - %s -> %s",
+                                         artist, title, best_url)
+                        except Exception as e:
+                            log.debug("postprocess: youtube search failed: %s", e)
         context.pending = needs_postprocessing(track_id, conn)
 
     return context.to_dict() # Return dict for serialization
@@ -196,7 +233,20 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
 @app.task(bind=True, name="karaoke.tasks.download_audio", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
 def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
-    if context.track_id is None or context.url is None or ("analysis" not in context.pending and "sync" not in context.pending):
+    if context.audio_path and context.audio_path.is_file():
+        return context.to_dict()
+    # Chords are deliberately NOT in this set. The library is built from disk,
+    # so harmony rides along on audio that is already here -- a local source, or
+    # a file fetched because analysis or sync needed it. Letting "chords" pull a
+    # download would mean re-fetching the whole library to analyse files that
+    # are already on the drive; folder_scan covers those without the network.
+    needs_audio = {"analysis", "sync"}
+    if context.full:
+        # An explicit full run (playlist import) is a bounded set the caller
+        # has chosen to pay the downloads for, so harmony may pull audio too.
+        needs_audio = needs_audio | {"chords"}
+    if (context.track_id is None or context.url is None
+            or not needs_audio.intersection(context.pending)):
         return context.to_dict()
     log.info("celery download_audio: %s - %s", context.artist, context.title)
     from . import postprocess_worker
@@ -206,9 +256,11 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     else:
         log.warning("postprocess: audio unavailable for track %s (%s)",
                     context.track_id, context.url)
-        # If download fails, remove analysis/sync from pending tasks for this run
-        if "analysis" in context.pending: context.pending.remove("analysis")
-        if "sync" in context.pending: context.pending.remove("sync")
+        # If download fails, drop every step that needs the audio. Vectors are
+        # built from database rows, so they stay pending and still run.
+        for step in ("analysis", "sync", "chords"):
+            if step in context.pending:
+                context.pending.remove(step)
     return context.to_dict()
 
 
@@ -226,7 +278,40 @@ def analyze_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     return context.to_dict()
 
 
-@app.task(bind=True, name="karaoke.tasks.upgrade_timings", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
+@app.task(bind=True, name="karaoke.tasks.analyze_harmony", autoretry_for=(Exception,),
+          retry_backoff=True, retry_jitter=True, max_retries=2)
+def analyze_harmony(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """Key movement and chord motion, stored in the progression index.
+
+    Runs only when the audio is already available -- a local source resolved
+    from disk, or a file another step had to fetch anyway. It never triggers a
+    download of its own: a whole-library chord backfill belongs to folder_scan,
+    which reads the drive, not to the playback path.
+    """
+    context = PostprocessContext.from_dict(context_dict)
+    if (context.track_id is None or "chords" not in context.pending
+            or context.audio_path is None):
+        return context.to_dict()
+    log.info("celery analyze_harmony: %s - %s", context.artist, context.title)
+    from . import postprocess_worker, localcache
+    with localcache.connect() as conn:
+        if not postprocess_worker.run_harmony_logic(
+                context.track_id, context.audio_path, conn,
+                artist=context.artist, title=context.title):
+            log.warning("postprocess: harmony analysis failed for track %s (%s)",
+                        context.track_id, context.url)
+    return context.to_dict()
+
+
+@app.task(
+    bind=True,
+    name="karaoke.tasks.upgrade_timings",
+    rate_limit="15/m",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=2,
+)
 def upgrade_timings(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
     if context.track_id is None or "timings" not in context.pending:
@@ -239,6 +324,11 @@ def upgrade_timings(self, context_dict: dict[str, Any]) -> dict[str, Any]:
             log.warning("postprocess: timings upgrade failed for track %s (%s)",
                         context.track_id, context.url)
             raise RuntimeError(f"Timings upgrade failed for track {context.track_id}") # Retryable error
+        if status == "rate-limited":
+            log.warning("postprocess: timings upgrade rate-limited for track %s (%s); pausing 30s",
+                        context.track_id, context.url)
+            import time
+            time.sleep(30.0)
     return context.to_dict()
 
 
@@ -276,3 +366,75 @@ def enqueue_postprocess(payload: dict[str, Any]) -> str:
     """Publish a Celery post-processing task and return its task id."""
     result = postprocess_track.delay(payload)
     return str(result.id)
+
+
+@app.task(
+    bind=True,
+    name="karaoke.tasks.sync_ytmusic_playlist",
+    ignore_result=False,
+)
+def sync_ytmusic_playlist(self, payload: dict[str, Any]) -> dict[str, Any]:
+    """Background task to sync queue tracks to YouTube Music and persist in SQLite."""
+    from . import ytmusic_playlist, localcache
+    from .ytmusic_client import YTMusicAuthError
+
+    name = payload.get("name")
+    query = payload.get("query", "")
+    rows = payload.get("rows", [])
+    max_tracks = int(payload.get("max_tracks", 50))
+
+    try:
+        result = ytmusic_playlist.create_temp_queue_playlist(
+            rows,
+            name=name,
+            search_query=query,
+            max_tracks=max_tracks,
+        )
+        localcache.record_queue_event(
+            "ytmusic_sync",
+            metadata={
+                "playlist_id": result.playlist_id,
+                "name": result.name,
+                "count": result.added,
+                "query": query,
+            },
+        )
+        return {
+            "playlist_id": result.playlist_id,
+            "name": result.name,
+            "added": result.added,
+            "resolved": result.resolved,
+            "query": query,
+        }
+    except YTMusicAuthError:
+        log.warning("YouTube Music sync aborted: authentication missing or invalid")
+        raise
+    except Exception as exc:
+        log.exception("YouTube Music sync failed: %s", exc)
+        if self.request.retries < 1:
+            raise self.retry(exc=exc, countdown=5)
+        raise
+
+
+@app.task(
+    bind=True,
+    name="karaoke.tasks.add_to_ytmusic_playlist_task",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=2,
+    ignore_result=False,
+)
+def add_to_ytmusic_playlist_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    """Append a single track to a YouTube Music playlist in the background."""
+    from . import ytmusic_playlist
+
+    playlist_id = str(payload.get("playlist_id") or "")
+    artist = str(payload.get("artist") or "")
+    title = str(payload.get("title") or "")
+    video_id = str(payload.get("video_id") or "")
+
+    ok, res = ytmusic_playlist.add_track_to_ytmusic_playlist(
+        playlist_id, artist, title, video_id=video_id
+    )
+    return {"ok": ok, "video_id": res if ok else "", "error": "" if ok else res}
+

@@ -9,8 +9,10 @@ This only ever *upgrades*: a track already carrying word tags is skipped, and
 the plain lyrics are preserved.
 """
 from __future__ import annotations
+import psycopg.rows
 
-import sqlite3
+import psycopg
+from psycopg import Connection, Cursor
 import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -23,7 +25,9 @@ from .lyrics import Lyrics, parse_enhanced_lrc
 from .logger import log
 
 # Bulk caption fetching trips YouTube rate limiting (HTTP 429) quickly.
-DEFAULT_DELAY_S = 4.0
+DEFAULT_DELAY_S = 3.5
+_COOLDOWN_UNTIL: float = 0.0
+_LAST_REQUEST_TS: float = 0.0
 
 
 @dataclass
@@ -48,8 +52,8 @@ def has_word_timings(synced: str) -> bool:
 
 
 def find_upgrade_candidates(
-    conn: sqlite3.Connection, limit: Optional[int] = None
-) -> list[sqlite3.Row]:
+    conn: Connection, limit: Optional[int] = None
+) -> list[dict]:
     """Approved tracks with a YouTube source and line-level-only synced lyrics."""
     rows = list(conn.execute(
         """
@@ -67,15 +71,29 @@ def find_upgrade_candidates(
 
 
 def upgrade_track(
-    row: sqlite3.Row,
-    conn: sqlite3.Connection,
+    row: dict,
+    conn: Connection,
     *,
     dry_run: bool = False,
+    delay: float = 0.0,
     cookies_from_browser: Optional[str] = None,
     cookies_file: Optional[str] = None,
 ) -> UpgradeResult:
     """Fetch json3 captions for one track and write back Enhanced LRC."""
     base = UpgradeResult(row["track_id"], row["artist"], row["title"], "error")
+    global _COOLDOWN_UNTIL, _LAST_REQUEST_TS
+    now = time.time()
+    if now < _COOLDOWN_UNTIL:
+        remaining = int(_COOLDOWN_UNTIL - now)
+        base.status = "rate-limited"
+        base.detail = f"YouTube cooldown active for another {remaining}s"
+        raise RuntimeError(f"rate limited by YouTube (cooling down for {remaining}s)")
+
+    # Polite pacing: ensure at least `delay` seconds between requests in this worker
+    elapsed = now - _LAST_REQUEST_TS
+    if delay > 0 and elapsed < delay:
+        time.sleep(delay - elapsed)
+
     try:
         from yt_dlp import YoutubeDL  # type: ignore
     except ImportError as exc:  # pragma: no cover
@@ -88,19 +106,49 @@ def upgrade_track(
     }
     opts.update(_cookie_opts(cookies_from_browser, cookies_file))
     opts.update(_ejs_opts())
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(row["url"], download=False)
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(row["url"], download=False)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "429" in exc_str or "Too Many Requests" in exc_str:
+            _COOLDOWN_UNTIL = time.time() + 60.0
+            raise RuntimeError("rate limited by YouTube (extract_info 429)") from exc
+        raise
 
     avail = probe_captions(info)
     if avail.best is None or avail.best.ext != "json3":
         base.status = "no-captions"
         base.detail = avail.describe()
         return base
+        
+    if avail.best.kind == "automatic" and row.get("synced_lyrics"):
+        base.status = "no-captions"
+        base.detail = "automatic captions rejected"
+        return base
 
-    response = requests.get(avail.best.url, timeout=20)
-    response.raise_for_status()
+    # Authenticate timedtext request with cookies from the ydl cookiejar and real browser headers
+    cookie_dict = {}
+    if hasattr(ydl, "cookiejar") and ydl.cookiejar:
+        cookie_dict = {c.name: c.value for c in ydl.cookiejar}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "Referer": "https://www.youtube.com/",
+        "Origin": "https://www.youtube.com",
+    }
+    _LAST_REQUEST_TS = time.time()
+    try:
+        response = requests.get(avail.best.url, cookies=cookie_dict, headers=headers, timeout=20)
+        response.raise_for_status()
+    except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError) as exc:
+        if (isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None and exc.response.status_code == 429) or isinstance(exc, requests.exceptions.ConnectionError):
+            _COOLDOWN_UNTIL = time.time() + 60.0
+            raise RuntimeError("rate limited by YouTube (timedtext 429)") from exc
+        raise
+
     ctype = response.headers.get("Content-Type", "")
     if "html" in ctype.lower() or response.text.lstrip().startswith("<"):
+        _COOLDOWN_UNTIL = time.time() + 60.0
         raise RuntimeError("rate limited by YouTube (HTML instead of captions)")
 
     enhanced = json3_to_enhanced_lrc(response.text)
@@ -116,6 +164,14 @@ def upgrade_track(
         base.status = "no-captions"
         base.detail = "captions carried no word timings"
         return base
+        
+    existing = row.get("synced_lyrics")
+    if existing:
+        old_lines = len(existing.strip().split("\n"))
+        if len(lines) < old_lines * 0.5:
+            base.status = "no-captions"
+            base.detail = "incomplete captions"
+            return base
 
     base.status = "upgraded"
     if dry_run:
@@ -140,7 +196,7 @@ def upgrade_all(
     limit: Optional[int] = None,
     dry_run: bool = False,
     delay: float = DEFAULT_DELAY_S,
-    conn: Optional[sqlite3.Connection] = None,
+    conn: Optional[Connection] = None,
     cookies_from_browser: Optional[str] = None,
     cookies_file: Optional[str] = None,
     progress: bool = True,
@@ -148,7 +204,7 @@ def upgrade_all(
     """Upgrade every eligible cached track, stopping cleanly on rate limiting."""
     own = conn is None
     c = conn or localcache.connect()
-    c.row_factory = sqlite3.Row
+    c.row_factory = psycopg.rows.dict_row
     results: list[UpgradeResult] = []
     try:
         candidates = find_upgrade_candidates(c, limit)
@@ -157,7 +213,7 @@ def upgrade_all(
         for row in candidates:
             try:
                 res = upgrade_track(
-                    row, c, dry_run=dry_run,
+                    row, c, dry_run=dry_run, delay=0,
                     cookies_from_browser=cookies_from_browser,
                     cookies_file=cookies_file,
                 )

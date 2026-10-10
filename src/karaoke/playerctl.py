@@ -154,8 +154,12 @@ def playing_players() -> list[str]:
     """
     names = list_players()
     if len(names) < 2:
-        # Nothing to disambiguate; skip the per-player probes. This is the hot
-        # path (detection runs on a 1.5s timer) and the common case.
+        if not names:
+            return []
+        # If the single player is chromium / chrome / browser, it might be a paused kiosk tab
+        p0 = names[0].lower()
+        if "chrom" in p0 or "browser" in p0:
+            return [names[0]] if (status(names[0]) or "").strip() == "Playing" else []
         return names
     return [n for n in names if (status(n) or "").strip() == "Playing"]
 
@@ -239,9 +243,9 @@ def _base_cmd(player: str = "") -> list[str]:
     return cmd
 
 
-def position(player: str = "") -> Optional[float]:
+def position(player: str = "", *, timeout: float = 0.5) -> Optional[float]:
     """Current playback position in seconds for the (targeted) player."""
-    out = _run(_base_cmd(player) + ["position"])
+    out = _run(_base_cmd(player) + ["position"], timeout=timeout)
     if out is None:
         return None
     try:

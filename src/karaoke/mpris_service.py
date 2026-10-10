@@ -21,9 +21,26 @@ try:
     DBUS_NEXT_AVAILABLE = True
 except ImportError:
     DBUS_NEXT_AVAILABLE = False
-    ServiceInterface = object
+    class ServiceInterface:
+        def __init__(self, *args, **kwargs):
+            pass
+        def emit_properties_changed(self, changed_properties, invalidated_properties=None):
+            pass
     def method(*args, **kwargs): return lambda f: f
-    def dbus_property(*args, **kwargs): return lambda f: f
+    class _MockProp:
+        def __init__(self, fn, setter_fn=None):
+            self.fn = fn
+            self.setter_fn = setter_fn
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            return self.fn(instance)
+        def __set__(self, instance, value):
+            if self.setter_fn:
+                self.setter_fn(instance, value)
+        def setter(self, sfn):
+            return _MockProp(self.fn, sfn)
+    def dbus_property(*args, **kwargs): return lambda f: _MockProp(f)
     class PropertyAccess: READ = "read"; WRITE = "write"; READWRITE = "readwrite"
     class Variant:
         def __init__(self, signature, value): self.signature = signature; self.value = value

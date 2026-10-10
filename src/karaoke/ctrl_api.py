@@ -22,7 +22,7 @@ from typing import Any, Optional, List, Dict
 from urllib.parse import quote_plus
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .logger import log
@@ -127,6 +127,13 @@ class SeekRequest(BaseModel):
 
     offset_s: float
     player: Optional[str] = None
+
+
+class QueueItemRequest(BaseModel):
+    """Enqueue a video ID into the web player queue over CDP."""
+
+    video_id: str
+    position: Optional[str] = "next"  # "next" (play next) or "end" (append)
 
 
 class FolderScanRequest(BaseModel):
@@ -349,7 +356,7 @@ def record_status() -> dict[str, Any]:
 
 @app.post("/api/recordings/{recording_id}/analyse")
 def record_analyse(recording_id: int, background: BackgroundTasks,
-                   keep: bool = False) -> dict[str, Any]:
+                   keep: bool = True, prune_after: bool = False) -> dict[str, Any]:
     """Decompile a recording into the database.
 
     Returns immediately: analysing a couple of hours takes minutes, which no
@@ -366,8 +373,11 @@ def record_analyse(recording_id: int, background: BackgroundTasks,
         raise HTTPException(status_code=409,
                             detail="Recording is still capturing; stop it first")
 
+    # Retention is no longer a side effect of analysing: a caller asking to
+    # decompile one session should not silently drop another past the age or
+    # size cap. `keep` is accepted and ignored; it is now the default.
     background.add_task(recording_worker.analyse, recording_id,
-                        keep=True if keep else None)
+                        prune_after=prune_after)
     return {"status": "accepted", "recording_id": recording_id}
 
 
@@ -384,6 +394,28 @@ def record_discard(recording_id: int) -> dict[str, Any]:
     freed = recording_worker.discard_audio(recording_id)
     return {"status": "discarded", "recording_id": recording_id,
             "freed_bytes": freed}
+
+
+@app.post("/api/radio/sessions/{session_id}/import")
+def radio_session_import(session_id: int, background: BackgroundTasks,
+                         save_audio: bool = True, resolve_streaming: bool = True) -> dict[str, Any]:
+    """Import tracks from a radio session into the karaoke library."""
+    from . import localcache, radio_pipeline
+    with localcache.connect() as conn:
+        session = localcache.get_radio_session(session_id, conn=conn)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Radio session not found")
+
+    def _bg():
+        try:
+            radio_pipeline.import_radio_session(session_id, save_audio=save_audio,
+                                                resolve_streaming=resolve_streaming)
+        except Exception as exc:
+            log.error("Background radio session import failed for %s: %s", session_id, exc)
+
+    background.add_task(_bg)
+    return {"status": "accepted", "session_id": session_id}
+
 
 
 @app.get("/api/players/window")
@@ -717,6 +749,28 @@ def player_seek(req: SeekRequest) -> dict[str, Any]:
             "player": req.player or ""}
 
 
+@app.get("/api/players/queue")
+def get_browser_player_queue() -> dict[str, Any]:
+    """Inspect YouTube Music's active in-browser player queue over CDP."""
+    from . import player_open
+    return player_open.cdp_get_queue_state()
+
+
+@app.post("/api/players/queue")
+def enqueue_browser_player_video(req: QueueItemRequest) -> dict[str, Any]:
+    """Enqueue a video ID into YouTube Music's active web player queue via CDP."""
+    from . import player_open
+
+    if req.position == "next":
+        ok = player_open.cdp_queue_next_video(req.video_id)
+    else:
+        ok = player_open.cdp_queue_add_video(req.video_id)
+
+    if not ok:
+        raise HTTPException(status_code=503, detail="Failed to enqueue video ID via CDP")
+    return {"status": "ok", "video_id": req.video_id, "position": req.position or "next"}
+
+
 # -- library ingestion (folder scan, audio cut) ---------------------------
 #
 # Folder scanning needs ffmpeg + songrec + the analysis stack, and audio cut
@@ -869,6 +923,249 @@ def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
         return {"status": "ok", "count": len(errs), "logs": errs[-lines:]}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
+
+
+# -- stage / tv prompter view --------------------------------------------
+
+
+@app.get("/stage", response_class=HTMLResponse)
+@app.get("/mood", response_class=HTMLResponse)
+def stage_mood():
+    from karaoke.stage_view import render_mood_html
+    return render_mood_html()
+
+@app.get("/tv", response_class=HTMLResponse)
+def stage_page() -> HTMLResponse:
+    """Dedicated full-screen stage view for TV/prompter displays."""
+    from . import stage_view
+    return HTMLResponse(stage_view.render_stage_html())
+
+@app.get("/coverart", response_class=HTMLResponse)
+def coverart_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_coverart_html())
+
+@app.get("/dancers", response_class=HTMLResponse)
+def dancers_page() -> HTMLResponse:
+    from . import stage_view
+    return HTMLResponse(stage_view.render_dancers_html())
+
+
+class CaptionsConfigRequest(BaseModel):
+    model: Optional[str] = None
+    language: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+@app.get("/captions", response_class=HTMLResponse)
+def captions_page() -> HTMLResponse:
+    """Live Dutch auto-captions display page."""
+    from . import live_caption
+    return HTMLResponse(live_caption.render_captions_html())
+
+
+@app.get("/api/captions/stream")
+async def captions_stream():
+    """Real-time SSE stream of live transcribed auto-captions."""
+    from . import live_caption
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        live_caption.caption_event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/captions/config")
+def get_captions_config():
+    """Get current caption model, language, and API key configuration."""
+    from . import live_caption
+    return live_caption.get_caption_config()
+
+
+@app.post("/api/captions/config")
+def update_captions_config(cfg: CaptionsConfigRequest):
+    """Update current caption model, language, or API key configuration."""
+    from . import live_caption
+    return live_caption.set_caption_config(model=cfg.model, language=cfg.language, api_key=cfg.api_key)
+
+
+
+@app.get("/api/art")
+def get_art(url: str):
+    from fastapi.responses import FileResponse, RedirectResponse
+    from urllib.parse import urlparse, unquote
+    import os
+    
+    if not url:
+        return {"error": "no url"}
+        
+    if url.startswith("file://"):
+        parsed = urlparse(url)
+        path = unquote(parsed.path)
+        if os.path.exists(path):
+            return FileResponse(path)
+        return {"error": "not found"}
+    
+    return RedirectResponse(url)
+
+
+@app.get("/api/dance-library")
+def get_dance_library():
+    import os
+    from fastapi.responses import FileResponse
+    path = os.path.join(os.path.dirname(__file__), "dance-library.json")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/json")
+    return {"error": "not found"}
+
+
+@app.get("/api/mood-pixels")
+def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
+    from karaoke import moodart
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+    
+    analysis = DummyAnalysis(energy, bpm)
+    pixels = moodart.generate(analysis, mood, 32, 32)
+    return {"pixels": pixels}
+
+
+@app.get("/api/mood-art")
+def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
+    import io, random, os
+    from fastapi.responses import StreamingResponse, FileResponse
+    from PIL import Image
+    from karaoke import moodframe
+    
+    # 50% chance to use our custom AI generated pixel art library
+    use_custom = random.choice([True, False])
+    if use_custom:
+        base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+        mood_dir = os.path.join(base_dir, mood)
+        if os.path.isdir(mood_dir):
+            files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
+            if files:
+                chosen = random.choice(files)
+                return FileResponse(os.path.join(mood_dir, chosen))
+                
+    class DummyAnalysis:
+        def __init__(self, energy, bpm):
+            self.energy = energy
+            self.bpm = bpm
+            self.brightness = energy
+            self.resolved_key = None
+            self.detected_key = None
+
+    analysis = DummyAnalysis(energy, bpm)
+    
+    # Get pixels from the Python TUI logic (random cover or generated gradient)
+    pixels, source = moodframe.image_for(mood, analysis, cols=64, rows=64)
+    
+    # Fallback if no pixels returned
+    if not pixels:
+        img = Image.new("RGB", (64, 64), color="black")
+    else:
+        rows = len(pixels)
+        cols = len(pixels[0])
+        img = Image.new("RGB", (cols, rows))
+        put_data = []
+        for r in range(rows):
+            for c in range(cols):
+                put_data.append(pixels[r][c])
+        img.putdata(put_data)
+        
+    img_io = io.BytesIO()
+    img.save(img_io, "PNG")
+    img_io.seek(0)
+    return StreamingResponse(img_io, media_type="image/png")
+
+
+@app.get("/api/mood-feeling-image")
+def get_mood_feeling_image(mood: str = "neutral"):
+    """Return the generated pixel-art feeling image for the given mood."""
+    import os
+    from fastapi.responses import FileResponse
+    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+    mood_clean = (mood or "neutral").lower().strip()
+    mood_dir = os.path.join(base_dir, mood_clean)
+    if os.path.isdir(mood_dir):
+        files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
+        if files:
+            return FileResponse(os.path.join(mood_dir, sorted(files)[0]))
+    fallback = os.path.join(base_dir, "neutral", "1.png")
+    if os.path.isfile(fallback):
+        return FileResponse(fallback)
+    return {"error": "feeling image not found"}
+
+
+@app.get("/api/mood-cover-image")
+def get_mood_cover_image(mood: str = "neutral", art_url: Optional[str] = None):
+    """Return the active song album cover, or a mood-matched cached cover from the library."""
+    import os, random
+    from fastapi.responses import FileResponse, RedirectResponse
+    from urllib.parse import urlparse, unquote
+    from karaoke import moodframe
+
+    if art_url:
+        if art_url.startswith("file://"):
+            p = unquote(urlparse(art_url).path)
+            if os.path.exists(p):
+                return FileResponse(p)
+        elif os.path.exists(art_url):
+            return FileResponse(art_url)
+        elif art_url.startswith("http://") or art_url.startswith("https://"):
+            return RedirectResponse(art_url)
+
+    pool = moodframe.art_pool()
+    if pool:
+        try:
+            scored = moodframe.score_pool(pool, mood or "neutral", limit=12)
+            winner = moodframe.choose(scored)
+            if winner:
+                return FileResponse(str(winner[1]))
+            return FileResponse(str(random.choice(pool)))
+        except Exception:
+            return FileResponse(str(random.choice(pool)))
+
+    base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
+    fallback = os.path.join(base_dir, "neutral", "1.png")
+    if os.path.isfile(fallback):
+        return FileResponse(fallback)
+    return {"error": "no cover available"}
+
+
+@app.get("/api/stage/stream")
+async def stage_stream() -> StreamingResponse:
+    """Real-time SSE stream of live playback, lyrics, rhythm, and queue for stage view."""
+    from . import stage_view
+
+    return StreamingResponse(
+        stage_view.stage_event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/stage/state")
+def stage_state() -> dict[str, Any]:
+    """Single-snapshot REST endpoint for current stage state."""
+    from . import stage_view
+
+    return stage_view.get_stage_state()
 
 
 def main() -> None:
