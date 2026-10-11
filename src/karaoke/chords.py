@@ -47,6 +47,10 @@ _CHORD_TEMPLATES = {
     "dim7": (0, 3, 6, 9),      # Diminished 7th
     "m7b5": (0, 3, 6, 10),     # Half-diminished (ii in minor ii-V-i)
     "sus4": (0, 5, 7),         # Suspended 4th (pop/rock tensions)
+    "m6": (0, 3, 7, 9),        # Minor 6th (tonic minor in gypsy jazz / swing)
+    "6": (0, 4, 7, 9),         # Major 6th (tonic major in gypsy jazz / swing)
+    "6/9": (0, 4, 7, 9, 2),    # 6/9 chord (gypsy jazz resolution)
+    "9": (0, 4, 7, 10, 2),     # Dominant 9th (funk, blues, gypsy jazz)
 }
 
 _NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -62,7 +66,7 @@ class Chord:
 
     at_s: float
     root: int                  # pitch class 0-11
-    quality: str               # maj | min | 7 | maj7 | min7 | dim7 | m7b5 | sus4
+    quality: str               # maj | min | 7 | maj7 | min7 | dim7 | m7b5 | sus4 | m6 | 6 | 6/9 | 9
     strength: float
 
     @property
@@ -74,6 +78,8 @@ class Chord:
             return f"{root_name}m"
         elif self.quality == "min7":
             return f"{root_name}m7"
+        elif self.quality == "m6":
+            return f"{root_name}m6"
         else:
             return f"{root_name}{self.quality}"
 
