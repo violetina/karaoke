@@ -85,6 +85,71 @@ def duration_relation(d1: Optional[float], d2: Optional[float]) -> str:
     return "same" if abs(float(d1) - float(d2)) <= DURATION_TOLERANCE_S else "different"
 
 
+_ROMAN_MAP = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
+    "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+    "xi": 11, "xii": 12, "xiii": 13, "xiv": 14, "xv": 15,
+}
+
+
+def normalize_part_num(val: str) -> str:
+    """Normalize digits or Roman numerals to a stringified integer."""
+    val = val.lower().strip()
+    if val in _ROMAN_MAP:
+        return str(_ROMAN_MAP[val])
+    if val.isdigit():
+        return str(int(val))
+    return val
+
+
+def extract_part_numbers(title: str) -> set[str]:
+    """Extract semantic part, volume, movement, or catalogue indicators from a title."""
+    t = (title or "").lower()
+    # Strip release years in parentheses like '(2008)'
+    t = re.sub(r"\(\s*(?:19|20)\d{2}\s*\)", "", t)
+    parts = set()
+
+    # Leading number before title (e.g. '05 - Song' or '5 Ghosts')
+    m_lead = re.match(r"^\s*(\d+)(?:\s*[-–—.]|\s+)", t)
+    if m_lead:
+        parts.add(f"lead_{normalize_part_num(m_lead.group(1))}")
+
+    # Strip track number prefixes like '01 - ' or '01. '
+    t = re.sub(r"^\s*\d{1,3}\s*[-–—.]\s*", "", t)
+
+    # Explicit part / pt / no / volume / vol / act / movement / suite / scene
+    for m in re.finditer(r"\b(?:pt\.?|part|no\.?|n°|volume|vol\.?|act|movement|suite|scene)\s*[,.:-]?\s*([0-9]+|[ivxlcdm]+)\b", t):
+        parts.add(f"part_{normalize_part_num(m.group(1))}")
+
+    # #\d+ (e.g. Untitled #3 vs Untitled #11)
+    for m in re.finditer(r"#\s*(\d+)", t):
+        parts.add(f"hash_{normalize_part_num(m.group(1))}")
+
+    # Trailing digits or roman numerals at end of title (e.g. Pigs On The Wing 1 vs 2, Ghosts I vs II)
+    trail = re.search(r"\b([0-9]+|[ivxlcdm]+)\s*(?:\([^)]*\))?\s*$", t)
+    if trail:
+        tok = trail.group(1)
+        parts.add(f"trail_{normalize_part_num(tok)}")
+
+    # Sub-index / catalogue numbers e.g. Seb-1.06 vs Seb-1.09
+    for m in re.finditer(r"\b\d+\.(\d+)\b", t):
+        parts.add(f"sub_{normalize_part_num(m.group(1))}")
+
+    return parts
+
+
+def compatible_parts(t1: str, t2: str) -> bool:
+    """True if titles do not have conflicting part/track/index numbers."""
+    p1 = extract_part_numbers(t1)
+    p2 = extract_part_numbers(t2)
+    for pfx in ("part_", "hash_", "trail_", "sub_", "lead_"):
+        vals1 = {x for x in p1 if x.startswith(pfx)}
+        vals2 = {x for x in p2 if x.startswith(pfx)}
+        if vals1 and vals2 and vals1 != vals2:
+            return False
+    return True
+
+
 def is_duplicate(t1: dict[str, Any], t2: dict[str, Any]) -> bool:
     """Decide whether two tracks represent the same song and should be merged.
 
@@ -100,6 +165,9 @@ def is_duplicate(t1: dict[str, Any], t2: dict[str, Any]) -> bool:
     # length" is not evidence that they are the same recording.
     if not same_version(t1["title"], t2["title"]):
         return False
+    # Ensure distinct parts/suites/numbers are never falsely merged together.
+    if not compatible_parts(t1["title"], t2["title"]):
+        return False
     rel = duration_relation(t1["duration"], t2["duration"])
     if rel == "same":
         return are_titles_similar(t1["title"], t2["title"])
@@ -107,6 +175,7 @@ def is_duplicate(t1: dict[str, Any], t2: dict[str, Any]) -> bool:
         return False  # different version — allowed to coexist
     # unknown duration: only merge on a near-exact title
     return are_titles_similar(t1["title"], t2["title"], TITLE_SIMILARITY_NO_DURATION)
+
 
 
 def are_artists_compatible(art1: str, art2: str) -> bool:
@@ -229,6 +298,8 @@ def run_deduplication(conn, dry_run: bool = False) -> int:
     several videos). Returns the number of merges performed (or would perform in
     dry-run).
     """
+    from collections import defaultdict
+
     print("=== Step 1: Track Deduplication and Merging ===")
     if dry_run:
         print("(dry-run: no changes will be written)")
@@ -236,56 +307,74 @@ def run_deduplication(conn, dry_run: bool = False) -> int:
     cur.execute("SELECT track_id, artist, title, duration FROM tracks ORDER BY track_id")
     tracks = cur.fetchall()
 
+    # Pre-fetch lyrics presence and source counts to avoid per-pair DB roundtrips
+    cur.execute("SELECT track_id FROM lyrics WHERE COALESCE(synced_lyrics,'') || COALESCE(plain_lyrics,'') != ''")
+    has_lyrics_ids = {row["track_id"] for row in cur.fetchall()}
+    cur.execute("SELECT track_id, count(*) as cnt FROM sources GROUP BY track_id")
+    source_counts = {row["track_id"]: row["cnt"] for row in cur.fetchall()}
+
+    def _score(tid: int) -> tuple[int, int]:
+        return (1 if tid in has_lyrics_ids else 0, source_counts.get(tid, 0))
+
+    def _pick_canonical(t1: dict, t2: dict):
+        s1, s2 = _score(t1["track_id"]), _score(t2["track_id"])
+        if s1 != s2:
+            return (t1, t2) if s1 > s2 else (t2, t1)
+        return (t1, t2) if len(t1["artist"]) >= len(t2["artist"]) else (t2, t1)
+
+    # Group tracks by normalized artist to avoid O(N^2) full table scans
+    def _artist_group_key(a: str) -> str:
+        s = (a or "").lower().strip()
+        s = re.sub(r"^(?:the|a|an)\s+", "", s)
+        s = re.sub(r"[\(\)\[\]\-\&\,\s]+", " ", s).strip()
+        return s
+
+    groups = defaultdict(list)
+    for t in tracks:
+        k = _artist_group_key(t["artist"])
+        if k and not k.startswith("various"):
+            groups[k].append(t)
+
     # Track which ids have been merged away so we don't reuse them.
     merged_away: set[int] = set()
     merged_count = 0
 
-    for i in range(len(tracks)):
-        t1 = tracks[i]
-        if t1["track_id"] in merged_away:
+    for k, grp in groups.items():
+        if len(grp) < 2:
             continue
-        for j in range(i + 1, len(tracks)):
-            t2 = tracks[j]
-            if t2["track_id"] in merged_away:
+        for i in range(len(grp)):
+            t1 = grp[i]
+            if t1["track_id"] in merged_away:
                 continue
-            if not is_duplicate(t1, t2):
-                continue
+            for j in range(i + 1, len(grp)):
+                t2 = grp[j]
+                if t2["track_id"] in merged_away:
+                    continue
+                if not is_duplicate(t1, t2):
+                    continue
 
-            # Pick canonical (dest): prefer the one with lyrics, then more
-            # sources (more videos), then the longer artist spelling.
-            dest, src = _choose_canonical(t1, t2, cur)
+                dest, src = _pick_canonical(t1, t2)
 
-            d1, d2 = t1["duration"], t2["duration"]
-            dd = "?" if (d1 is None or d2 is None) else f"{abs(d1 - d2):.0f}s"
-            print(f"Duplicate (Δdur={dd}): '{src['artist']}' - '{src['title']}' (ID {src['track_id']})")
-            print(f"              merge into: '{dest['artist']}' - '{dest['title']}' (ID {dest['track_id']})")
+                d1, d2 = t1["duration"], t2["duration"]
+                dd = "?" if (d1 is None or d2 is None) else f"{abs(d1 - d2):.0f}s"
+                print(f"Duplicate (Δdur={dd}): '{src['artist']}' - '{src['title']}' (ID {src['track_id']})")
+                print(f"              merge into: '{dest['artist']}' - '{dest['title']}' (ID {dest['track_id']})")
 
-            if not dry_run:
-                merge_tracks(src["track_id"], dest["track_id"], conn)
-            merged_away.add(src["track_id"])
-            merged_count += 1
-            if src["track_id"] == t1["track_id"]:
-                break  # t1 was merged away; move to next i
+                if not dry_run:
+                    merge_tracks(src["track_id"], dest["track_id"], conn)
+                    source_counts[dest["track_id"]] = source_counts.get(dest["track_id"], 0) + source_counts.get(src["track_id"], 0)
+                    if src["track_id"] in has_lyrics_ids:
+                        has_lyrics_ids.add(dest["track_id"])
+
+                merged_away.add(src["track_id"])
+                merged_count += 1
+                if src["track_id"] == t1["track_id"]:
+                    break  # t1 was merged away; move to next i
 
     verb = "Would merge" if dry_run else "Merged"
     print(f"Deduplication complete. {verb} {merged_count} duplicate track(s).")
     return merged_count
 
-
-def _choose_canonical(t1: dict, t2: dict, cur):
-    """Return (dest, src): the track to keep and the one to merge away."""
-    def score(tid: int) -> tuple[int, int]:
-        has_lyrics = bool(cur.execute(
-            "SELECT 1 FROM lyrics WHERE track_id = %s AND COALESCE(synced_lyrics,'') || COALESCE(plain_lyrics,'') != ''",
-            (tid,)).fetchone())
-        nsrc = cur.execute("SELECT count(*) as cnt FROM sources WHERE track_id = %s", (tid,)).fetchone()["cnt"]
-        return (1 if has_lyrics else 0, nsrc)
-
-    s1, s2 = score(t1["track_id"]), score(t2["track_id"])
-    if s1 != s2:
-        return (t1, t2) if s1 > s2 else (t2, t1)
-    # Tie-break on the longer (usually fuller) artist spelling.
-    return (t1, t2) if len(t1["artist"]) >= len(t2["artist"]) else (t2, t1)
 
 
 def run_source_healing(conn, limit: int = 50) -> None:

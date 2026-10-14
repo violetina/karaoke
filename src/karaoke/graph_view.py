@@ -46,6 +46,12 @@ def build_similarity_graph(
     strategy: str = "structural",
     hops: int = 2,
     limit_per_node: int = 4,
+    min_score: Optional[float] = None,
+    bpm_min: Optional[float] = None,
+    bpm_max: Optional[float] = None,
+    genre_filter: Optional[str] = None,
+    camelot_filter: Optional[str] = None,
+    mood_filter: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a node-link similarity graph centered on a track or playlist."""
     hops = max(1, min(hops, 3))
@@ -56,6 +62,10 @@ def build_similarity_graph(
         if playlist_id:
             try:
                 pl_tracks = localcache.get_saved_playlist_tracks(playlist_id, conn=conn)
+                if not pl_tracks and playlist_id in ("dj-list", "Karaoke: DJ List"):
+                    pl_info = localcache.find_saved_playlist_by_id("dj-list", conn=conn)
+                    if pl_info and pl_info.get("playlist_id") and pl_info["playlist_id"] != "dj-list":
+                        pl_tracks = localcache.get_saved_playlist_tracks(pl_info["playlist_id"], conn=conn)
                 seed_ids = [t["track_id"] for t in pl_tracks if t.get("track_id")]
             except Exception as exc:
                 log.warning("Could not read playlist %s: %s", playlist_id, exc)
@@ -64,27 +74,43 @@ def build_similarity_graph(
             seed_ids = [track_id]
 
         if not seed_ids:
-            # Fallback: look for most played analyzed track
             cur = conn.cursor()
-            cur.execute("""
+            params: list[Any] = []
+            where_clauses = ["a.bpm IS NOT NULL"]
+            if genre_filter:
+                where_clauses.append("g.genre ILIKE %s")
+                params.append(f"%{genre_filter}%")
+            where_sql = " AND ".join(where_clauses)
+            cur.execute(f"""
                 SELECT t.track_id FROM tracks t
                 JOIN track_analysis a ON a.track_id = t.track_id
-                WHERE a.bpm IS NOT NULL
+                LEFT JOIN track_genre g ON g.track_id = t.track_id
+                WHERE {where_sql}
                 ORDER BY t.play_count DESC, t.track_id ASC
                 LIMIT 1
-            """)
+            """, tuple(params))
             row = cur.fetchone()
             if row:
                 seed_ids = [row["track_id"]]
             else:
                 seed_ids = [14082]
 
+    # For large playlists (e.g. 600+ sync-list), clamp seeds and hops to prevent UI freeze
+    MAX_SEEDS = 35
+    total_playlist_tracks = len(seed_ids)
+    if len(seed_ids) > MAX_SEEDS:
+        seed_ids = seed_ids[:MAX_SEEDS]
+
+    if len(seed_ids) > 10 and hops > 1:
+        hops = 1
+
+    MAX_TOTAL_GRAPH_NODES = 80
     visited: set[int] = set()
     queue: list[tuple[int, int]] = [(sid, 0) for sid in seed_ids]
     edges: list[dict[str, Any]] = []
     seen_edges: set[tuple[int, int]] = set()
 
-    while queue:
+    while queue and len(visited) < MAX_TOTAL_GRAPH_NODES:
         curr_id, depth = queue.pop(0)
         if curr_id in visited or depth >= hops:
             continue
@@ -131,15 +157,18 @@ def build_similarity_graph(
                                 f"{((num - 2) % 12) + 1}{let}",
                             ]
                             cur.execute("""
-                                SELECT t.track_id, a.bpm
+                                SELECT t.track_id, a.detected_key, a.bpm
                                 FROM tracks t
                                 JOIN track_analysis a ON a.track_id = t.track_id
                                 WHERE t.track_id != %s AND a.detected_key IS NOT NULL
-                                ORDER BY t.play_count DESC
-                                LIMIT 40
+                                ORDER BY t.play_count DESC, t.track_id ASC
+                                LIMIT 60
                             """, (curr_id,))
                             for r in cur.fetchall():
-                                rk = musictheory.parse_key(arow["detected_key"])
+                                cand_key = r.get("detected_key")
+                                if not cand_key:
+                                    continue
+                                rk = musictheory.parse_key(cand_key)
                                 if rk and rk.camelot in compat:
                                     neighbors.append({
                                         "track_id": r["track_id"],
@@ -155,16 +184,19 @@ def build_similarity_graph(
             tid = nbr.get("track_id")
             if not tid:
                 continue
+            score = float(nbr.get("score", 0.8))
+            if min_score is not None and score < min_score:
+                continue
             edge_key = tuple(sorted([curr_id, tid]))
             if edge_key not in seen_edges:
                 seen_edges.add(edge_key)
                 edges.append({
                     "source": curr_id,
                     "target": tid,
-                    "weight": nbr.get("score", 0.8),
+                    "weight": score,
                     "relation": nbr.get("space", strategy),
                 })
-            if tid not in visited and depth + 1 < hops:
+            if tid not in visited and depth + 1 < hops and len(visited) + len(queue) < MAX_TOTAL_GRAPH_NODES:
                 queue.append((tid, depth + 1))
 
     all_ids = list(set(seed_ids + [e["source"] for e in edges] + [e["target"] for e in edges]))
@@ -213,60 +245,64 @@ def build_similarity_graph(
                 "is_seed": tid in seed_ids,
             }
 
-    # Enrich with OpenSearch progression, chord, and mood data if available
+    # Batch enrich with OpenSearch progression, chord, and mood data
     try:
         from .key_progression import PROGRESSION_INDEX, doc_id
         from .osclient import client as get_os_client
         osc = get_os_client()
         if osc:
             if osc.indices.exists(index=PROGRESSION_INDEX):
-                for tid in all_ids:
-                    if tid in nodes:
-                        doc = osc.get(index=PROGRESSION_INDEX, id=doc_id(tid), ignore=404)
-                        if doc.get("found"):
-                            src = doc["_source"]
-                            nodes[tid]["form"] = src.get("form", "unknown")
-                            nodes[tid]["fifth_ratio"] = round(src["fifth_ratio"], 3) if src.get("fifth_ratio") is not None else None
-                            nodes[tid]["distinct_chords"] = src.get("distinct_chords")
+                prog_ids = [doc_id(tid) for tid in all_ids if tid in nodes]
+                if prog_ids:
+                    try:
+                        m_res = osc.mget(index=PROGRESSION_INDEX, body={"ids": prog_ids})
+                        for doc in m_res.get("docs", []):
+                            if doc.get("found"):
+                                src = doc["_source"]
+                                tid = src.get("track_id")
+                                if tid and tid in nodes:
+                                    nodes[tid]["form"] = src.get("form", "unknown")
+                                    nodes[tid]["fifth_ratio"] = round(src["fifth_ratio"], 3) if src.get("fifth_ratio") is not None else None
+                                    nodes[tid]["distinct_chords"] = src.get("distinct_chords")
+                    except Exception as exc:
+                        log.debug("Batch mget progression error: %s", exc)
 
             if osc.indices.exists(index="tracks"):
-                for tid in all_ids:
-                    tdoc = osc.get(index="tracks", id=f"sqlite:{tid}", ignore=404)
-                    if not tdoc.get("found"):
-                        s_res = osc.search(index="tracks", body={"size": 1, "query": {"term": {"track_id": tid}}})
-                        hits = s_res.get("hits", {}).get("hits", [])
-                        if hits:
-                            tdoc = hits[0]
-                    if tdoc.get("found") or "_source" in tdoc:
-                        tsrc = tdoc["_source"]
-                        dm = tsrc.get("dominant_mood") or "neutral"
-                        if tid in nodes:
-                            nodes[tid]["dominant_mood"] = dm
-                            nodes[tid]["sentiment_hits"] = tsrc.get("sentiment_hits", 0)
-                            if strategy in ("mood", "feeling", "sentiment"):
-                                nodes[tid]["color"] = MOOD_COLORS.get(dm.lower(), "#94a3b8")
-                        else:
-                            # Node missing in Postgres: populate directly from OpenSearch
-                            color = MOOD_COLORS.get(dm.lower(), "#94a3b8") if strategy in ("mood", "feeling", "sentiment") else "#6c757d"
-                            nodes[tid] = {
-                                "id": str(tid),
-                                "track_id": tid,
-                                "label": f"{tsrc.get('artist', '')} — {tsrc.get('title', '')}",
-                                "artist": tsrc.get("artist", ""),
-                                "title": tsrc.get("title", ""),
-                                "key": "",
-                                "camelot": "?",
-                                "color": color,
-                                "bpm": None,
-                                "energy": None,
-                                "genre": "",
-                                "play_count": 0,
-                                "is_seed": tid in seed_ids,
-                                "dominant_mood": dm,
-                                "sentiment_hits": tsrc.get("sentiment_hits", 0),
-                            }
+                track_doc_ids = [f"sqlite:{tid}" for tid in all_ids]
+                if track_doc_ids:
+                    try:
+                        m_res = osc.mget(index="tracks", body={"ids": track_doc_ids})
+                        for doc in m_res.get("docs", []):
+                            if doc.get("found"):
+                                tsrc = doc["_source"]
+                                tid = tsrc.get("track_id")
+                                if tid and tid in nodes:
+                                    dm = tsrc.get("dominant_mood") or "neutral"
+                                    nodes[tid]["dominant_mood"] = dm
+                                    nodes[tid]["sentiment_hits"] = tsrc.get("sentiment_hits", 0)
+                                    if strategy in ("mood", "feeling", "sentiment"):
+                                        nodes[tid]["color"] = MOOD_COLORS.get(dm.lower(), "#94a3b8")
+                    except Exception as exc:
+                        log.debug("Batch mget tracks error: %s", exc)
     except Exception as exc:
         log.warning("OpenSearch node enrichment error: %s", exc)
+
+    # Filter nodes based on user sliders and criteria (seed nodes always retained)
+    filtered_nodes: dict[int, dict[str, Any]] = {}
+    for tid, node in nodes.items():
+        if tid not in seed_ids:
+            bpm = node.get("bpm")
+            if bpm_min is not None and bpm is not None and bpm < bpm_min:
+                continue
+            if bpm_max is not None and bpm is not None and bpm > bpm_max:
+                continue
+            if genre_filter and genre_filter.lower() not in (node.get("genre") or "").lower():
+                continue
+            if camelot_filter and camelot_filter.upper() != (node.get("camelot") or "").upper():
+                continue
+            if mood_filter and mood_filter.lower() != (node.get("dominant_mood") or "").lower():
+                continue
+        filtered_nodes[tid] = node
 
     formatted_edges = [
         {
@@ -277,18 +313,24 @@ def build_similarity_graph(
             "relation": e["relation"],
         }
         for e in edges
-        if e["source"] in nodes and e["target"] in nodes
+        if e["source"] in filtered_nodes and e["target"] in filtered_nodes
     ]
 
     return {
-        "nodes": list(nodes.values()),
+        "nodes": list(filtered_nodes.values()),
         "edges": formatted_edges,
         "stats": {
-            "node_count": len(nodes),
-            "edge_count": len(edges),
+            "node_count": len(filtered_nodes),
+            "edge_count": len(formatted_edges),
             "strategy": strategy,
             "seed_ids": seed_ids,
             "hops": hops,
+            "min_score": min_score,
+            "bpm_min": bpm_min,
+            "bpm_max": bpm_max,
+            "genre_filter": genre_filter,
+            "camelot_filter": camelot_filter,
+            "mood_filter": mood_filter,
         },
         "graph_url": f"http://localhost:8888/graph?{'playlist_id=' + playlist_id if playlist_id else 'track_id=' + str(seed_ids[0])}&strategy={strategy}",
     }
@@ -315,7 +357,12 @@ GRAPH_HTML = """<!DOCTYPE html>
     header {
       background: #181b29;
       border-bottom: 1px solid #2d3748;
-      padding: 12px 20px;
+      padding: 10px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .header-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -333,17 +380,49 @@ GRAPH_HTML = """<!DOCTYPE html>
     .controls {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       flex-wrap: wrap;
+    }
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: #131622;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #282f44;
+      font-size: 0.8rem;
+    }
+    .filter-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .filter-label {
+      color: #94a3b8;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .filter-val {
+      color: #38bdf8;
+      font-family: monospace;
+      font-weight: 600;
+      min-width: 30px;
     }
     input, select, button {
       background: #23283b;
       color: #f1f5f9;
       border: 1px solid #3b4261;
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 0.85rem;
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-size: 0.82rem;
       outline: none;
+    }
+    input[type="range"] {
+      padding: 0;
+      cursor: pointer;
+      accent-color: #38bdf8;
     }
     input:focus, select:focus {
       border-color: #38bdf8;
@@ -361,6 +440,23 @@ GRAPH_HTML = """<!DOCTYPE html>
       border-color: #475569;
     }
     .btn-secondary:hover { background: #475569; }
+    .btn-apply {
+      background: #0284c7;
+      border-color: #0369a1;
+      color: #fff;
+    }
+    .btn-apply:hover { background: #0369a1; }
+    .stats-badge {
+      margin-left: auto;
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #38bdf8;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
     .main {
       flex: 1;
       display: flex;
@@ -454,26 +550,102 @@ GRAPH_HTML = """<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <div class="brand">
-      <span>✨ Karaoke Similarity Constellation</span>
+    <div class="header-top">
+      <div class="brand">
+        <span>✨ Karaoke Similarity Constellation</span>
+      </div>
+      <div class="controls">
+        <input type="text" id="seed-input" placeholder="Track ID or Artist / Title..." style="width: 200px;">
+        <select id="strategy-select">
+          <option value="structural">Structural (Chord Motion)</option>
+          <option value="acoustic">Acoustic (CLAP Timbre)</option>
+          <option value="harmonic">Harmonic (Camelot Key)</option>
+          <option value="context">Context (Lyrics & Meaning)</option>
+          <option value="mood">Mood (Emotion & Sentiment)</option>
+        </select>
+        <select id="playlist-select" onchange="onPlaylistSelected()">
+          <option value="">Load Playlist...</option>
+        </select>
+        <button onclick="loadGraph()">Explore</button>
+        <button class="btn-secondary" onclick="loadNowPlaying()">Now Playing</button>
+      </div>
     </div>
-    <div class="controls">
-      <input type="text" id="seed-input" placeholder="Track ID or Artist / Title..." style="width: 200px;">
-      <select id="strategy-select">
-        <option value="structural">Structural (Chord Motion)</option>
-        <option value="context">Context (Lyrics & Meaning)</option>
-        <option value="mood">Mood (Emotion & Feeling)</option>
-        <option value="acoustic">Acoustic (CLAP Timbre)</option>
-        <option value="harmonic">Harmonic (Camelot Key)</option>
-      </select>
-      <select id="hops-select">
-        <option value="1">1 Hop</option>
-        <option value="2" selected>2 Hops</option>
-        <option value="3">3 Hops</option>
-      </select>
-      <button onclick="loadGraph()">Explore</button>
-      <button class="btn-secondary" onclick="loadNowPlaying()">Now Playing</button>
-      <button class="btn-secondary" onclick="loadPlaylist('jazz-funk-happy')">Jazz Playlist</button>
+    <div class="filter-bar">
+      <div class="filter-item">
+        <span class="filter-label">Min Sim:</span>
+        <input type="range" id="min-score" min="0.0" max="1.0" step="0.05" value="0.50" oninput="document.getElementById('min-score-val').textContent = parseFloat(this.value).toFixed(2)">
+        <span id="min-score-val" class="filter-val">0.50</span>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">BPM:</span>
+        <input type="number" id="bpm-min" placeholder="Min" style="width: 60px;">
+        <span style="color:#64748b">-</span>
+        <input type="number" id="bpm-max" placeholder="Max" style="width: 60px;">
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Camelot:</span>
+        <select id="camelot-select">
+          <option value="">All Keys</option>
+          <option value="1A">1A (Abm)</option><option value="1B">1B (B)</option>
+          <option value="2A">2A (Ebm)</option><option value="2B">2B (F#)</option>
+          <option value="3A">3A (Bbm)</option><option value="3B">3B (Db)</option>
+          <option value="4A">4A (Fm)</option><option value="4B">4B (Ab)</option>
+          <option value="5A">5A (Cm)</option><option value="5B">5B (Eb)</option>
+          <option value="6A">6A (Gm)</option><option value="6B">6B (Bb)</option>
+          <option value="7A">7A (Dm)</option><option value="7B">7B (F)</option>
+          <option value="8A">8A (Am)</option><option value="8B">8B (C)</option>
+          <option value="9A">9A (Em)</option><option value="9B">9B (G)</option>
+          <option value="10A">10A (Bm)</option><option value="10B">10B (D)</option>
+          <option value="11A">11A (F#m)</option><option value="11B">11B (A)</option>
+          <option value="12A">12A (C#m)</option><option value="12B">12B (E)</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Genre:</span>
+        <select id="genre-select">
+          <option value="">All Genres</option>
+          <option value="jazz">Jazz</option>
+          <option value="blues">Blues</option>
+          <option value="rock">Rock</option>
+          <option value="pop">Pop</option>
+          <option value="punk">Punk</option>
+          <option value="stoner rock">Stoner Rock</option>
+          <option value="funk">Funk</option>
+          <option value="folk">Folk</option>
+          <option value="metal">Metal</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Mood:</span>
+        <select id="mood-select">
+          <option value="">All Moods</option>
+          <option value="happy">Happy</option>
+          <option value="tender">Tender</option>
+          <option value="sad">Sad</option>
+          <option value="angry">Angry</option>
+          <option value="neutral">Neutral</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Hops:</span>
+        <select id="hops-select">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Limit:</span>
+        <select id="limit-select">
+          <option value="2">2</option>
+          <option value="4" selected>4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+      <button onclick="loadGraph()" class="btn-apply">Filter</button>
+      <button onclick="resetFilters()" class="btn-secondary">Reset</button>
+      <span id="graph-stats-badge" class="stats-badge">0 nodes / 0 edges</span>
     </div>
   </header>
 
@@ -528,7 +700,8 @@ GRAPH_HTML = """<!DOCTYPE html>
           • <strong>Node Color:</strong> Camelot harmonic code (or Mood emotion when in Mood strategy).<br>
           • <strong>Node Size:</strong> Degree (number of similarity links).<br>
           • <strong>Edge Thickness:</strong> Cosine chord-motion, semantic lyric, or timbre match.<br>
-          • <strong>Seed Nodes:</strong> Highlighted with bright border.
+          • <strong>Seed Nodes:</strong> Highlighted with bright blue border.<br>
+          • <strong>Sliders & Filters:</strong> Real-time filtering by similarity score, tempo, key, and mood.
         </div>
       </div>
     </div>
@@ -544,16 +717,71 @@ GRAPH_HTML = """<!DOCTYPE html>
       el.textContent = msg;
     }
 
+    async function loadPlaylists() {
+      try {
+        const resp = await fetch('/api/playlists');
+        if (resp.ok) {
+          const list = await resp.json();
+          const sel = document.getElementById('playlist-select');
+          sel.innerHTML = '<option value="">Load Playlist...</option>';
+          list.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.playlist_id;
+            opt.textContent = `${p.name} (${p.track_count || 0})`;
+            sel.appendChild(opt);
+          });
+        }
+      } catch (err) {
+        console.warn('Could not load playlists:', err);
+      }
+    }
+
+    function onPlaylistSelected() {
+      const plId = document.getElementById('playlist-select').value;
+      if (plId) {
+        document.getElementById('seed-input').value = '';
+        loadGraph({ playlist_id: plId });
+      }
+    }
+
+    function resetFilters() {
+      document.getElementById('min-score').value = '0.50';
+      document.getElementById('min-score-val').textContent = '0.50';
+      document.getElementById('bpm-min').value = '';
+      document.getElementById('bpm-max').value = '';
+      document.getElementById('camelot-select').value = '';
+      document.getElementById('genre-select').value = '';
+      document.getElementById('mood-select').value = '';
+      document.getElementById('hops-select').value = '2';
+      document.getElementById('limit-select').value = '4';
+      loadGraph();
+    }
+
     async function loadGraph(customParams = {}) {
       toast('Loading similarity constellation...');
       const urlParams = new URLSearchParams(window.location.search);
       const trackInput = document.getElementById('seed-input').value.trim();
       const strategy = customParams.strategy || document.getElementById('strategy-select').value;
       const hops = customParams.hops || document.getElementById('hops-select').value;
+      const limit = customParams.limit || document.getElementById('limit-select').value;
+      const minScore = document.getElementById('min-score').value;
+      const bpmMin = document.getElementById('bpm-min').value;
+      const bpmMax = document.getElementById('bpm-max').value;
+      const camelot = document.getElementById('camelot-select').value;
+      const genre = document.getElementById('genre-select').value;
+      const mood = document.getElementById('mood-select').value;
 
-      let fetchUrl = `/api/graph_data?strategy=${strategy}&hops=${hops}`;
-      if (customParams.playlist_id) {
-        fetchUrl += `&playlist_id=${customParams.playlist_id}`;
+      let fetchUrl = `/api/graph_data?strategy=${strategy}&hops=${hops}&limit=${limit}`;
+      if (minScore) fetchUrl += `&min_score=${minScore}`;
+      if (bpmMin) fetchUrl += `&bpm_min=${bpmMin}`;
+      if (bpmMax) fetchUrl += `&bpm_max=${bpmMax}`;
+      if (camelot) fetchUrl += `&camelot=${encodeURIComponent(camelot)}`;
+      if (genre) fetchUrl += `&genre=${encodeURIComponent(genre)}`;
+      if (mood) fetchUrl += `&mood=${encodeURIComponent(mood)}`;
+
+      const plId = customParams.playlist_id || document.getElementById('playlist-select').value;
+      if (plId) {
+        fetchUrl += `&playlist_id=${encodeURIComponent(plId)}`;
       } else if (customParams.track_id) {
         fetchUrl += `&track_id=${customParams.track_id}`;
       } else if (trackInput) {
@@ -572,6 +800,8 @@ GRAPH_HTML = """<!DOCTYPE html>
         const resp = await fetch(fetchUrl);
         const data = await resp.json();
         renderCytoscape(data);
+        const badge = document.getElementById('graph-stats-badge');
+        if (badge) badge.textContent = `${data.nodes.length} nodes / ${data.edges.length} edges`;
         toast(`Loaded ${data.nodes.length} nodes & ${data.edges.length} edges (${strategy})`);
       } catch (err) {
         console.error(err);
@@ -593,11 +823,6 @@ GRAPH_HTML = """<!DOCTYPE html>
       } catch (e) {
         toast('Could not fetch now playing');
       }
-    }
-
-    function loadPlaylist(plId) {
-      document.getElementById('seed-input').value = '';
-      loadGraph({ playlist_id: plId });
     }
 
     function renderCytoscape(data) {
@@ -674,12 +899,12 @@ GRAPH_HTML = """<!DOCTYPE html>
         ],
         layout: {
           name: 'cose',
-          animate: true,
+          animate: elements.length <= 50,
           randomize: false,
-          nodeRepulsion: 450000,
-          idealEdgeLength: 100,
+          nodeRepulsion: elements.length > 50 ? 200000 : 450000,
+          idealEdgeLength: elements.length > 50 ? 60 : 100,
           gravity: 0.25,
-          numIter: 1000
+          numIter: elements.length > 50 ? 150 : 600
         }
       });
 
@@ -734,6 +959,7 @@ GRAPH_HTML = """<!DOCTYPE html>
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      loadPlaylists();
       loadGraph();
     });
   </script>
@@ -747,6 +973,38 @@ async def serve_graph_ui(request: Request) -> HTMLResponse:
     return HTMLResponse(GRAPH_HTML)
 
 
+async def api_playlists(request: Request) -> JSONResponse:
+    """Return available saved playlists for graph exploration."""
+    res: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with localcache.connect() as conn:
+            try:
+                dj_pl = localcache.find_saved_playlist_by_id("dj-list", conn=conn)
+                if dj_pl:
+                    res.append({
+                        "playlist_id": dj_pl["playlist_id"],
+                        "name": dj_pl["name"],
+                        "track_count": dj_pl.get("track_count", 0),
+                    })
+                    seen.add(dj_pl["playlist_id"])
+            except Exception:
+                pass
+            pls = localcache.get_saved_playlists(limit=100, conn=conn)
+            for p in pls:
+                pid = p["playlist_id"]
+                if pid not in seen:
+                    seen.add(pid)
+                    res.append({
+                        "playlist_id": pid,
+                        "name": p["name"],
+                        "track_count": p.get("track_count", 0),
+                    })
+    except Exception as exc:
+        log.warning("api_playlists error: %s", exc)
+    return JSONResponse(res)
+
+
 async def api_graph_data(request: Request) -> JSONResponse:
     """Return JSON node-link graph data for a track or playlist."""
     params = request.query_params
@@ -756,6 +1014,13 @@ async def api_graph_data(request: Request) -> JSONResponse:
     hops = int(params.get("hops", "2"))
     limit = int(params.get("limit", "4"))
     query = params.get("query", "").strip()
+
+    min_score = float(params["min_score"]) if params.get("min_score") not in (None, "") else None
+    bpm_min = float(params["bpm_min"]) if params.get("bpm_min") not in (None, "") else None
+    bpm_max = float(params["bpm_max"]) if params.get("bpm_max") not in (None, "") else None
+    genre_filter = params.get("genre", "").strip() or None
+    camelot_filter = params.get("camelot", "").strip() or None
+    mood_filter = params.get("mood", "").strip() or None
 
     track_id: Optional[int] = None
     if track_id_str and track_id_str.isdigit():
@@ -779,6 +1044,12 @@ async def api_graph_data(request: Request) -> JSONResponse:
         strategy=strategy,
         hops=hops,
         limit_per_node=limit,
+        min_score=min_score,
+        bpm_min=bpm_min,
+        bpm_max=bpm_max,
+        genre_filter=genre_filter,
+        camelot_filter=camelot_filter,
+        mood_filter=mood_filter,
     )
     return JSONResponse(data)
 

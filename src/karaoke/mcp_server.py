@@ -921,6 +921,12 @@ def get_similarity_graph(
     strategy: str = "structural",
     hops: int = 2,
     limit_per_node: int = 4,
+    min_score: Optional[float] = None,
+    bpm_min: Optional[float] = None,
+    bpm_max: Optional[float] = None,
+    genre_filter: Optional[str] = None,
+    camelot_filter: Optional[str] = None,
+    mood_filter: Optional[str] = None,
 ) -> str:
     """Generate a musical similarity graph (nodes and edges) for a track or playlist.
 
@@ -930,6 +936,12 @@ def get_similarity_graph(
         strategy: 'structural' (chord motion), 'context' (lyric topics & meaning), 'mood' (emotion & sentiment), 'acoustic' (CLAP timbre), or 'harmonic' (Camelot wheel).
         hops: Number of neighbor traversal hops from seed (1-3, default 2).
         limit_per_node: Maximum similarity edges drawn per node (default 4, max 8).
+        min_score: Minimum similarity score threshold for drawing links (e.g. 0.6).
+        bpm_min: Filter nodes with tempo below this BPM.
+        bpm_max: Filter nodes with tempo above this BPM.
+        genre_filter: Substring match for genre (e.g. 'jazz', 'blues', 'rock').
+        camelot_filter: Exact Camelot key code filter (e.g. '8A', '9B').
+        mood_filter: Dominant mood filter (e.g. 'happy', 'tender', 'sad', 'angry').
 
     Returns:
         JSON with 'nodes', 'edges', 'stats', and a link to the visual graph at http://localhost:8888/graph.
@@ -941,6 +953,12 @@ def get_similarity_graph(
         strategy=strategy,
         hops=hops,
         limit_per_node=limit_per_node,
+        min_score=min_score,
+        bpm_min=bpm_min,
+        bpm_max=bpm_max,
+        genre_filter=genre_filter,
+        camelot_filter=camelot_filter,
+        mood_filter=mood_filter,
     )
     return json.dumps(data, indent=2)
 
@@ -1005,6 +1023,7 @@ def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
         Route("/health", endpoint=lambda r: JSONResponse({"status": "ok"})),
         Route("/graph", endpoint=graph_view.serve_graph_ui),
         Route("/api/graph_data", endpoint=graph_view.api_graph_data),
+        Route("/api/playlists", endpoint=graph_view.api_playlists),
         Route("/api/play", endpoint=graph_view.api_play, methods=["GET", "POST"]),
         Route("/api/now_playing", endpoint=lambda r: JSONResponse(json.loads(get_now_playing()))),
         Route("/sse", endpoint=combined),

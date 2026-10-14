@@ -106,6 +106,7 @@ nav:
       - Doc workflow plan: design/documentation-agent-workflow-plan.md
       - Events & Postgres migration plan: events_and_postgres_plan.md
       - Saved playlists Postgres migration plan: saved_playlists_postgres_migration_plan.md
+      - Disk chord backfill plan: disk_chord_backfill_plan.md
       - TUI first concept: design/karaoke-tui-first-concept.md
   - Releases:
       - Version 0.9.1: releases/0.9.1.md

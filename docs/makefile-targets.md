@@ -1,7 +1,6 @@
 # Makefile targets
 Generated from make help
 ```text
-make[1]: Entering directory '/home/tina/karaoke'
 admin                        Run the backend operations & worker management TUI
 analyze                      Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 api                          Launch the FastAPI library backend (read-only: tracks, lyrics, stats)
@@ -16,12 +15,12 @@ celery-worker                Run the Celery post-processing worker (CLAP/audio s
 clean                        Remove build artifacts
 clean-tools                  Remove cached helper tools
 ctrl-api                     Launch the host-side control API (playback; needs a desktop session)
-db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 db-cleanup                   Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
+db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
 dj                           Open the interactive Karaoke AI DJ Chat booth in terminal
-docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)
 docs                         Build MkDocs site
+docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)
 docs-confluence-prep         Generate Confluence-friendly docs tree
 docs-confluence-publish      Build Confluence export site
 docs-live                    Serve MkDocs locally on http://$(DOCS_ADDR)
@@ -30,11 +29,12 @@ docs-write                   Regenerate generated docs
 folder-scan                  Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 format                       Run formatters
 health                       Run the karaoke platform health check (services, ports, cluster, DB)
+healthz                      Verify systemd karaoke services and K3s apps are healthy
 help                         Show available targets
 index-youtube-cache          Add cached YouTube downloads to SQLite so they show in browse
+install                      Install dependencies and the karaoke package
 install-audio                Install the isolated key/tempo analysis stack (essentia, librosa) into $(AUDIO_VENV)
 install-confluence           Install optional Confluence publishing dependencies
-install                      Install dependencies and the karaoke package
 k8s-build                    Build the library API container image
 k8s-deploy                   Deploy the library API to the kind cluster
 k8s-load                     Load the image into the kind cluster
@@ -46,11 +46,12 @@ k8s-undeploy                 Remove the karaoke API from the cluster (keeps the 
 lint                         Run lint checks
 mcp                          Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 mic-test                     Live mic VU meter to confirm capture level (SECS=4)
+mpris                        Run the Karaoke MPRIS D-Bus Controller service daemon
 mq-port-forward              Expose the in-cluster RabbitMQ AMQP on localhost:5672 (management on 15672)
 postprocess-enqueue-all      Enqueue every track missing key/BPM or word-timing for post-processing
 postprocess-worker           Run the host-side post-processing worker (analysis + word-timing)
-radio-playlist-ingest        Download + full pipeline (CLAP/chords) for the Radio Discoveries playlist [FORCE_HARMONY=1]
 radio-playlist               Push radio-discovered songs to the 'Karaoke: Radio Discoveries' YTMusic playlist
+radio-playlist-ingest        Download + full pipeline (CLAP/chords) for the Radio Discoveries playlist [FORCE_HARMONY=1]
 recording-analyse            Decompile a recording into the DB (ID=...)
 recording-show               Show a recording's derived track list (ID=...)
 recordings                   List record-mode sessions
@@ -61,18 +62,18 @@ systemd-install              Install/refresh the karaoke systemd --user units (s
 systemd-status               Show status of all karaoke units + last health check
 systemd-uninstall            Stop and remove the karaoke systemd --user units
 systemd-up                   Start all karaoke services via the target
-test-audio                   Verify the audio + identify + lyrics stack (mic, songrec, LRCLIB)
 test                         Run tests
+test-audio                   Verify the audio + identify + lyrics stack (mic, songrec, LRCLIB)
 tui                          Launch the clean karaoke control-surface TUI prototype
-upgrade-timings-dry-run      Preview which cached tracks can gain word-level timing
 upgrade-timings              Upgrade cached lyrics to word-level timing via YouTube captions
-vector-index-dry-run         Preview SQLite -> OpenSearch vector indexing without writing
+upgrade-timings-dry-run      Preview which cached tracks can gain word-level timing
 vector-index                 Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
+vector-index-dry-run         Preview SQLite -> OpenSearch vector indexing without writing
 vector-status                Show OpenSearch vector index status and rebuild progress
 venv                         Create virtual environment
 view_makeflow                Open generated SVG locally
 web                          Serve the TUI in a web browser using textual-serve
 webtui                       Alias for make web
 yt-playlist-ingest           Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
-make[1]: Leaving directory '/home/tina/karaoke'
+ytmusic-sync                 Perform bi-directional playlist sync with YouTube Music
 ```

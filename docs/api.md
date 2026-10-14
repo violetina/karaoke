@@ -368,6 +368,23 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.key_progression
 
+
+## Graph View
+
+::: karaoke.graph_view
+
+## Live Caption
+
+::: karaoke.live_caption
+
+## Mpris Service
+
+::: karaoke.mpris_service
+
+## Supervisor
+
+::: karaoke.supervisor
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the

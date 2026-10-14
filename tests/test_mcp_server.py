@@ -450,3 +450,35 @@ def test_api_play_endpoint(paging_library, monkeypatch):
     assert get_res.status_code == 200
     assert get_res.json()["status"] == "launched"
 
+
+def test_api_playlists_endpoint():
+    """Verify ASGI route /api/playlists returns JSON list of saved playlists."""
+    from starlette.testclient import TestClient
+    app = mcp_server.create_asgi_app()
+    client = TestClient(app)
+
+    res = client.get("/api/playlists")
+    assert res.status_code == 200
+    data = res.json()
+    assert isinstance(data, list)
+
+
+def test_get_similarity_graph_filters(paging_library, monkeypatch):
+    """Verify get_similarity_graph respects filter options like min_score and bpm."""
+    from karaoke import search
+    monkeypatch.setattr(search, "similar_chords_for_track", lambda track_id, k: [
+        {"track_id": paging_library[1], "artist": "Artist 01", "title": "Song 01", "score": 0.45, "space": "chord_motion"},
+        {"track_id": paging_library[2], "artist": "Artist 02", "title": "Song 02", "score": 0.88, "space": "chord_motion"},
+    ])
+
+    # Filter with min_score=0.60: edge with score 0.45 should be omitted
+    graph_data = json.loads(mcp_server.get_similarity_graph(
+        track_id=paging_library[0],
+        strategy="structural",
+        hops=1,
+        min_score=0.60,
+    ))
+    assert graph_data["stats"]["min_score"] == 0.60
+    for edge in graph_data["edges"]:
+        assert edge["weight"] >= 0.60
+
