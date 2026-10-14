@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS lyrics (
     kind            TEXT NOT NULL DEFAULT 'approved',
     source          TEXT,
     synced_lyrics   TEXT,
-    plain_lyrics    TEXT
+    plain_lyrics    TEXT,
+    media_type      TEXT NOT NULL DEFAULT 'audio'
 );
 
 CREATE TABLE IF NOT EXISTS lyric_gaps (
@@ -94,10 +95,11 @@ CREATE TABLE IF NOT EXISTS track_analysis (
 );
 
 CREATE TABLE IF NOT EXISTS track_sync_offsets (
-    track_id    INTEGER PRIMARY KEY REFERENCES tracks(track_id) ON DELETE CASCADE,
+    track_id    INTEGER NOT NULL REFERENCES tracks(track_id) ON DELETE CASCADE,
     offset_s    REAL NOT NULL,
     updated_at  DOUBLE PRECISION NOT NULL,
-    mode        TEXT NOT NULL DEFAULT ''
+    mode        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (track_id, mode)
 );
 
 CREATE TABLE IF NOT EXISTS spotify_lookups (

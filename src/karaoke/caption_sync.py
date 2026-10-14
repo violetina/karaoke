@@ -305,3 +305,145 @@ def json3_to_enhanced_lrc(payload: str | dict, *, max_words: int = 10) -> str:
         )
         out.append(f"{stamp} {tagged}")
     return "\n".join(out)
+
+
+def fetch_video_caption_lyrics(url_or_video_id: str) -> Optional[Any]:
+    """Fetch YouTube captions for a video and convert to Lyrics."""
+    import subprocess
+    import urllib.request
+    from .lyrics import Lyrics, parse_lrc
+
+    url = url_or_video_id if url_or_video_id.startswith("http") else f"https://www.youtube.com/watch?v={url_or_video_id}"
+    try:
+        proc = subprocess.run(
+            ["yt-dlp", "--dump-json", "--skip-download", url],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        info = json.loads(proc.stdout)
+    except Exception as exc:
+        return None
+
+    avail = probe_captions(info)
+    if not avail.available or not avail.best or not avail.best.url:
+        return None
+
+    try:
+        req = urllib.request.Request(
+            avail.best.url,
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_payload = resp.read().decode("utf-8", errors="replace")
+
+        lrc_text = json3_to_enhanced_lrc(raw_payload) if avail.best.ext == "json3" else json3_to_lrc(raw_payload)
+        if not lrc_text:
+            return None
+
+        lines = parse_lrc(lrc_text)
+        plain = "\n".join(t for _, t in lines)
+        return Lyrics(
+            plain=plain,
+            synced_raw=lrc_text,
+            source="youtube_caption",
+            lines=lines,
+            duration=float(info.get("duration") or 0) or None,
+        )
+    except Exception:
+        return None
+
+
+def sync_audio_video_counterparts(
+    track_id: int, conn: Any, client: Optional[Any] = None
+) -> dict[str, Any]:
+    """Inspect and synchronize Audio vs Video lyrics and offsets for a track.
+
+    1. Checks for existing audio lyrics (LRCLIB, etc.) and video lyrics (YouTube captions).
+    2. If counterpart video is known/available, fetches captions and calculates time offset.
+    3. Persists both audio and video lyrics, and saves the video offset in `track_sync_offsets`.
+    """
+    from . import localcache
+    from .lyrics import align_audio_and_video_lyrics, shift_lrc, sync_video_from_audio, sync_audio_from_video
+
+    cur = conn.cursor()
+    cur.execute("SELECT track_id, artist, title, duration FROM tracks WHERE track_id = %s", (track_id,))
+    track = cur.fetchone()
+    if not track:
+        return {"status": "track_not_found"}
+
+    audio_lyrics = localcache.get_lyrics_by_track_id(track_id, conn, media_type="audio")
+    video_lyrics = localcache.get_lyrics_by_track_id(track_id, conn, media_type="video")
+
+    cur.execute(
+        """
+        SELECT url, kind FROM sources
+        WHERE track_id = %s AND (kind IN ('youtube', 'youtube_video') OR url LIKE '%%youtube.com/watch%%')
+        ORDER BY source_id DESC
+        """,
+        (track_id,),
+    )
+    video_sources = cur.fetchall()
+    video_url = video_sources[0]["url"] if video_sources else None
+
+    if not video_url and client:
+        try:
+            versions = client.get_audio_and_video_versions(track["artist"], track["title"])
+            if versions.get("video_video_id"):
+                video_url = f"https://www.youtube.com/watch?v={versions['video_video_id']}"
+                localcache.add_source(track_id, "youtube", video_url, conn=conn)
+        except Exception:
+            pass
+
+    if not video_lyrics and video_url:
+        cap_lyrics = fetch_video_caption_lyrics(video_url)
+        if cap_lyrics and cap_lyrics.has_synced:
+            localcache.put_cached_lyrics(
+                track["artist"], track["title"], cap_lyrics, media_type="video", conn=conn
+            )
+            video_lyrics = cap_lyrics
+
+    offset = None
+    if audio_lyrics and audio_lyrics.has_synced and video_lyrics and video_lyrics.has_synced:
+        offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, video_lyrics.synced_raw)
+        if offset is not None:
+            localcache.set_sync_offset(track_id, offset, conn, mode="video")
+
+    elif audio_lyrics and audio_lyrics.has_synced and not video_lyrics:
+        saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video")
+        if saved_video_offset is not None and saved_video_offset != 0.0:
+            derived_video_lrc = sync_video_from_audio(audio_lyrics.synced_raw, saved_video_offset)
+            from .lyrics import Lyrics, parse_lrc
+            d_lyrics = Lyrics(
+                plain=audio_lyrics.plain,
+                synced_raw=derived_video_lrc,
+                source="derived_from_audio",
+                lines=parse_lrc(derived_video_lrc),
+            )
+            localcache.put_cached_lyrics(
+                track["artist"], track["title"], d_lyrics, media_type="video", conn=conn
+            )
+            video_lyrics = d_lyrics
+            offset = saved_video_offset
+
+    elif video_lyrics and video_lyrics.has_synced and not audio_lyrics:
+        saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video") or 0.0
+        derived_audio_lrc = sync_audio_from_video(video_lyrics.synced_raw, saved_video_offset)
+        from .lyrics import Lyrics, parse_lrc
+        d_lyrics = Lyrics(
+            plain=video_lyrics.plain,
+            synced_raw=derived_audio_lrc,
+            source="derived_from_video",
+            lines=parse_lrc(derived_audio_lrc),
+        )
+        localcache.put_cached_lyrics(
+            track["artist"], track["title"], d_lyrics, media_type="audio", conn=conn
+        )
+        audio_lyrics = d_lyrics
+        offset = saved_video_offset
+
+    return {
+        "status": "ok",
+        "track_id": track_id,
+        "has_audio_lyrics": bool(audio_lyrics and audio_lyrics.has_synced),
+        "has_video_lyrics": bool(video_lyrics and video_lyrics.has_synced),
+        "offset": offset,
+    }

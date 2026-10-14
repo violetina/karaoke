@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karaoke"
-version = "0.9.1"
+version = "1.0.0"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,10 @@ dependencies = [
     "sentence-transformers>=3.0",
     "mutagen>=1.47",
     "faster-whisper>=1.2",
+    # Pin PyAV <19: faster-whisper 1.2.x calls av.open(metadata_errors=...),
+    # a kwarg PyAV 19 removed (upstream issue SYSTRAN/faster-whisper#1589).
+    # av<14 has no cp314 wheel, so 18.x is the working ceiling on Python 3.14.
+    "av>=18,<19",
     "requests>=2.32",
     "rich>=13.7",
     "beautifulsoup4",

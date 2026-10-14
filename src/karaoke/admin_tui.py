@@ -39,6 +39,7 @@ class RecordingBrowseModal(ModalScreen[None]):
         ("q", "dismiss", "Close"),
         ("P", "play_track", "Play in Browser"),
         ("A", "analyse_session", "Analyse Session"),
+        ("E", "export_playlist", "Export to Playlist"),
     ]
 
     def __init__(self, recording_id: int, *, app_ref: Any = None) -> None:
@@ -50,12 +51,13 @@ class RecordingBrowseModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="rec-dialog") as dialog:
             dialog.border_title = f"Recording #{self.recording_id}"
-            dialog.border_subtitle = "P: play in browser · A: analyse session · Esc / B / q: close"
+            dialog.border_subtitle = "P: play in browser · A: analyse session · E: export playlist · Esc / B / q: close"
             yield DataTable(id="rec-table", cursor_type="row")
             yield Static("", id="rec-hint")
             with Horizontal(id="rec-controls"):
                 yield Button("Play in Browser (P)", id="btn-modal-play", variant="primary")
                 yield Button("Analyse Session (A)", id="btn-modal-analyse", variant="warning")
+                yield Button("Export Playlist (E)", id="btn-modal-export", variant="success")
                 yield Button("Close (Esc)", id="btn-modal-close", variant="default")
 
     def on_mount(self) -> None:
@@ -135,6 +137,11 @@ class RecordingBrowseModal(ModalScreen[None]):
         if self.app_ref and hasattr(self.app_ref, "_process_selected_recording"):
             self.app_ref._process_selected_recording(self.recording_id)
 
+    def action_export_playlist(self) -> None:
+        self.dismiss()
+        if self.app_ref and hasattr(self.app_ref, "_export_recording_playlist_worker"):
+            self.app_ref._export_recording_playlist_worker(self.recording_id)
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "rec-table":
             try:
@@ -149,11 +156,121 @@ class RecordingBrowseModal(ModalScreen[None]):
             self.action_play_track()
         elif bid == "btn-modal-analyse":
             self.action_analyse_session()
+        elif bid == "btn-modal-export":
+            self.action_export_playlist()
         elif bid == "btn-modal-close":
             self.dismiss()
 
 
+
+class StagingQueueModal(ModalScreen):
+    """Browse and manage the pending Staging queue (unapproved lyrics candidates)."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("A", "approve_item", "Approve (Whitelist)"),
+        ("R", "reject_item", "Reject"),
+    ]
+
+    def __init__(self, *, app_ref: Any = None) -> None:
+        super().__init__()
+        self.app_ref = app_ref
+        self._items = {}
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="staging-dialog", classes="dialog-box"):
+            self.border_title = "Staging Queue"
+            yield Static("Pending unapproved lyrics candidates:", classes="dialog-subtitle")
+            yield DataTable(id="staging-table", cursor_type="row")
+            with Horizontal(id="staging-controls", classes="dialog-controls"):
+                yield Button("Approve (A)", id="btn-staging-approve", variant="success")
+                yield Button("Reject (R)", id="btn-staging-reject", variant="error")
+                yield Button("Close (Esc)", id="btn-staging-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#staging-table", DataTable)
+        table.add_columns("ID", "Artist", "Title", "Source", "Date")
+        self.refresh_staging()
+
+    def refresh_staging(self) -> None:
+        try:
+            table = self.query_one("#staging-table", DataTable)
+        except Exception:
+            return
+        
+        cursor_key = None
+        if table.cursor_coordinate:
+            try:
+                cursor_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            except Exception:
+                pass
+                
+        table.clear()
+        self._items = {}
+        try:
+            from . import staging
+            import datetime
+            items = staging.list_staged(status="pending", limit=100)
+            for item in items:
+                dt = datetime.datetime.fromtimestamp(item.updated_at).strftime("%Y-%m-%d %H:%M")
+                row_key = table.add_row(
+                    str(item.id),
+                    item.artist,
+                    item.title,
+                    item.source_kind,
+                    dt,
+                    key=str(item.id)
+                )
+                self._items[row_key] = item.id
+                
+            if cursor_key is not None and str(cursor_key.value) in [str(k.value) for k in self._items.keys()]:
+                idx = table.get_row_index(cursor_key)
+                table.move_cursor(row=idx)
+        except Exception as exc:
+            log.error("Failed to load staging queue: %s", exc)
+
+    def action_approve_item(self) -> None:
+        table = self.query_one("#staging-table", DataTable)
+        if table.cursor_coordinate:
+            try:
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+                item_id = self._items.get(row_key)
+                if item_id is not None:
+                    from . import staging
+                    staging.approve_staged(item_id)
+                    if self.app_ref:
+                        self.app_ref.notify(f"Whitelisted staged item #{item_id}")
+                    self.refresh_staging()
+            except Exception:
+                pass
+
+    def action_reject_item(self) -> None:
+        table = self.query_one("#staging-table", DataTable)
+        if table.cursor_coordinate:
+            try:
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+                item_id = self._items.get(row_key)
+                if item_id is not None:
+                    from . import staging
+                    staging.reject_staged(item_id)
+                    if self.app_ref:
+                        self.app_ref.notify(f"Rejected staged item #{item_id}")
+                    self.refresh_staging()
+            except Exception:
+                pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn-staging-approve":
+            self.action_approve_item()
+        elif bid == "btn-staging-reject":
+            self.action_reject_item()
+        elif bid == "btn-staging-close":
+            self.dismiss()
+
 class RadioSessionsModal(ModalScreen):
+
     """Browse radio listening sessions (with/without recordings) and trigger library import."""
 
     BINDINGS = [
@@ -351,7 +468,7 @@ class KaraokeAdminApp(App):
         ("q", "quit", "Quit"),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
-        Binding("escape", "handle_escape", "Unfocus / Quit", show=False, priority=True),
+        Binding("escape", "handle_escape", "Unfocus", show=False, priority=True),
         ("r", "refresh_all", "Refresh"),
         ("plus", "scale_up", "Worker +1"),
         ("minus", "scale_down", "Worker -1"),
@@ -362,6 +479,7 @@ class KaraokeAdminApp(App):
         ("w", "align_whisper", "Whisper Align"),
         ("s", "scan_folder", "Scan Folder"),
         ("e", "fetch_errors", "Error Logs"),
+        ("S", "show_staging_queue", "Staging Queue"),
         ("c", "refresh_clients", "Refresh Clients"),
         ("X", "shutdown_webui", "Stop Web UI"),
         ("K", "restart_kiosk", "Restart Kiosk Chrome"),
@@ -1116,17 +1234,16 @@ class KaraokeAdminApp(App):
             self.exit()
 
     def action_handle_escape(self) -> None:
-        """Escape: drop focus from an input first, otherwise quit.
+        """Escape: drop focus from an input.
 
         A bare `q` cannot quit while a text Input (Whisper track / lyrics /
         folder path) holds focus — it types the letter instead. Escape unfocuses
-        so `q` works again, and quits outright when nothing is focused.
+        so `q` works again.
         """
         focused = self.focused
         if focused is not None and isinstance(focused, Input):
             self.set_focus(None)
             return
-        self.exit()
 
     def refresh_recordings(self) -> None:
         """Fetch the last 15 recordings from SQLite and update recordings-table."""
@@ -1134,6 +1251,16 @@ class KaraokeAdminApp(App):
             table = self.query_one("#recordings-table", DataTable)
         except Exception:
             return
+
+        selected_rid = None
+        try:
+            if table.cursor_coordinate:
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+                selected_rid = getattr(self, "_recording_rows", {}).get(row_key)
+        except Exception:
+            pass
+        scroll_x = table.scroll_x
+        scroll_y = table.scroll_y
 
         try:
             from . import localcache
@@ -1200,6 +1327,19 @@ class KaraokeAdminApp(App):
                 f"[dim]{analysed_count} analysed[/dim]"
             )
             self.query_one("#recordings-summary", Static).update(summary)
+
+            try:
+                target_row = 0
+                if selected_rid is not None:
+                    for r_idx, (r_key, r_val) in enumerate(self._recording_rows.items()):
+                        if r_val == selected_rid:
+                            target_row = r_idx
+                            break
+                if table.row_count > 0:
+                    table.move_cursor(row=target_row)
+                table.scroll_to(x=scroll_x, y=scroll_y, animate=False)
+            except Exception:
+                pass
         except Exception as exc:
             log.debug("refresh_recordings failed", exc_info=True)
 
@@ -1263,6 +1403,10 @@ class KaraokeAdminApp(App):
         """`I`: Open the radio listening sessions manager & import modal."""
         self.push_screen(RadioSessionsModal(app_ref=self))
 
+    def action_show_staging_queue(self) -> None:
+        """`S`: Open the Staging queue modal."""
+        self.push_screen(StagingQueueModal(app_ref=self))
+
     def _import_radio_session_worker(self, session_id: int) -> None:
         """Import tracks and audio from a radio session in a background worker."""
         if not self._acquire_bg_lock():
@@ -1294,6 +1438,66 @@ class KaraokeAdminApp(App):
                 self._release_bg_lock()
         except Exception as exc:
             log.debug("Could not run radio import worker for session %s: %s", session_id, exc)
+            self._release_bg_lock()
+
+    def _export_recording_playlist_worker(self, recording_id: int) -> None:
+        """Export tracks from a recording session to a YouTube Music playlist."""
+        if not self._acquire_bg_lock():
+            return
+        label = f"Export playlist for recording #{recording_id}"
+        self._mark_task_started(label)
+        self.notify(f"Exporting recording #{recording_id} to YouTube Music...")
+
+        def _bg():
+            try:
+                from . import localcache
+                from .ytmusic_playlist import Candidate, build_or_sync_ytmusic_playlist
+                
+                with localcache.connect() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT m.artist, m.title
+                        FROM recording_marks m
+                        WHERE m.recording_id = %s AND m.ok = 1
+                        ORDER BY m.mark_id
+                    """, (recording_id,))
+                    rows = cur.fetchall()
+
+                # Deduplicate sequential tracks to avoid repeating marks
+                candidates = []
+                last_sig = None
+                for r in rows:
+                    sig = (r["artist"], r["title"])
+                    if sig != last_sig:
+                        candidates.append(Candidate(artist=r["artist"], title=r["title"]))
+                        last_sig = sig
+                
+                if not candidates:
+                    raise ValueError("No identified tracks found in this recording.")
+
+                res = build_or_sync_ytmusic_playlist(
+                    candidates=candidates,
+                    name=f"Karaoke Recording #{recording_id}",
+                    description=f"Exported recording #{recording_id} from Karaoke platform."
+                )
+
+                msg = f"Exported {res.resolved} tracks to YouTube Music playlist '{res.name}'"
+                self.call_from_thread(self.notify, msg)
+                self.call_from_thread(self._mark_task_finished, label, msg)
+            except Exception as exc:
+                msg = f"Export of recording #{recording_id} failed: {exc}"
+                self.call_from_thread(self.notify, msg, severity="error")
+                self.call_from_thread(self._mark_task_finished, label, msg, severity="error")
+            finally:
+                self.call_from_thread(self._release_bg_lock)
+
+        try:
+            if hasattr(self, "_thread_id"):
+                self.run_worker(_bg, thread=True)
+            else:
+                self._release_bg_lock()
+        except Exception as exc:
+            log.debug("Could not run playlist export worker for recording %s: %s", recording_id, exc)
             self._release_bg_lock()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:

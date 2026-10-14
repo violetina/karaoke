@@ -368,3 +368,53 @@ class YTMusicClient:
             self.add_playlist_items(target_id, new_vids)
 
         return target_id
+
+    def get_watch_counterpart(self, video_id: str) -> Optional[dict[str, Any]]:
+        """Fetch the audio/video counterpart for a given YouTube video ID.
+
+        YouTube Music links the audio track (ATV) and official music video (OMV)
+        via the watch endpoint. Returns a dict with both track types and videoIds,
+        or None if no counterpart is available.
+        """
+        try:
+            watch_info = self.api.get_watch_playlist(videoId=video_id)
+            tracks = watch_info.get("tracks", []) or []
+            if not tracks:
+                return None
+            t0 = tracks[0]
+            cp = t0.get("counterpart") or {}
+
+            return {
+                "current_video_id": video_id,
+                "current_video_type": t0.get("videoType"),
+                "current_title": t0.get("title"),
+                "current_length": t0.get("length"),
+                "counterpart_video_id": cp.get("videoId"),
+                "counterpart_video_type": cp.get("videoType"),
+                "counterpart_title": cp.get("title"),
+                "counterpart_length": cp.get("length"),
+            }
+        except Exception as exc:
+            log.debug("Failed to get watch counterpart for %s: %s", video_id, exc)
+            return None
+
+    def get_audio_and_video_versions(self, artist: str, title: str) -> dict[str, Optional[str]]:
+        """Find both the Audio (Song/ATV) and Video (Music Video/OMV) videoIds for a track.
+
+        Returns a dict: {'audio_video_id': str | None, 'video_video_id': str | None}
+        """
+        audio_vid = self.search_track(artist, title, filter_type="songs")
+        video_vid = None
+
+        if audio_vid:
+            cp_info = self.get_watch_counterpart(audio_vid)
+            if cp_info and cp_info.get("counterpart_video_id"):
+                video_vid = cp_info["counterpart_video_id"]
+
+        if not video_vid:
+            video_vid = self.search_track(artist, title, filter_type="videos")
+
+        return {
+            "audio_video_id": audio_vid,
+            "video_video_id": video_vid,
+        }

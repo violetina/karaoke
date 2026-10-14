@@ -47,6 +47,8 @@ class Detection:
     # take from the studio cut; without it that guard abstains on every pair.
     duration: Optional[float] = None
     playlist_id: str = ""
+    # 'audio' (studio/album cut/ATV) or 'video' (official music video/live/OMV)
+    media_type: str = "audio"
 
     @property
     def is_active(self) -> bool:
@@ -62,6 +64,17 @@ def is_youtube_url(url: str) -> bool:
     """True if the URL points at YouTube or YouTube Music."""
     u = (url or "").lower()
     return any(host in u for host in YOUTUBE_HOSTS)
+
+
+def is_video_media(title: str = "", url: str = "") -> bool:
+    """True if the track title or URL indicates an official music video or live video."""
+    t = (title or "").lower()
+    u = (url or "").lower()
+    if any(tag in t for tag in ("official video", "music video", "official music video", "live on", "live at", "live from", "full performance")):
+        return True
+    if "youtube.com/watch" in u and "music.youtube.com" not in u:
+        return True
+    return False
 
 
 def classify(meta: Optional[PlayerMetadata]) -> Detection:
@@ -80,16 +93,18 @@ def classify(meta: Optional[PlayerMetadata]) -> Detection:
     mpris = meta.mpris_name or meta.player
     ref = normalize_player_track(meta.artist, meta.title, meta.album, meta.url)
     pl_id = localcache.extract_playlist_id(meta.url) or ""
+    media_type = "video" if is_video_media(ref.title or meta.title, meta.url) else "audio"
+
     if player.startswith("spotify"):
         return Detection("spotify", meta.player, ref.artist, ref.title, meta.url,
                          mpris_name=mpris, album=ref.album,
-                         duration=meta.duration, playlist_id=pl_id)
+                         duration=meta.duration, playlist_id=pl_id, media_type=media_type)
     # A desktop or browser player is active: sync to its position. Trust a
     # YouTube URL over the (often stale) browser artist/title for display.
     if ref.title or ref.artist or meta.url:
         return Detection("scan", meta.player, ref.artist, ref.title, meta.url,
                          mpris_name=mpris, album=ref.album,
-                         duration=meta.duration, playlist_id=pl_id)
+                         duration=meta.duration, playlist_id=pl_id, media_type=media_type)
     return Detection(mode="browse")
 
 
@@ -215,18 +230,20 @@ def resolve_lyrics(
     """
     from . import localcache
 
+    mtype = getattr(det, "media_type", "audio")
+
     if det.url:
         found = localcache.find_track_by_url(det.url, conn)
         if found:
             track_id, artist, title = found
-            return artist, title, localcache.get_lyrics_by_track_id(track_id, conn)
+            return artist, title, localcache.get_lyrics_by_track_id(track_id, conn, media_type=mtype)
     if det.artist or det.title:
         track_id = localcache.find_track_id(det.artist, det.title, conn)
         if track_id is not None:
             return (
                 det.artist,
                 det.title,
-                localcache.get_lyrics_by_track_id(track_id, conn),
+                localcache.get_lyrics_by_track_id(track_id, conn, media_type=mtype),
             )
         # Browser/player titles often carry decorations the cached track lacks
         # (e.g. "(2019 Remastered)", "(Official Video)"). Retry with a cleaned
@@ -244,7 +261,7 @@ def resolve_lyrics(
                 return (
                     row["artist"] if row else det.artist,
                     row["title"] if row else cleaned,
-                    localcache.get_lyrics_by_track_id(track_id, conn),
+                    localcache.get_lyrics_by_track_id(track_id, conn, media_type=mtype),
                 )
         # Relaxed match before giving up. Radio mode (songrec) caches tracks
         # under the full credit and a decorated title — "James Brown & The
@@ -259,7 +276,7 @@ def resolve_lyrics(
             return (
                 row["artist"] if row else det.artist,
                 row["title"] if row else det.title,
-                localcache.get_lyrics_by_track_id(relaxed, conn),
+                localcache.get_lyrics_by_track_id(relaxed, conn, media_type=mtype),
             )
         # Fallback for empty artist (e.g. browser tab playing YouTube Music without artist tag)
         if not det.artist and det.title:
@@ -278,7 +295,7 @@ def resolve_lyrics(
                 return (
                     row["artist"],
                     row["title"],
-                    localcache.get_lyrics_by_track_id(row["track_id"], conn),
+                    localcache.get_lyrics_by_track_id(row["track_id"], conn, media_type=mtype),
                 )
     return det.artist, det.title, None
 

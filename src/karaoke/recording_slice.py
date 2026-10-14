@@ -34,7 +34,7 @@ audio — the same discipline as :mod:`karaoke.source_select` and
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import Iterable, Optional
 
@@ -200,17 +200,39 @@ def segment_from(group: list[Mark], *, end_wall: Optional[float] = None) -> Segm
     )
 
 
-def segments(marks: Iterable[Mark]) -> list[Segment]:
+def segments(marks: Iterable[Mark], conn=None) -> list[Segment]:
     """Derive the full track list for a recording."""
     runs = group_marks(marks)
     out: list[Segment] = []
+    
+    # Pre-fetch durations if conn is provided
+    durations = {}
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT artist, title, duration FROM tracks WHERE duration IS NOT NULL")
+            for r in cur.fetchall():
+                durations[(r["artist"], r["title"])] = r["duration"]
+        except Exception:
+            pass
+
     for i, run in enumerate(runs):
         # A track ends where the next one starts, when there is a next one.
         following = None
         if i + 1 < len(runs):
             nxt = segment_from(runs[i + 1])
             following = nxt.start_wall
-        out.append(segment_from(run, end_wall=following))
+            
+        seg = segment_from(run, end_wall=following)
+        
+        # Cap duration using the known track duration if available
+        known_duration = durations.get((seg.artist, seg.title))
+        if known_duration:
+            max_end = seg.start_wall + known_duration + 2.0
+            if max_end < seg.end_wall:
+                seg = replace(seg, end_wall=max_end)
+                
+        out.append(seg)
     return out
 
 
