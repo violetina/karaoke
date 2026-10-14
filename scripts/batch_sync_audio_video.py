@@ -69,7 +69,7 @@ def find_candidates(
         return [dict(r) for r in cur.fetchall()]
 
     query = """
-        SELECT t.track_id, t.artist, t.title, s.url
+        SELECT DISTINCT ON (t.track_id) t.track_id, t.artist, t.title, s.url
         FROM tracks t
         JOIN lyrics l ON l.track_id = t.track_id AND l.synced_lyrics IS NOT NULL AND length(l.synced_lyrics) > 0
         JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')

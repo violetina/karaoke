@@ -138,7 +138,7 @@ def find_candidate_tracks(limit: int = 100, only_on_disk: bool = False) -> list[
             candidates_on_disk.append(data)
         elif not only_on_disk:
             # Check for YouTube source
-            yt_url = next((u for k, u in data["sources"] if k in ("youtube", "youtube_music")), None)
+            yt_url = next((u for k, u in data["sources"] if k in ("youtube", "youtube_music", "youtube_video") or "youtube.com/watch" in u or "youtu.be/" in u), None)
             if yt_url:
                 data["yt_url"] = yt_url
                 data["audio_path"] = None
