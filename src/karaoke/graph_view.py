@@ -77,10 +77,17 @@ def build_similarity_graph(
             # Check if a track is actively playing on desktop player (Chromium, Spotify, MPRIS)
             try:
                 from . import playerctl
+                import re
                 active_player = playerctl.playing_player()
                 meta = playerctl.current_metadata(active_player) if active_player else playerctl.current_metadata()
                 if meta and (meta.artist or meta.title):
-                    found_tid = localcache.find_track_id_relaxed(meta.artist, meta.title, conn)
+                    found_tid = None
+                    if meta.title and any(sep in meta.title for sep in (" - ", " – ", " — ")):
+                        parts = re.split(r"\s*[-–—]\s*", meta.title, maxsplit=1)
+                        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                            found_tid = localcache.find_track_id_relaxed(parts[0].strip(), parts[1].strip(), conn)
+                    if not found_tid:
+                        found_tid = localcache.find_track_id_relaxed(meta.artist, meta.title, conn)
                     if not found_tid and meta.url:
                         u_res = localcache.find_track_by_url(meta.url, conn)
                         if u_res:
@@ -796,19 +803,24 @@ GRAPH_HTML = """<!DOCTYPE html>
       if (genre) fetchUrl += `&genre=${encodeURIComponent(genre)}`;
       if (mood) fetchUrl += `&mood=${encodeURIComponent(mood)}`;
 
-      const plId = customParams.playlist_id || document.getElementById('playlist-select').value;
-      if (plId) {
-        fetchUrl += `&playlist_id=${encodeURIComponent(plId)}`;
-      } else if (customParams.track_id) {
+      if (customParams.track_id) {
+        document.getElementById('playlist-select').value = '';
         fetchUrl += `&track_id=${customParams.track_id}`;
       } else if (customParams.query) {
+        document.getElementById('playlist-select').value = '';
         fetchUrl += `&query=${encodeURIComponent(customParams.query)}`;
+      } else if (customParams.playlist_id) {
+        document.getElementById('seed-input').value = '';
+        fetchUrl += `&playlist_id=${encodeURIComponent(customParams.playlist_id)}`;
       } else if (trackInput) {
+        document.getElementById('playlist-select').value = '';
         if (!isNaN(trackInput)) {
           fetchUrl += `&track_id=${trackInput}`;
         } else {
           fetchUrl += `&query=${encodeURIComponent(trackInput)}`;
         }
+      } else if (document.getElementById('playlist-select').value) {
+        fetchUrl += `&playlist_id=${encodeURIComponent(document.getElementById('playlist-select').value)}`;
       } else if (urlParams.get('track_id')) {
         fetchUrl += `&track_id=${urlParams.get('track_id')}`;
       } else if (urlParams.get('playlist_id')) {
@@ -835,16 +847,19 @@ GRAPH_HTML = """<!DOCTYPE html>
         const data = await resp.json();
         if (data.track_id) {
           document.getElementById('seed-input').value = data.track_id;
+          document.getElementById('playlist-select').value = '';
+          history.replaceState(null, '', `?track_id=${data.track_id}`);
           loadGraph({ track_id: data.track_id });
         } else if (data.artist || data.title) {
           const q = (data.artist && data.title) ? `${data.artist} - ${data.title}` : (data.title || data.artist);
           document.getElementById('seed-input').value = q;
+          document.getElementById('playlist-select').value = '';
           loadGraph({ query: q });
         } else {
           toast('No active track recognized in library');
         }
       } catch (e) {
-        toast('Could not fetch now playing');
+        toast('Could not fetch now playing: ' + e.message);
       }
     }
 
@@ -935,6 +950,16 @@ GRAPH_HTML = """<!DOCTYPE html>
         const node = evt.target;
         showNodeDetails(node.data('raw'));
       });
+
+      // Auto-select the seed node and show its details in the sidebar
+      const seedNode = data.nodes.find(n => n.is_seed) || data.nodes[0];
+      if (seedNode) {
+        showNodeDetails(seedNode);
+        const cyNode = cy.getElementById(String(seedNode.id));
+        if (cyNode) {
+          cyNode.select();
+        }
+      }
     }
 
     function showNodeDetails(track) {

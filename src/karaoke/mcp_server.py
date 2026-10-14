@@ -194,7 +194,15 @@ def get_now_playing() -> str:
         title = meta.title
         # Look up in library
         with localcache.connect() as conn:
-            tid = localcache.find_track_id_relaxed(artist, title, conn)
+            tid = None
+            # If title is in "Artist - Song" format (common when browser player reports uploader channel as artist)
+            if title and any(sep in title for sep in (" - ", " – ", " — ")):
+                import re
+                parts = re.split(r"\s*[-–—]\s*", title, maxsplit=1)
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                    tid = localcache.find_track_id_relaxed(parts[0].strip(), parts[1].strip(), conn)
+            if not tid:
+                tid = localcache.find_track_id_relaxed(artist, title, conn)
             if not tid and meta.url:
                 found = localcache.find_track_by_url(meta.url, conn)
                 if found:
