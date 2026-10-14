@@ -94,9 +94,46 @@ def backup_index(cli: Any, conn: Any, index_name: str, batch_size: int = 500) ->
     return total_backed_up
 
 
+def restore_index(cli: Any, conn: Any, index_name: str, batch_size: int = 500) -> int:
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM opensearch_snapshots WHERE index_name = %s", (index_name,))
+    row = cur.fetchone()
+    total_count = row["count"] if row else 0
+    if total_count == 0:
+        log.info("No snapshots found for index '%s', skipping", index_name)
+        return 0
+
+    log.info("Restoring OpenSearch index '%s' from %d snapshot records...", index_name, total_count)
+    cur.execute("SELECT doc_id, body FROM opensearch_snapshots WHERE index_name = %s", (index_name,))
+    
+    restored = 0
+    batch = []
+    from opensearchpy.helpers import bulk
+    while True:
+        rows = cur.fetchmany(batch_size)
+        if not rows:
+            break
+        for r in rows:
+            doc_id = r["doc_id"]
+            body = r["body"] if isinstance(r["body"], dict) else json.loads(r["body"])
+            batch.append({"_index": index_name, "_id": doc_id, "_source": body})
+            if len(batch) >= batch_size:
+                bulk(cli, batch)
+                restored += len(batch)
+                log.info("  Index '%s': %d / %d docs restored...", index_name, restored, total_count)
+                batch = []
+    if batch:
+        bulk(cli, batch)
+        restored += len(batch)
+
+    log.info("Completed index '%s': %d docs restored into OpenSearch.", index_name, restored)
+    return restored
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Backup OpenSearch indices to PostgreSQL opensearch_snapshots table.")
-    parser.add_argument("--indices", help="Comma-separated list of index names to back up", default=",".join(DEFAULT_INDICES))
+    parser = argparse.ArgumentParser(description="Backup or restore OpenSearch indices using PostgreSQL opensearch_snapshots table.")
+    parser.add_argument("--indices", help="Comma-separated list of index names to back up or restore", default=",".join(DEFAULT_INDICES))
+    parser.add_argument("--restore", action="store_true", help="Restore indices from PostgreSQL snapshots into OpenSearch")
     args = parser.parse_args()
 
     target_indices = [i.strip() for i in args.indices.split(",") if i.strip()]
@@ -107,10 +144,14 @@ def main() -> None:
     ensure_table(conn)
 
     grand_total = 0
-    for idx in target_indices:
-        grand_total += backup_index(cli, conn, idx)
-
-    print(f"\nSuccessfully backed up {grand_total} OpenSearch documents across {len(target_indices)} indices into PostgreSQL.")
+    if args.restore:
+        for idx in target_indices:
+            grand_total += restore_index(cli, conn, idx)
+        print(f"\nSuccessfully restored {grand_total} OpenSearch documents across {len(target_indices)} indices from PostgreSQL.")
+    else:
+        for idx in target_indices:
+            grand_total += backup_index(cli, conn, idx)
+        print(f"\nSuccessfully backed up {grand_total} OpenSearch documents across {len(target_indices)} indices into PostgreSQL.")
 
 
 if __name__ == "__main__":
