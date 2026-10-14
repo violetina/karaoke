@@ -118,6 +118,12 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
             return "no-source"
         res = upgrade_track(row, conn, delay=3.0, cookies_from_browser=cookies_from_browser)
         log.info("postprocess: timings upgrade for track %s -> %s", track_id, res.status)
+        if res.status == "upgraded":
+            try:
+                from .caption_sync import sync_audio_video_counterparts
+                sync_audio_video_counterparts(track_id, conn, cookies_from_browser=cookies_from_browser)
+            except Exception as exc:
+                log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
         if res.status == "no-captions":
             try:
                 conn.execute(
@@ -291,6 +297,11 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
              len(parse_lrc(lrc)), track_id,
              report.get("anchored", "?"), report.get("lines", "?"),
              "" if trustworthy else " — worth a listen")
+    try:
+        from .caption_sync import sync_audio_video_counterparts
+        sync_audio_video_counterparts(track_id, conn)
+    except Exception as exc:
+        log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
     return True
 
 

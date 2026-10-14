@@ -307,16 +307,23 @@ def json3_to_enhanced_lrc(payload: str | dict, *, max_words: int = 10) -> str:
     return "\n".join(out)
 
 
-def fetch_video_caption_lyrics(url_or_video_id: str) -> Optional[Any]:
+def fetch_video_caption_lyrics(
+    url_or_video_id: str,
+    cookies_from_browser: Optional[str] = None,
+) -> Optional[Any]:
     """Fetch YouTube captions for a video and convert to Lyrics."""
     import subprocess
     import urllib.request
     from .lyrics import Lyrics, parse_lrc
 
     url = url_or_video_id if url_or_video_id.startswith("http") else f"https://www.youtube.com/watch?v={url_or_video_id}"
+    cmd = ["yt-dlp", "--dump-json", "--skip-download"]
+    if cookies_from_browser:
+        cmd.extend(["--cookies-from-browser", cookies_from_browser])
+    cmd.append(url)
     try:
         proc = subprocess.run(
-            ["yt-dlp", "--dump-json", "--skip-download", url],
+            cmd,
             capture_output=True, text=True, timeout=30, check=True,
         )
         info = json.loads(proc.stdout)
@@ -353,7 +360,10 @@ def fetch_video_caption_lyrics(url_or_video_id: str) -> Optional[Any]:
 
 
 def sync_audio_video_counterparts(
-    track_id: int, conn: Any, client: Optional[Any] = None
+    track_id: int,
+    conn: Any,
+    client: Optional[Any] = None,
+    cookies_from_browser: Optional[str] = None,
 ) -> dict[str, Any]:
     """Inspect and synchronize Audio vs Video lyrics and offsets for a track.
 
@@ -376,7 +386,7 @@ def sync_audio_video_counterparts(
     cur.execute(
         """
         SELECT url, kind FROM sources
-        WHERE track_id = %s AND (kind IN ('youtube', 'youtube_video') OR url LIKE '%%youtube.com/watch%%')
+        WHERE track_id = %s AND (kind IN ('youtube', 'youtube_video', 'youtube_music') OR url LIKE '%%youtube.com/watch%%')
         ORDER BY source_id DESC
         """,
         (track_id,),
@@ -394,7 +404,7 @@ def sync_audio_video_counterparts(
             pass
 
     if not video_lyrics and video_url:
-        cap_lyrics = fetch_video_caption_lyrics(video_url)
+        cap_lyrics = fetch_video_caption_lyrics(video_url, cookies_from_browser=cookies_from_browser)
         if cap_lyrics and cap_lyrics.has_synced:
             localcache.put_cached_lyrics(
                 track["artist"], track["title"], cap_lyrics, media_type="video", conn=conn

@@ -40,7 +40,7 @@ K8S_NAMESPACE ?= karaoke
         mq-port-forward postprocess-worker celery-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
-        recordings recording-show recording-analyse
+        recordings recording-show recording-analyse batch-enrich-vectors batch-sync-av
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -251,6 +251,20 @@ yt-playlist-ingest: ## Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DR
 	  $(if $(NO_VECTORS),--no-vectors,) \
 	  $(if $(FORCE_HARMONY),--force-harmony,) \
 	  $(if $(LIMIT),--limit $(LIMIT),)
+
+batch-enrich-vectors: ## Batch enrich tracks with chords, CLAP vectors, feeling & AV sync: [LIMIT=N] [WORKERS=N] [SYNC_AV=1] [ONLY_DISK=1]
+	$(PYTHON) scripts/batch_enrich_chords_and_vectors.py \
+	  $(if $(LIMIT),--limit $(LIMIT),) \
+	  $(if $(WORKERS),--workers $(WORKERS),) \
+	  $(if $(SYNC_AV),--sync-av,) \
+	  $(if $(ONLY_DISK),--only-on-disk,)
+
+batch-sync-av: ## Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
+	$(PYTHON) scripts/batch_sync_audio_video.py \
+	  $(if $(LIMIT),--limit $(LIMIT),) \
+	  $(if $(WORKERS),--workers $(WORKERS),) \
+	  $(if $(FORCE),--force,) \
+	  $(if $(TRACK_ID),--track-id $(TRACK_ID),)
 
 RADIO_PLAYLIST_ID := PLA9C-EXX-pyg
 

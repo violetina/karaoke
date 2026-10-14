@@ -8,6 +8,8 @@ audio-check                  Report whether audio analysis is available (and fro
 auth-spotify                 Sign in to Spotify in the playback Chrome profile (persists for the kiosk window)
 auth-status                  Report Spotify token validity and playback-window state
 auth-youtube                 Sign in to YouTube / YT Music (Premium) in the playback Chrome profile
+batch-enrich-vectors         Batch enrich tracks with chords, CLAP vectors, feeling & AV sync: [LIMIT=N] [WORKERS=N] [SYNC_AV=1] [ONLY_DISK=1]
+batch-sync-av                Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
 browse                       Launch the interactive song browser TUI
 browse-log                   Follow TUI/open debug logs
 celery-flower                Run the Celery/Flower dashboard on http://127.0.0.1:5555

@@ -157,7 +157,11 @@ def _get_thread_conn():
     return _thread_local.conn
 
 
-def process_one_track(item: dict[str, Any], skip_download: bool = False) -> dict[str, Any]:
+def process_one_track(
+    item: dict[str, Any],
+    skip_download: bool = False,
+    sync_av: bool = False,
+) -> dict[str, Any]:
     """Execute complete enrichment pipeline for a single track."""
     track_id = item["track_id"]
     artist = item["artist"]
@@ -268,6 +272,19 @@ def process_one_track(item: dict[str, Any], skip_download: bool = False) -> dict
     except Exception as exc:
         log.debug("Vector index error for %s: %s", track_id, exc)
 
+    # 5. Audio vs Video Caption Synchronization & Offset Alignment
+    if sync_av:
+        try:
+            from karaoke.caption_sync import sync_audio_video_counterparts
+            av_res = sync_audio_video_counterparts(track_id, conn)
+            if av_res.get("offset") is not None:
+                status["av_sync"] = True
+                status["av_offset"] = av_res["offset"]
+            elif av_res.get("has_video_lyrics"):
+                status["av_sync"] = True
+        except Exception as exc:
+            log.debug("AV sync error for %s: %s", track_id, exc)
+
     status["elapsed_s"] = time.time() - t0
     return status
 
@@ -276,10 +293,11 @@ def process_batch(
     candidates: list[dict[str, Any]],
     workers: int = 2,
     skip_download: bool = False,
+    sync_av: bool = False,
 ) -> dict[str, int]:
     print(f"\n{'='*70}")
     print(f"  BATCH ENRICHMENT: CHORDS, FEELING & CLAP VECTORS")
-    print(f"  Candidates: {len(candidates)} | Workers: {workers}")
+    print(f"  Candidates: {len(candidates)} | Workers: {workers} | AV Sync: {sync_av}")
     print(f"{'='*70}\n")
 
     stats = {
@@ -287,6 +305,7 @@ def process_batch(
         "harmony_done": 0,
         "clap_done": 0,
         "vector_done": 0,
+        "av_done": 0,
         "errors": 0,
     }
 
@@ -306,6 +325,10 @@ def process_batch(
         if res["vector_doc"]:
             tags.append("Feeling/Doc ✓")
             stats["vector_done"] += 1
+        if res.get("av_sync"):
+            off_str = f"{res.get('av_offset'):+.1f}s" if res.get('av_offset') is not None else "video"
+            tags.append(f"AV({off_str}) ✓")
+            stats["av_done"] += 1
 
         label = f"{res['artist']} - {res['title']}"
         if len(label) > 42:
@@ -315,15 +338,15 @@ def process_batch(
         print(f"[{completed:3d}/{len(candidates)}] (ID {res['track_id']:<5}) {label:<42} → {tag_str} ({res['elapsed_s']:.1f}s)", flush=True)
 
         if completed % 25 == 0:
-            print(f"\n--- Progress [{completed}/{len(candidates)}]: {stats['harmony_done']} Chords, {stats['clap_done']} CLAP, {stats['vector_done']} Docs indexed ---\n", flush=True)
+            print(f"\n--- Progress [{completed}/{len(candidates)}]: {stats['harmony_done']} Chords, {stats['clap_done']} CLAP, {stats['vector_done']} Docs, {stats['av_done']} AV Sync ---\n", flush=True)
 
     if workers <= 1:
         for item in candidates:
-            res = process_one_track(item, skip_download=skip_download)
+            res = process_one_track(item, skip_download=skip_download, sync_av=sync_av)
             handle_result(res)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(process_one_track, item, skip_download) for item in candidates]
+            futures = [executor.submit(process_one_track, item, skip_download, sync_av) for item in candidates]
             for fut in as_completed(futures):
                 res = fut.result()
                 with print_lock:
@@ -336,6 +359,7 @@ def process_batch(
     print(f"  Chords & Harmony     : {stats['harmony_done']}")
     print(f"  CLAP Audio Vectors   : {stats['clap_done']}")
     print(f"  Feeling / Track Docs : {stats['vector_done']}")
+    print(f"  Audio vs Video Sync  : {stats['av_done']}")
     print(f"{'='*70}\n")
     return stats
 
@@ -346,6 +370,7 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=2, help="Number of concurrent workers (default: 2)")
     ap.add_argument("--only-on-disk", action="store_true", help="Only process tracks with audio files directly on disk")
     ap.add_argument("--skip-download", action="store_true", help="Skip downloading remote audio")
+    ap.add_argument("--sync-av", action="store_true", help="Also synchronize audio vs video lyrics & offsets")
     args = ap.parse_args()
 
     candidates = find_candidate_tracks(limit=args.limit, only_on_disk=args.only_on_disk)
@@ -354,7 +379,7 @@ def main() -> int:
         return 0
 
     print(f"Found {len(candidates)} track(s) ready for enrichment.")
-    process_batch(candidates, workers=args.workers, skip_download=args.skip_download)
+    process_batch(candidates, workers=args.workers, skip_download=args.skip_download, sync_av=args.sync_av)
     return 0
 
 
