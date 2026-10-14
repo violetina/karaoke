@@ -74,6 +74,23 @@ def build_similarity_graph(
             seed_ids = [track_id]
 
         if not seed_ids:
+            # Check if a track is actively playing on desktop player (Chromium, Spotify, MPRIS)
+            try:
+                from . import playerctl
+                active_player = playerctl.playing_player()
+                meta = playerctl.current_metadata(active_player) if active_player else playerctl.current_metadata()
+                if meta and (meta.artist or meta.title):
+                    found_tid = localcache.find_track_id_relaxed(meta.artist, meta.title, conn)
+                    if not found_tid and meta.url:
+                        u_res = localcache.find_track_by_url(meta.url, conn)
+                        if u_res:
+                            found_tid = u_res[0]
+                    if found_tid:
+                        seed_ids = [found_tid]
+            except Exception as exc:
+                log.debug("No active player seed found: %s", exc)
+
+        if not seed_ids:
             cur = conn.cursor()
             params: list[Any] = []
             where_clauses = ["a.bpm IS NOT NULL"]
@@ -784,6 +801,8 @@ GRAPH_HTML = """<!DOCTYPE html>
         fetchUrl += `&playlist_id=${encodeURIComponent(plId)}`;
       } else if (customParams.track_id) {
         fetchUrl += `&track_id=${customParams.track_id}`;
+      } else if (customParams.query) {
+        fetchUrl += `&query=${encodeURIComponent(customParams.query)}`;
       } else if (trackInput) {
         if (!isNaN(trackInput)) {
           fetchUrl += `&track_id=${trackInput}`;
@@ -817,6 +836,10 @@ GRAPH_HTML = """<!DOCTYPE html>
         if (data.track_id) {
           document.getElementById('seed-input').value = data.track_id;
           loadGraph({ track_id: data.track_id });
+        } else if (data.artist || data.title) {
+          const q = (data.artist && data.title) ? `${data.artist} - ${data.title}` : (data.title || data.artist);
+          document.getElementById('seed-input').value = q;
+          loadGraph({ query: q });
         } else {
           toast('No active track recognized in library');
         }
@@ -1026,17 +1049,24 @@ async def api_graph_data(request: Request) -> JSONResponse:
     if track_id_str and track_id_str.isdigit():
         track_id = int(track_id_str)
     elif query:
-        # Search relaxed
+        # Search relaxed: handle "Artist - Title", "Title (Official Audio)", etc.
         with localcache.connect() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT track_id FROM tracks
-                WHERE artist ILIKE %s OR title ILIKE %s OR (artist || ' ' || title) ILIKE %s
-                ORDER BY play_count DESC LIMIT 1
-            """, (f"%{query}%", f"%{query}%", f"%{query}%"))
-            row = cur.fetchone()
-            if row:
-                track_id = row["track_id"]
+            import re
+            if any(sep in query for sep in (" - ", " – ", " — ")):
+                parts = re.split(r"\s*[-–—]\s*", query, maxsplit=1)
+                track_id = localcache.find_track_id_relaxed(parts[0].strip(), parts[1].strip(), conn)
+            if track_id is None:
+                track_id = localcache.find_track_id_relaxed("", query, conn)
+            if track_id is None:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT track_id FROM tracks
+                    WHERE artist ILIKE %s OR title ILIKE %s OR (artist || ' ' || title) ILIKE %s
+                    ORDER BY play_count DESC LIMIT 1
+                """, (f"%{query}%", f"%{query}%", f"%{query}%"))
+                row = cur.fetchone()
+                if row:
+                    track_id = row["track_id"]
 
     data = build_similarity_graph(
         track_id=track_id,

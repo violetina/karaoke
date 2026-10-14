@@ -231,3 +231,17 @@ def test_normalize_gap_metadata_drops_redundant_artist_prefix():
     )
     # A title that merely starts with a similar word is left alone.
     assert n("Ween", "Weenie Roast") == ("Ween", "Weenie Roast")
+
+
+def test_find_track_id_relaxed_youtube_decorations_and_artist_prefix(c):
+    localcache.add_track_and_lyrics("Madness", "Going to the Top", Lyrics(plain="lyrics", source="manual"), conn=c)
+    tid = localcache.find_track_id("Madness", "Going to the Top", c)
+    assert tid is not None
+
+    # Should match YouTube decorated title with redundant artist and (Official Audio)
+    relaxed_id = localcache.find_track_id_relaxed("Madness", "Madness - Going To The Top (Official Audio)", c)
+    assert relaxed_id == tid
+
+    # Should match even if artist is empty when title starts with artist prefix
+    relaxed_id2 = localcache.find_track_id_relaxed("", "Madness - Going To The Top (Official Audio)", c)
+    assert relaxed_id2 == tid

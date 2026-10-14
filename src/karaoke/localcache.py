@@ -1391,19 +1391,31 @@ def _artist_key(artist: str) -> str:
 
 
 def _title_keys(title: str) -> set[str]:
-    """Match keys for a title, with and without trailing bracketed suffixes.
+    """Match keys for a title, with and without trailing bracketed suffixes or page decorations.
 
     Editions arrive in every bracket style — "[2020 Remaster]", "(Live)",
-    "- Remastered 2011" — and only some are covered by clean_title's suffix
-    list, so the bare stem is compared too.
+    "- Remastered 2011", "(Official Audio)" — and only some are covered by
+    clean_title's suffix list, so the bare stem and clean_page_title are compared too.
     """
-    from .lyrics import clean_title
+    from .lyrics import clean_title, clean_page_title
 
-    keys = {_match_key(title), _match_key(clean_title(title))}
+    cleaned_page = clean_page_title(title or "")
+    keys = {_match_key(title), _match_key(clean_title(title)), _match_key(cleaned_page)}
     stem = re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
     while stem and stem != title:
         keys.add(_match_key(stem))
         title, stem = stem, re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", stem).strip()
+
+    # Also handle "Artist - Song" formats where song title follows the separator
+    for raw in (title, cleaned_page):
+        if raw and any(sep in raw for sep in (" - ", " – ", " — ")):
+            parts = re.split(r"\s*[-–—]\s*", raw, maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
+                sub = parts[1].strip()
+                keys.add(_match_key(sub))
+                keys.add(_match_key(clean_title(sub)))
+                keys.add(_match_key(clean_page_title(sub)))
+
     return {k for k in keys if k}
 
 
@@ -1413,9 +1425,8 @@ def find_track_id_relaxed(artist: str, title: str,
 
     Sources name the same song differently: songrec stores the full credit
     ("James Brown & The Famous Flames") and a decorated title ("[2020
-    Remaster]") where a browser reports "James Brown" and a plainer title. An
-    exact lookup misses those, so a track the radio already cached looks absent
-    to the TUI and its lyrics never appear.
+    Remaster]") where a browser reports "James Brown" and a plainer title,
+    or YouTube MPRIS reports "Artist - Title (Official Audio)".
 
     Tries the exact match, then the cleaned title, then a punctuation- and
     case-insensitive comparison in which the artist need only be a prefix of
@@ -1425,27 +1436,62 @@ def find_track_id_relaxed(artist: str, title: str,
     if exact is not None:
         return exact
 
-    from .lyrics import clean_title
+    from .lyrics import clean_title, clean_page_title, clean_artist
 
-    cleaned = clean_title(title)
-    if cleaned and cleaned != title:
-        got = find_track_id(artist, cleaned, conn)
-        if got is not None:
-            return got
+    c_artist = clean_artist(artist or "")
+    c_page = clean_page_title(title or "")
 
-    want_titles = _title_keys(title) | _title_keys(cleaned or title)
-    want_artist = _artist_key(artist)
+    # If title has an artist prefix ("Madness - Going To The Top"), strip it
+    stripped = title or ""
+    for a in (artist, c_artist):
+        if a:
+            stripped = re.sub(rf"^\s*{re.escape(a)}\s*[-–—:]\s*", "", stripped, flags=re.I).strip()
+    if any(sep in stripped for sep in (" - ", " – ", " — ")):
+        parts = re.split(r"\s*[-–—]\s*", stripped, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            if not c_artist and not artist:
+                c_artist = clean_artist(parts[0].strip())
+            stripped = parts[1].strip()
+
+    cleaned = clean_title(stripped)
+    cleaned_page = clean_page_title(stripped)
+
+    # Check exact with cleaned combinations
+    for cand_art in (artist, c_artist):
+        for cand_title in (stripped, cleaned, cleaned_page, c_page):
+            if cand_art and cand_title:
+                got = find_track_id(cand_art, cand_title, conn)
+                if got is not None:
+                    return got
+
+    want_titles = set()
+    for t in (title, c_page, stripped, cleaned, cleaned_page):
+        if t:
+            want_titles |= _title_keys(t)
+
+    want_artist = _artist_key(c_artist or artist)
     if not want_titles:
         return None
 
-    # Prefilter in SQL on a word of the title so this stays cheap on a large
-    # library rather than normalising every row on every 1.5s poll.
-    words = re.sub(r"[^a-z0-9]+", " ", (cleaned or title).casefold()).split()
-    lead = max(words, key=len) if words else ""
+    # Filter out generic stop-words from SQL prefilter word selection
+    STOP_WORDS = {
+        "official", "audio", "video", "lyrics", "lyric", "remaster", "remastered",
+        "version", "live", "edit", "mix", "feat", "featuring", "ft", "the", "a", "an",
+        "of", "in", "and", "or", "to", "for", "with", "by", "from", "on", "at", "hd", "4k"
+    }
+
+    words = re.sub(r"[^a-z0-9]+", " ", (cleaned or stripped or title).casefold()).split()
+    cands = [w for w in words if w not in STOP_WORDS and len(w) > 2]
+    lead = max(cands, key=len) if cands else (max(words, key=len) if words else "")
+
+    artist_words = re.sub(r"[^a-z0-9]+", " ", (c_artist or artist).casefold()).split()
+    a_cands = [w for w in artist_words if w not in STOP_WORDS and len(w) > 2]
+    a_lead = max(a_cands, key=len) if a_cands else ""
+
     rows = conn.execute(
-        "SELECT track_id, artist, title FROM tracks WHERE lower(title) LIKE %s"
-        " ORDER BY track_id DESC LIMIT 200",
-        (f"%{lead}%" if lead else "%",),
+        "SELECT track_id, artist, title FROM tracks WHERE (lower(title) LIKE %s OR (lower(artist) LIKE %s AND %s != ''))"
+        " ORDER BY track_id DESC LIMIT 250",
+        (f"%{lead}%" if lead else "%", f"%{a_lead}%", a_lead),
     ).fetchall()
 
     for row in rows:
