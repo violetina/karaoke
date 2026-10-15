@@ -592,6 +592,8 @@ GRAPH_HTML = """<!DOCTYPE html>
         </select>
         <button onclick="loadGraph()">Explore</button>
         <button class="btn-secondary" onclick="loadNowPlaying()">Now Playing</button>
+        <button class="btn-secondary" id="songrec-btn" onclick="findWithSongrec()"
+                title="Identify what is audible (radio mode, the output, or the mic) and locate it">🎙 Find with songrec</button>
       </div>
     </div>
     <div class="filter-bar">
@@ -863,6 +865,69 @@ GRAPH_HTML = """<!DOCTYPE html>
       }
     }
 
+    function seedGraph(trackId) {
+      document.getElementById('seed-input').value = trackId;
+      document.getElementById('playlist-select').value = '';
+      history.replaceState(null, '', `?track_id=${trackId}`);
+      loadGraph({ track_id: trackId });
+    }
+
+    let songrecPoll = null;
+
+    async function findWithSongrec() {
+      const btn = document.getElementById('songrec-btn');
+      btn.disabled = true;
+      btn.textContent = '🎙 Listening…';
+      toast('Listening with songrec (up to ~20s)…');
+      try {
+        const resp = await fetch('/api/identify', { method: 'POST' });
+        const data = await resp.json();
+        const via = { radio: 'radio mode', 'tui-radio': 'radio mode', mic: 'the mic', output: 'the output' }[data.via] || data.via || '';
+        const song = data.title ? `${data.artist} — ${data.title}` : '';
+        if (data.status === 'found') {
+          toast(`Found ${song} via ${via}`);
+          seedGraph(data.track_id);
+        } else if (data.status === 'queued') {
+          toast(`${song} needs ${data.pending.length ? data.pending.join(', ') : 'adding'}; processing… it will be placed when ready`);
+          if (data.track_id) seedGraph(data.track_id);   // show what exists meanwhile
+          waitUntilPlaceable(data.artist, data.title, data.track_id);
+        } else {
+          toast(data.message || `No match (${data.status})`);
+        }
+      } catch (e) {
+        toast('songrec failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🎙 Find with songrec';
+      }
+    }
+
+    // Post-processing downloads and analyses the song, which takes minutes.
+    // Poll gently and re-seed once its chords and vectors exist.
+    function waitUntilPlaceable(artist, title, knownId) {
+      if (songrecPoll) clearInterval(songrecPoll);
+      const started = Date.now();
+      songrecPoll = setInterval(async () => {
+        if (Date.now() - started > 15 * 60 * 1000) {
+          clearInterval(songrecPoll);
+          toast(`${title} is still processing; try Find again later`);
+          return;
+        }
+        try {
+          const q = new URLSearchParams({ artist, title });
+          const st = await (await fetch(`/api/identify/status?${q}`)).json();
+          if (st.ready) {
+            clearInterval(songrecPoll);
+            toast(`${title} is processed — placing it`);
+            seedGraph(st.track_id);
+          } else if (st.track_id && !knownId) {
+            knownId = st.track_id;
+            seedGraph(st.track_id);                     // added; analysis still running
+          }
+        } catch (e) { /* transient; keep polling */ }
+      }, 10000);
+    }
+
     function renderCytoscape(data) {
       const elements = [];
       data.nodes.forEach(n => {
@@ -1107,6 +1172,44 @@ async def api_graph_data(request: Request) -> JSONResponse:
         mood_filter=mood_filter,
     )
     return JSONResponse(data)
+
+
+async def api_identify(request: Request) -> JSONResponse:
+    """Identify the audible song with songrec (or radio mode) and locate it.
+
+    songrec listens for up to ~20s, so it runs off the event loop.
+    """
+    import anyio
+
+    from . import song_finder
+
+    source = request.query_params.get("source", "auto")
+    if source not in ("auto", "mic", "output"):
+        return JSONResponse({"status": "error", "message": f"unknown source {source!r}"},
+                            status_code=400)
+    try:
+        result = await anyio.to_thread.run_sync(song_finder.identify, source)
+    except song_finder.Busy as exc:
+        return JSONResponse({"status": "busy", "message": str(exc)}, status_code=409)
+    except Exception as exc:
+        log.warning("api_identify failed: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+    return JSONResponse(result)
+
+
+async def api_identify_status(request: Request) -> JSONResponse:
+    """Whether a song queued by api_identify can be placed in the graph yet."""
+    import anyio
+
+    from . import song_finder
+
+    artist = request.query_params.get("artist", "")
+    title = request.query_params.get("title", "")
+    if not title:
+        return JSONResponse({"status": "error", "message": "title is required"},
+                            status_code=400)
+    result = await anyio.to_thread.run_sync(song_finder.status, artist, title)
+    return JSONResponse(result)
 
 
 async def api_play(request: Request) -> JSONResponse:
