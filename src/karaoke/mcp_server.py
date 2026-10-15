@@ -180,14 +180,32 @@ def get_now_playing() -> str:
 
     Returns track title, artist, album, player, position, and detected key/BPM/sentiment if known in library.
     """
+    active_player = None
     try:
         active_player = playerctl.playing_player()
         meta = playerctl.current_metadata(active_player) if active_player else None
-        if not meta or not (meta.artist or meta.title):
+    except Exception:
+        meta = None
+    if not meta or not (meta.artist or meta.title):
+        # Nothing playing on the desktop: radio mode may know what the room is
+        # hearing. Checked before the paused-player fallback below, which
+        # would otherwise report a stale browser tab over the live radio.
+        from types import SimpleNamespace
+
+        from . import live_state
+
+        live = live_state.current()
+        if live:
+            active_player = live["source"]
+            meta = SimpleNamespace(artist=live.get("artist") or "",
+                                   title=live.get("title") or "", album="",
+                                   url="", duration=None, player=live["source"])
+    if not meta or not (meta.artist or meta.title):
+        try:
             # Fallback to playerctl default or recent play
             meta = playerctl.current_metadata()
-    except Exception as exc:
-        meta = None
+        except Exception:
+            meta = None
 
     if meta and (meta.artist or meta.title):
         artist = meta.artist
@@ -1033,6 +1051,8 @@ def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
         Route("/api/graph_data", endpoint=graph_view.api_graph_data),
         Route("/api/playlists", endpoint=graph_view.api_playlists),
         Route("/api/play", endpoint=graph_view.api_play, methods=["GET", "POST"]),
+        Route("/api/identify", endpoint=graph_view.api_identify, methods=["POST"]),
+        Route("/api/identify/status", endpoint=graph_view.api_identify_status),
         Route("/api/now_playing", endpoint=lambda r: JSONResponse(json.loads(get_now_playing()))),
         Route("/sse", endpoint=combined),
         Route("/sse/", endpoint=combined),
