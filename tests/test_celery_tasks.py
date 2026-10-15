@@ -613,3 +613,10 @@ def test_a_full_run_downloads_audio_for_clap_alone(monkeypatch, tmp_path):
     ctx.full = False                      # playback-driven: never downloads for CLAP
     out = PostprocessContext.from_dict(tasks.download_audio.run(ctx.to_dict()))
     assert out.audio_path is None
+
+
+def test_the_clap_queue_does_not_share_the_postprocess_routing_key():
+    queues = {q.name: q for q in celery_app.app.conf.task_queues}
+    clap, main = queues[celery_app.CLAP_QUEUE], queues[celery_app.POSTPROCESS_QUEUE]
+    assert clap.routing_key == celery_app.CLAP_QUEUE
+    assert clap.routing_key != main.routing_key
