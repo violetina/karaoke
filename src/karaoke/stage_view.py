@@ -17,6 +17,38 @@ from .logger import log
 from .lyrics import parse_enhanced_lrc
 
 
+#: track_id -> (checked_at, timeline or None). The stream ticks ten times a
+#: second; a timeline changes only when one is first stored.
+_chord_cache: dict[int, tuple[float, Optional[dict[str, Any]]]] = {}
+_CHORD_RECHECK_S = 5.0
+
+
+def _chord_state(track_id: Optional[int], position_s: float,
+                 duration: float) -> dict[str, Any]:
+    """The chord under the playhead, filling the track's timeline if missing."""
+    from . import chord_timeline, localcache
+
+    empty = {"chord": None, "chord_roman": None, "next_chord": None,
+             "next_chord_in": None, "harmony_style": None}
+    if track_id is None:
+        return empty
+    checked_at, timeline = _chord_cache.get(track_id, (0.0, None))
+    if timeline is None and time.time() - checked_at > _CHORD_RECHECK_S:
+        try:
+            with localcache.connect() as conn:
+                timeline = chord_timeline.load(track_id, conn)
+        except Exception as exc:
+            log.debug("stage_view: chord timeline lookup failed: %s", exc)
+        _chord_cache[track_id] = (time.time(), timeline)
+        if timeline is None:
+            chord_timeline.fill_in_background(track_id)
+    if not timeline or not chord_timeline.matches_playback(timeline, duration):
+        return empty
+    out = chord_timeline.at(timeline, position_s)
+    out["harmony_style"] = (timeline.get("harmony") or {}).get("style")
+    return out
+
+
 def get_stage_state() -> dict[str, Any]:
     """Gather live playback, lyrics, queue, and audio analysis state for the stage display."""
     from . import localcache, player_open, playerctl
@@ -221,6 +253,7 @@ def get_stage_state() -> dict[str, Any]:
         "genre": genre,
         "chord_cpm": chord_cpm,
         "fifth_ratio": fifth_ratio,
+        **_chord_state(track_id, position_s, duration),
         "active_line_index": active_line_idx,
         "next_line_in": next_line_in,
         "lines": lines,
@@ -1123,6 +1156,48 @@ def render_mood_html() -> str:
       display: block;
     }
 
+    /* Chord under the playhead, laid over the image. HTML rather than drawn
+       into the canvas: the canvas is 64x64 scaled up, so text drawn there
+       would be as blocky as the pixels. */
+    #chord-overlay {
+      position: absolute;
+      left: 22px;
+      bottom: 22px;
+      padding: 8px 14px 10px;
+      background: rgba(5, 8, 14, 0.62);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      backdrop-filter: blur(6px);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.4s ease;
+    }
+    #chord-overlay.visible { opacity: 1; }
+    #chord-name {
+      font-family: 'Outfit', sans-serif;
+      font-size: clamp(28px, 7vmin, 64px);
+      font-weight: 700;
+      line-height: 1;
+      color: #fff;
+      text-shadow: 0 0 18px rgba(0, 242, 254, 0.55);
+    }
+    #chord-name.changed { animation: chord-pop 0.35s ease-out; }
+    @keyframes chord-pop {
+      from { transform: scale(1.12); color: var(--accent); }
+      to { transform: scale(1); color: #fff; }
+    }
+    #chord-roman {
+      margin-top: 4px;
+      font-size: clamp(12px, 2.2vmin, 18px);
+      color: var(--accent-gold);
+      letter-spacing: 0.06em;
+    }
+    #chord-next {
+      margin-top: 2px;
+      font-size: clamp(10px, 1.7vmin, 14px);
+      color: rgba(255, 255, 255, 0.6);
+    }
+
     /* Top HUD / Mic control pill */
     #hud-top {
       position: absolute;
@@ -1253,6 +1328,11 @@ def render_mood_html() -> str:
   <div id="stage-container">
     <div id="canvas-wrap">
       <canvas id="mood-canvas" width="64" height="64"></canvas>
+      <div id="chord-overlay" aria-live="off">
+        <div id="chord-name"></div>
+        <div id="chord-roman"></div>
+        <div id="chord-next"></div>
+      </div>
     </div>
 
     <div id="info-box">
@@ -1500,6 +1580,27 @@ def render_mood_html() -> str:
       img.src = `/api/mood-cover-image?mood=${encodeURIComponent(mood)}&art_url=${encodeURIComponent(artUrl || '')}&t=${currentLoadSeed}`;
     }
 
+    const chordOverlay = document.getElementById('chord-overlay');
+    const chordName = document.getElementById('chord-name');
+    const chordRoman = document.getElementById('chord-roman');
+    const chordNext = document.getElementById('chord-next');
+
+    function renderChord(data) {
+      const playing = data.status === 'Playing';
+      const chord = playing ? data.chord : null;
+      chordOverlay.classList.toggle('visible', Boolean(chord));
+      if (!chord) return;
+      if (chordName.textContent !== chord) {
+        chordName.textContent = chord;
+        chordName.classList.remove('changed');
+        void chordName.offsetWidth;            // restart the pop animation
+        chordName.classList.add('changed');
+      }
+      chordRoman.textContent = data.chord_roman || '';
+      chordNext.textContent = (data.next_chord && data.next_chord_in !== null)
+        ? `next ${data.next_chord} · ${data.next_chord_in.toFixed(1)}s` : '';
+    }
+
     // Server-Sent Events stream from Karaoke stage
     const evtSource = new EventSource('/api/stage/stream');
     evtSource.onmessage = (event) => {
@@ -1507,6 +1608,7 @@ def render_mood_html() -> str:
         const data = JSON.parse(event.data);
         currentState = data;
         lastEventTime = performance.now();
+        renderChord(data);
 
         if (data.status !== 'Playing') {
           sentimentDiv.textContent = 'PAUSED';

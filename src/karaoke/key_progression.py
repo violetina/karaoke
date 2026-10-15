@@ -455,12 +455,28 @@ def build_doc(*, track_id: int, prog: Progression, artist: str = "",
     real = [t for t in prog.transitions if t.kind not in NON_MODULATION]
     doc_chords = {}
     if chords is not None:
+        from . import harmony
+        from .chords import CHORDS_VERSION
+
         doc_chords = {
             "distinct_chords": chords.distinct_chords,
             "fifth_ratio": round(chords.fifth_ratio, 4),
             "chord_changes_per_minute": round(chords.changes_per_minute, 2),
             "chord_motion": chords.motion,
+            "chords_version": CHORDS_VERSION,
         }
+        key = harmony.key_from_text(getattr(prog.home_key, "name", "") or "", chords)
+        summary = harmony.summarise(chords, key)
+        if summary is not None:
+            doc_chords.update({
+                "harmony_style": summary.style,
+                "ii_v_i": summary.ii_v_i + summary.minor_ii_v_i,
+                "tritone_subs": summary.tritone_subs,
+                "secondary_dominants": summary.secondary_dominants,
+                "fifth_chains_per_minute": summary.fifth_chains_per_minute,
+                "dominant_share": summary.dominant_share,
+                "blues_score": summary.blues_score,
+            })
     return {
         **doc_chords,
         "track_id": track_id,
@@ -475,6 +491,21 @@ def build_doc(*, track_id: int, prog: Progression, artist: str = "",
         "analysed_at": analysed_at,
         "progression_vector": progression_vector(prog),
     }
+
+
+def _save_timeline(track_id: int, chords: Any, key_text: str) -> None:
+    """Keep the timed chord sequence too, for playback views.
+
+    Here because every path that detects chords stores them through this
+    function, so no caller can forget it. Best-effort like the rest of store.
+    """
+    try:
+        from . import chord_timeline, localcache
+
+        with localcache.connect() as conn:
+            chord_timeline.save(track_id, chords, conn, key_text=key_text)
+    except Exception:
+        log.debug("could not store chord timeline for track %s", track_id, exc_info=True)
 
 
 def store(track_id: int, prog: Progression, *, artist: str = "", title: str = "",
@@ -504,6 +535,8 @@ def store(track_id: int, prog: Progression, *, artist: str = "", title: str = ""
         # whose chords were found on an earlier run, and indexing the whole
         # document would then drop chord_motion and strand the track outside
         # every structural search. Fields the new doc carries still overwrite.
+        if chords is not None:
+            _save_timeline(track_id, chords, getattr(prog.home_key, "name", "") or "")
         client.update(
             index=PROGRESSION_INDEX,
             id=doc_id(track_id),

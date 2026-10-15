@@ -385,6 +385,15 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.supervisor
 
+
+## Chord Timeline
+
+::: karaoke.chord_timeline
+
+## Harmony
+
+::: karaoke.harmony
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the
