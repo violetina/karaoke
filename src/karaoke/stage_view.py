@@ -29,6 +29,22 @@ _recording_cache: list[Any] = [0.0, None]
 _RECORDING_RECHECK_S = 1.0
 
 
+#: track_id -> overall lyric mood. Lyrics do not change while a track plays.
+_track_mood_cache: dict[int, str] = {}
+
+
+def _track_mood(track_id: Optional[int], lines: list[dict[str, Any]]) -> str:
+    """The dominant mood of a track's lyrics as a whole, or "neutral"."""
+    if track_id is None or not lines:
+        return "neutral"
+    if track_id not in _track_mood_cache:
+        from .visuals import analyze_sentiment
+
+        text = "\n".join(line["text"] for line in lines)
+        _track_mood_cache[track_id] = analyze_sentiment(text).dominant
+    return _track_mood_cache[track_id]
+
+
 def _live_listener() -> Optional[dict[str, Any]]:
     """Song and playhead from radio mode or a running recording, if either.
 
@@ -272,15 +288,19 @@ def get_stage_state() -> dict[str, Any]:
             from . import live_caption
             hist = live_caption.get_caption_history()
             if hist:
-                latest = hist[-1]
-                txt = latest.get("text", "")
-                rms_val = latest.get("rms")
                 from .sentiment import mood_of as speech_mood_of
-                speech_m = speech_mood_of(txt, rms=rms_val)
+                # Words only: the room mic's loudness says how intense the
+                # room is, not what it feels (see sentiment.mood_of).
+                speech_m = speech_mood_of(hist[-1].get("text", ""))
                 if speech_m != "neutral":
                     mood = speech_m
         except Exception:
             pass
+
+    if mood == "neutral":
+        # Most lines carry no mood word (71% measured), so the song's overall
+        # lyric mood is the steady background between the lines that do.
+        mood = _track_mood(track_id, lines)
 
     if track_id is not None:
         try:

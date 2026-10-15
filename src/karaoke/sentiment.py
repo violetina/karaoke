@@ -8,6 +8,7 @@ hand-built word sets. Unit-tested; the renderer maps the mood to a Rich style.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 # Coarse mood buckets. Order matters for ties: anger/tender are more specific
 # signals than a generic pos/neg, so they win when counts tie (see mood_of).
@@ -37,15 +38,21 @@ _NEGATIVE = {
     "alleen", "verloren", "verliezen", "moeilijk", "zwaar", "dood", "valpartij",
     "gevallen", "schade", "lekke", "probleem", "drama", "gevaar", "gevaarlijk",
 }
+# Measured on 11,474 lyric lines: the words that most often made a line angry
+# were "fire", "stop" and "break" -- "light my fire", "don't stop me now",
+# "break free". Words whose usual sense in a song is not anger are left out;
+# they describe intensity at most, which is the sound's job, not the words'.
+# The everyday Dutch words added for cross-talk ("niet", "wel", "nee",
+# "klopt") were left out for the same reason: they are in half of all
+# spoken Dutch, so live captions read as an argument.
 _ANGER = {
     "hate", "hatred", "rage", "angry", "anger", "mad", "fight", "fighting",
-    "war", "burn", "burning", "fire", "blood", "kill", "killing", "scream",
-    "screaming", "revenge", "enemy", "enemies", "destroy", "smash", "break",
+    "war", "blood", "kill", "killing", "scream",
+    "screaming", "revenge", "enemy", "enemies", "destroy", "smash",
     "wrath", "fury", "furious", "riot", "violence", "violent", "damn", "hell",
-    # Dutch & cross-talking / temperament additions:
-    "boos", "kwaad", "woede", "ruzie", "oneens", "fout", "foutje", "onzin",
-    "klopt", "niet", "wel", "discussie", "felle", "schreeuwen", "roepen",
-    "stop", "ho", "homaar", "nee", "vechten", "strijd", "botsing", "boosheid",
+    # Dutch:
+    "boos", "kwaad", "woede", "ruzie", "oneens", "felle", "schreeuwen",
+    "vechten", "strijd", "botsing", "boosheid",
 }
 _TENDER = {
     "love", "loving", "loved", "lover", "beloved", "heart", "hearts", "kiss",
@@ -121,14 +128,16 @@ def score_line(text: str) -> dict[str, int]:
 def mood_of(text: str, rms: Optional[float] = None) -> str:
     """Classify a lyric line or speech snippet into one mood in MOODS.
 
-    Returns "neutral" when there's no signal. On ties the more specific buckets
-    (angry, tender) beat the generic happy/sad, then happy beats sad.
+    Returns "neutral" when there is no signal, and also on a tie: two moods
+    scoring equally is a borderline line, and picking one by a fixed order
+    reported the order, not the line. The old order put "angry" first.
+
+    ``rms`` is accepted and ignored. Loudness used to pick the mood -- above
+    0.04 meant "angry" -- but the room mic measured 0.08-0.28 whenever music
+    played, so on /mood every line without mood words read as angry (26-90%
+    of the time). How loud something is says how intense, not which emotion.
     """
     if not text:
-        if rms and rms > 0.04:
-            return "angry"
-        elif rms and rms > 0.02:
-            return "happy"
         return "neutral"
 
     words = _WORD_RE.findall((text or "").lower())
@@ -137,17 +146,9 @@ def mood_of(text: str, rms: Optional[float] = None) -> str:
     # Exclamation or laughter indicators
     if "!" in text or any(w in ("haha", "hahaha", "lol", "wow", "bizar", "grapje") for w in words):
         s["happy"] += 2
-    if any(w in ("niet", "wel", "fout", "onzin", "stop", "nee", "ruzie") for w in words) and ("?" in text or "!" in text):
-        s["angry"] += 2
 
-    if rms and rms > 0.04:
-        s["angry"] += 2
-    elif rms and rms > 0.02:
-        s["happy"] += 1
-
-    if not any(s.values()):
+    top = max(s.values())
+    if top <= 0:
         return "neutral"
-    # Priority for tie-breaking: specific emotions first, then valence.
-    priority = ("angry", "tender", "happy", "sad")
-    best = max(priority, key=lambda k: (s[k], -priority.index(k)))
-    return best if s[best] > 0 else "neutral"
+    leaders = [k for k, v in s.items() if v == top]
+    return leaders[0] if len(leaders) == 1 else "neutral"

@@ -12,7 +12,7 @@ def test_mood_sad():
 
 
 def test_mood_angry():
-    assert mood_of("burn it all down with rage and fire") == "angry"
+    assert mood_of("I hate you, I scream with rage") == "angry"
 
 
 def test_mood_tender():
@@ -35,12 +35,28 @@ def test_score_line_counts_repeats():
     assert s["tender"] == 3
 
 
-def test_mood_tiebreak_prefers_specific_then_positive():
-    # equal happy(1: "happy") and sad(1: "sad") -> happy wins the valence tie
-    assert mood_of("happy sad") == "happy"
-    # anger is more specific than a generic positive on a tie
-    assert mood_of("happy hate") == "angry"
+def test_a_tie_is_borderline_not_a_fixed_winner():
+    # The old order put "angry" first, so every tie read as anger.
+    assert mood_of("happy sad") == "neutral"
+    assert mood_of("happy hate") == "neutral"
 
+
+def test_loudness_alone_never_picks_a_mood():
+    # The room mic measured 0.08-0.28 whenever music played; above 0.04 used to
+    # mean "angry", which is how /mood showed angry most of the time.
+    assert mood_of("", rms=0.28) == "neutral"
+    assert mood_of("walked to the store today", rms=0.2) == "neutral"
+
+
+def test_songs_about_fire_or_not_stopping_are_not_angry():
+    assert mood_of("come on baby light my fire") != "angry"
+    assert mood_of("don't stop me now") != "angry"
+    assert mood_of("I want to break free") != "angry"
+
+
+def test_everyday_dutch_is_not_an_argument():
+    assert mood_of("Is dat niet oké?") == "neutral"
+    assert mood_of("Nee, dat klopt wel!") != "angry"
 
 def test_beat_on_within_hold_after_beat():
     beats = [1.0, 2.0, 3.0]

@@ -141,3 +141,13 @@ def test_ctrl_api_stage_endpoints(client):
     assert "lines" in data
     assert "casting" in data
     assert "status" in data
+
+
+def test_a_line_without_mood_words_falls_back_to_the_song_not_the_room():
+    from karaoke import stage_view
+
+    stage_view._track_mood_cache.clear()
+    lines = [{"text": "tears fall in the cold dark rain"}, {"text": "walked to the store"},
+             {"text": "all alone and lost"}]
+    assert stage_view._track_mood(42, lines) == "sad"
+    assert stage_view._track_mood(None, lines) == "neutral"
