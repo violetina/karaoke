@@ -59,7 +59,10 @@ app.conf.update(
     task_default_queue=POSTPROCESS_QUEUE,
     task_queues=(
         Queue(POSTPROCESS_QUEUE, queue_arguments={'x-max-priority': 10}),
-        Queue(CLAP_QUEUE),
+        # Its own routing key. Without one kombu bound this queue to the
+        # default exchange with the *postprocess* key, so every postprocess
+        # message was also copied here and the CLAP worker ran it too.
+        Queue(CLAP_QUEUE, routing_key=CLAP_QUEUE),
     ),
     task_acks_late=True,
     task_reject_on_worker_lost=True,
