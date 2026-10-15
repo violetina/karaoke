@@ -36,12 +36,20 @@ def cached_media() -> dict[str, Path]:
 
 
 def already_embedded(client) -> set[int]:
+    """Every embedded track id.
+
+    Scrolled rather than one search: a search stops at 10,000 hits, and past
+    that size the tracks beyond the cut looked unembedded and were re-embedded
+    on every run.
+    """
+    from opensearchpy import helpers
+
     try:
-        res = client.search(index=clap_vector.CLAP_INDEX, body={
-            "size": 10000, "_source": ["track_id"], "query": {"match_all": {}}})
+        return {int(h["_source"]["track_id"]) for h in helpers.scan(
+            client, index=clap_vector.CLAP_INDEX,
+            query={"_source": ["track_id"], "query": {"match_all": {}}})}
     except Exception:
         return set()
-    return {h["_source"]["track_id"] for h in res["hits"]["hits"]}
 
 
 def run(*, limit: Optional[int] = None, overwrite: bool = False,
