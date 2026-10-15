@@ -222,7 +222,7 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                     pending_temp = needs_postprocessing(track_id, conn)
                     # Chords need audio too, but only a full run may fetch it
                     # for them -- the same rule download_audio applies.
-                    wants_audio = {"analysis", "sync"} | ({"chords", "clap"} if context.full else set())
+                    wants_audio = {"analysis", "sync"} | ({"chords", "clap", "mood"} if context.full else set())
                     if wants_audio.intersection(pending_temp):
                         try:
                             from . import youtube
@@ -263,7 +263,7 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
         # An explicit full run (playlist import) is a bounded set the caller
         # has chosen to pay the downloads for, so harmony and CLAP may pull
         # audio too.
-        needs_audio = needs_audio | {"chords", "clap"}
+        needs_audio = needs_audio | {"chords", "clap", "mood"}
     if (context.track_id is None or context.url is None
             or not needs_audio.intersection(context.pending)):
         return context.to_dict()
@@ -277,7 +277,7 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
                     context.track_id, context.url)
         # If download fails, drop every step that needs the audio. Vectors are
         # built from database rows, so they stay pending and still run.
-        for step in ("analysis", "sync", "chords", "clap"):
+        for step in ("analysis", "sync", "chords", "clap", "mood"):
             if step in context.pending:
                 context.pending.remove(step)
     return context.to_dict()
@@ -384,16 +384,21 @@ def rebuild_vectors(self, context_dict: dict[str, Any]) -> dict[str, Any]:
 @app.task(bind=True, name="karaoke.tasks.embed_clap", autoretry_for=(Exception,),
           retry_backoff=True, retry_jitter=True, max_retries=2)
 def embed_clap(self, context_dict: dict[str, Any]) -> dict[str, Any]:
-    """CLAP timbre embedding, routed to the single-process ``karaoke-clap`` worker."""
+    """CLAP timbre embedding and mood timeline, on the single-process ``karaoke-clap`` worker."""
     context = PostprocessContext.from_dict(context_dict)
-    if (context.track_id is None or "clap" not in context.pending
-            or context.audio_path is None):
+    wanted = {"clap", "mood"}.intersection(context.pending)
+    if context.track_id is None or not wanted or context.audio_path is None:
         return context.to_dict()
-    log.info("celery embed_clap: %s - %s", context.artist, context.title)
+    log.info("celery embed_clap: %s - %s (%s)", context.artist, context.title,
+             ", ".join(sorted(wanted)))
     from . import postprocess_worker, localcache
     with localcache.connect() as conn:
-        postprocess_worker.run_clap_logic(context.track_id, context.audio_path, conn,
-                                          artist=context.artist, title=context.title)
+        if "clap" in wanted:
+            postprocess_worker.run_clap_logic(context.track_id, context.audio_path, conn,
+                                              artist=context.artist, title=context.title)
+        # The mood timeline uses the same CLAP model, already loaded here.
+        if "mood" in wanted:
+            postprocess_worker.run_mood_logic(context.track_id, context.audio_path, conn)
     return context.to_dict()
 
 

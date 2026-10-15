@@ -39,8 +39,9 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
     Possible values: ``"analysis"`` (no key/BPM row), ``"timings"`` (approved
     synced lyrics lack Enhanced LRC word tags), ``"sync"`` (approved lyrics are
     plain text with no timings at all), ``"vectors"`` (no OpenSearch document),
-    ``"chords"`` (no harmonic progression with chord motion) and ``"clap"``
-    (no CLAP timbre embedding). Empty list = nothing to do.
+    ``"chords"`` (no harmonic progression with chord motion), ``"clap"``
+    (no CLAP timbre embedding) and ``"mood"`` (no current mood timeline).
+    Empty list = nothing to do.
 
     The last two are answered by OpenSearch rather than the database. Pass
     ``include_search_artefacts=False`` to skip those two round-trips when the
@@ -90,6 +91,15 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
     # the library needs re-indexing, which would flood the queue.
     if include_search_artefacts:
         pending.extend(_missing_search_artefacts(track_id))
+        # Derived like the search artefacts, but stored here; computed by the
+        # CLAP worker, which already holds the model it needs.
+        try:
+            from . import mood_timeline
+
+            if not mood_timeline.has_current(track_id, conn):
+                pending.append("mood")
+        except Exception:
+            log.debug("could not check mood timeline for track %s", track_id)
 
     return pending
 

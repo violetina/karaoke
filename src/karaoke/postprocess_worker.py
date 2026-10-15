@@ -395,3 +395,24 @@ def run_clap_logic(track_id: int, audio_path: Path, conn,
     except Exception:
         log.exception("postprocess: CLAP embedding failed for track %s", track_id)
         return False
+
+
+def run_mood_logic(track_id: int, audio_path: Path, conn) -> bool:
+    """Compute and store the track's mood timeline (sound + lyric meaning).
+
+    On the CLAP worker: the timeline scores every ten-second window with the
+    same model, which is only loaded there.
+    """
+    try:
+        from . import mood_timeline
+
+        timeline = mood_timeline.analyse_track(track_id, conn, audio_path=audio_path)
+        if timeline is None:
+            log.warning("postprocess: no mood timeline for track %s (%s)", track_id, audio_path)
+            return False
+        log.info("postprocess: mood timeline for track %s: %s", track_id,
+                 timeline.summary.get("arc", ""))
+        return True
+    except Exception:
+        log.exception("postprocess: mood timeline failed for track %s", track_id)
+        return False

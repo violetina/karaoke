@@ -114,23 +114,55 @@ def matches_playback(timeline: dict[str, Any], playing_duration: float) -> bool:
     return abs(analysed - playing_duration) <= tolerance
 
 
+#: A file shorter than this, or than this share of the track, is a clip --
+#: ~/Music/karaoke-samples holds one-second captures filed as local sources
+#: of the songs they sampled -- and analysing it describes one second.
+MIN_AUDIO_S = 30.0
+MIN_AUDIO_SHARE = 0.5
+
+
+def _audio_seconds(path: Path) -> Optional[float]:
+    """Length from the file's header, or None when it cannot be read."""
+    try:
+        from mutagen import File as MutagenFile
+
+        info = getattr(MutagenFile(str(path)), "info", None)
+        return float(info.length) if info and info.length else None
+    except Exception:
+        return None
+
+
+def _whole_song(path: Path, track_seconds: Optional[float]) -> bool:
+    seconds = _audio_seconds(path)
+    if seconds is None:
+        return True                      # unreadable header: let the decoder decide
+    floor = max(MIN_AUDIO_S, MIN_AUDIO_SHARE * (track_seconds or 0.0))
+    return seconds >= floor
+
+
 def local_audio(track_id: int, conn) -> Optional[Path]:
-    """A file on disk holding this track's audio, if there is one."""
+    """A file on disk holding this track's whole audio, if there is one."""
     from . import localcache
     from .config import settings
 
+    row = conn.execute("SELECT duration FROM tracks WHERE track_id = %s",
+                       (track_id,)).fetchone()
+    track_seconds = float(row["duration"]) if row and row["duration"] else None
     for row in conn.execute("SELECT kind, url FROM sources WHERE track_id = %s",
                             (track_id,)).fetchall():
         url = row["url"] or ""
-        if row["kind"] == "local":
-            path = Path(url.removeprefix("file://"))
-            if path.is_file():
+        candidates: list[Path] = []
+        # radio_capture: a song sliced out of a radio recording, on disk.
+        if row["kind"] in ("local", "radio_capture"):
+            candidates = [Path(url.removeprefix("file://"))]
+        else:
+            vid = localcache.extract_youtube_id(url)
+            if vid:
+                candidates = [p for p in sorted(Path(settings.youtube_dir).glob(f"{vid}.*"))
+                              if not p.name.endswith((".part", ".json"))]
+        for path in candidates:
+            if path.is_file() and _whole_song(path, track_seconds):
                 return path
-        vid = localcache.extract_youtube_id(url)
-        if vid:
-            for path in sorted(Path(settings.youtube_dir).glob(f"{vid}.*")):
-                if path.is_file() and not path.name.endswith((".part", ".json")):
-                    return path
     return None
 
 

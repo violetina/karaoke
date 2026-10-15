@@ -29,6 +29,47 @@ _recording_cache: list[Any] = [0.0, None]
 _RECORDING_RECHECK_S = 1.0
 
 
+#: track_id -> (checked_at, stored mood timeline or None).
+_mood_cache: dict[int, tuple[float, Optional[dict[str, Any]]]] = {}
+_MOOD_RECHECK_S = 30.0
+#: Tracks already queued for a timeline this process, so a tick does not
+#: queue the same song ten times a second.
+_mood_requested: set[int] = set()
+
+
+def _mood_segment(track_id: Optional[int], artist: str, title: str,
+                  position_s: float, duration: float) -> Optional[dict[str, Any]]:
+    """The mood-timeline segment at the playhead, if the track has one.
+
+    Never computes one here: that needs the CLAP model, which only the CLAP
+    worker loads. A missing timeline is queued instead, once per track.
+    """
+    from . import chord_timeline, localcache, mood_timeline
+
+    if track_id is None:
+        return None
+    checked_at, stored = _mood_cache.get(track_id, (0.0, None))
+    if stored is None and time.time() - checked_at > _MOOD_RECHECK_S:
+        try:
+            with localcache.connect() as conn:
+                stored = mood_timeline.load(track_id, conn)
+        except Exception as exc:
+            log.debug("stage_view: mood timeline lookup failed: %s", exc)
+        _mood_cache[track_id] = (time.time(), stored)
+        if stored is None and track_id not in _mood_requested and title:
+            _mood_requested.add(track_id)
+            try:
+                from .postprocess_queue import enqueue_if_needed
+
+                enqueue_if_needed(artist, title)
+            except Exception:
+                log.debug("stage_view: could not queue mood for track %s", track_id)
+    # Same guard as the chords: a different edit would put moods at wrong times.
+    if not stored or not chord_timeline.matches_playback(stored, duration):
+        return None
+    return mood_timeline.at(stored, position_s)
+
+
 #: track_id -> overall lyric mood. Lyrics do not change while a track plays.
 _track_mood_cache: dict[int, str] = {}
 
@@ -275,11 +316,20 @@ def get_stage_state() -> dict[str, Any]:
             break
     
     mood = "neutral"
+    mood_alt: Optional[str] = None
+    mood_source = ""
     genre = ""
-    if active_line_idx >= 0 and active_line_idx < len(lines):
+    # The track's mood timeline (sound + lyric meaning, per ten seconds) is
+    # the best answer when it exists; the line and song lexicon below are the
+    # fallback for tracks not analysed yet.
+    segment = _mood_segment(track_id, artist, title, position_s, duration)
+    if segment is not None:
+        mood, mood_alt, mood_source = segment["mood"], segment.get("alt"), "timeline"
+    elif active_line_idx >= 0 and active_line_idx < len(lines):
         try:
             from karaoke.visuals import mood_of
             mood = mood_of(lines[active_line_idx]["text"])
+            mood_source = "line" if mood != "neutral" else ""
         except Exception:
             pass
 
@@ -293,7 +343,7 @@ def get_stage_state() -> dict[str, Any]:
                 # room is, not what it feels (see sentiment.mood_of).
                 speech_m = speech_mood_of(hist[-1].get("text", ""))
                 if speech_m != "neutral":
-                    mood = speech_m
+                    mood, mood_source = speech_m, "room"
         except Exception:
             pass
 
@@ -301,6 +351,7 @@ def get_stage_state() -> dict[str, Any]:
         # Most lines carry no mood word (71% measured), so the song's overall
         # lyric mood is the steady background between the lines that do.
         mood = _track_mood(track_id, lines)
+        mood_source = "song" if mood != "neutral" else ""
 
     if track_id is not None:
         try:
@@ -324,6 +375,9 @@ def get_stage_state() -> dict[str, Any]:
         "key": key,
         "energy": energy,
         "mood": mood,
+        # Set when the stretch sits on a boundary: show both, not a guess.
+        "mood_alt": mood_alt,
+        "mood_source": mood_source,
         "genre": genre,
         "sync_source": sync_source,
         "chord_cpm": chord_cpm,
@@ -1695,7 +1749,9 @@ def render_mood_html() -> str:
         const title = data.title || '';
         const artist = data.artist || '';
 
-        sentimentDiv.textContent = mood.toUpperCase() + (data.genre ? ' • ' + data.genre : '');
+        // A borderline stretch is shown as both moods rather than a guess.
+        const moodText = data.mood_alt ? `${mood.toUpperCase()} ↔ ${data.mood_alt.toUpperCase()}` : mood.toUpperCase();
+        sentimentDiv.textContent = moodText + (data.genre ? ' • ' + data.genre : '');
         // Say where the song came from when it is not a player: radio and
         // record mode dead-reckon the playhead, so their timing is an estimate.
         const via = {radio: ' · 📻 radio', 'tui-radio': ' · 📻 radio', recording: ' · ⏺ rec'}[data.sync_source] || '';
