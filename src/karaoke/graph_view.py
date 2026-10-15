@@ -40,6 +40,45 @@ MOOD_COLORS = {
 }
 
 
+def _add_mood_timelines(nodes: dict[int, dict[str, Any]], strategy: str) -> None:
+    """Attach each node's mood timeline: the arc, swings and borderline share.
+
+    Where a track has one, its dominant mood -- sound and lyric meaning
+    together -- replaces the lyric-only one, so the mood colour and filter
+    agree with what /mood shows.
+    """
+    if not nodes:
+        return
+    try:
+        from . import mood_timeline
+
+        with localcache.connect() as conn:
+            mood_timeline.ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT track_id, duration_s, segments, summary FROM track_moods"
+                " WHERE track_id = ANY(%s) AND mood_version = %s",
+                (list(nodes), mood_timeline.MOOD_VERSION)).fetchall()
+    except Exception as exc:
+        log.debug("graph: mood timeline lookup failed: %s", exc)
+        return
+    for row in rows:
+        node = nodes.get(int(row["track_id"]))
+        summary = row["summary"] or {}
+        if node is None or not summary.get("dominant"):
+            continue
+        node["dominant_mood"] = summary["dominant"]
+        node["mood_source"] = "timeline"
+        node["mood_arc"] = summary.get("arc", "")
+        node["mood_swings"] = summary.get("swing_count", 0)
+        node["mood_borderline"] = summary.get("borderline_share", 0.0)
+        node["mood_duration"] = row["duration_s"]
+        node["mood_segments"] = [[round(seg["start_s"], 1), round(seg["end_s"], 1),
+                                  seg["mood"], seg.get("alt")]
+                                 for seg in (row["segments"] or [])]
+        if strategy in ("mood", "feeling", "sentiment"):
+            node["color"] = MOOD_COLORS.get(summary["dominant"], "#94a3b8")
+
+
 def build_similarity_graph(
     track_id: Optional[int] = None,
     playlist_id: Optional[str] = None,
@@ -311,6 +350,8 @@ def build_similarity_graph(
     except Exception as exc:
         log.warning("OpenSearch node enrichment error: %s", exc)
 
+    _add_mood_timelines(nodes, strategy)
+
     # Filter nodes based on user sliders and criteria (seed nodes always retained)
     filtered_nodes: dict[int, dict[str, Any]] = {}
     for tid, node in nodes.items():
@@ -519,6 +560,17 @@ GRAPH_HTML = """<!DOCTYPE html>
       font-size: 0.9rem;
       margin-bottom: 12px;
     }
+    .mood-arc { margin-top: 10px; }
+    .mood-strip {
+      display: flex;
+      height: 14px;
+      margin: 5px 0 4px;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid #262c42;
+    }
+    .mood-strip > div { height: 100%; }
+    .mood-arc-text { font-size: 0.75rem; color: #94a3b8; line-height: 1.4; }
     .meta-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -718,6 +770,11 @@ GRAPH_HTML = """<!DOCTYPE html>
             <div class="meta-val" id="d-chords">-</div>
           </div>
         </div>
+        <div class="mood-arc" id="d-moodarc" style="display: none;">
+          <div class="meta-label">Mood over time</div>
+          <div class="mood-strip" id="d-moodstrip"></div>
+          <div class="mood-arc-text" id="d-moodarc-text"></div>
+        </div>
         <div class="actions" id="d-actions" style="display: none;">
           <button onclick="playCurrentSelected()">▶ Play on Desktop</button>
           <button class="btn-secondary" onclick="recenterOnSelected()">🔍 Re-center Constellation</button>
@@ -730,6 +787,7 @@ GRAPH_HTML = """<!DOCTYPE html>
           • <strong>Node Size:</strong> Degree (number of similarity links).<br>
           • <strong>Edge Thickness:</strong> Cosine chord-motion, semantic lyric, or timbre match.<br>
           • <strong>Seed Nodes:</strong> Highlighted with bright blue border.<br>
+          • <strong>Dashed Ring:</strong> the song's mood swings (two or more changes); the inspector strip shows its mood over time, striped where borderline.<br>
           • <strong>Sliders & Filters:</strong> Real-time filtering by similarity score, tempo, key, and mood.
         </div>
       </div>
@@ -1007,8 +1065,9 @@ GRAPH_HTML = """<!DOCTYPE html>
             label: n.artist + '\\n' + n.title,
             color: n.color || '#38bdf8',
             raw: n,
-            borderWidth: n.is_seed ? 4 : 1,
-            borderColor: n.is_seed ? '#38bdf8' : '#1e293b',
+            borderWidth: n.is_seed ? 4 : ((n.mood_swings || 0) >= MOOD_SWINGY ? 3 : 1),
+            borderColor: n.is_seed ? '#38bdf8' : ((n.mood_swings || 0) >= MOOD_SWINGY ? '#e2e8f0' : '#1e293b'),
+            borderStyle: (n.mood_swings || 0) >= MOOD_SWINGY ? 'dashed' : 'solid',
           }
         });
       });
@@ -1045,6 +1104,7 @@ GRAPH_HTML = """<!DOCTYPE html>
               'text-max-width': '90px',
               'border-width': 'data(borderWidth)',
               'border-color': 'data(borderColor)',
+              'border-style': 'data(borderStyle)',
               'width': '32px',
               'height': '32px',
               'transition-property': 'background-color, border-color, width, height',
@@ -1111,6 +1171,42 @@ GRAPH_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Same colours as /mood and the Mood strategy (graph_view.MOOD_COLORS).
+    const MOOD_COLORS = __MOOD_COLORS__;
+    // Two or more mood changes inside a song earn the dashed ring.
+    const MOOD_SWINGY = 2;
+
+    function fmtTime(s) {
+      s = Math.max(0, Math.round(s));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+
+    function renderMoodArc(track) {
+      const box = document.getElementById('d-moodarc');
+      const segs = track.mood_segments || [];
+      if (!segs.length) { box.style.display = 'none'; return; }
+      const total = track.mood_duration || segs[segs.length - 1][1] || 1;
+      const strip = document.getElementById('d-moodstrip');
+      strip.innerHTML = '';
+      segs.forEach(([start, end, mood, alt]) => {
+        const div = document.createElement('div');
+        const c1 = MOOD_COLORS[mood] || MOOD_COLORS.neutral;
+        const c2 = alt ? (MOOD_COLORS[alt] || MOOD_COLORS.neutral) : null;
+        div.style.width = `${Math.max(0.5, (end - start) / total * 100)}%`;
+        // Borderline stretches are striped in both moods.
+        div.style.background = c2
+          ? `repeating-linear-gradient(45deg, ${c1} 0 6px, ${c2} 6px 12px)` : c1;
+        div.title = `${fmtTime(start)}–${fmtTime(end)}  ${mood}${alt ? ' ↔ ' + alt : ''}`;
+        strip.appendChild(div);
+      });
+      const swings = track.mood_swings || 0;
+      const border = Math.round((track.mood_borderline || 0) * 100);
+      document.getElementById('d-moodarc-text').textContent =
+        `${track.mood_arc || ''} · ${swings} swing${swings === 1 ? '' : 's'}` +
+        (border ? ` · ${border}% borderline` : '');
+      box.style.display = 'block';
+    }
+
     function showNodeDetails(track) {
       selectedTrackId = track.track_id;
       document.getElementById('d-title').textContent = track.title;
@@ -1123,6 +1219,8 @@ GRAPH_HTML = """<!DOCTYPE html>
       document.getElementById('d-sentiment').textContent = track.sentiment_hits != null ? track.sentiment_hits + ' hits' : 'N/A';
       document.getElementById('d-genre').textContent = track.genre || 'Various';
       document.getElementById('d-chords').textContent = track.distinct_chords ? track.distinct_chords + ' distinct' : 'N/A';
+
+      renderMoodArc(track);
 
       document.getElementById('d-meta').style.display = 'grid';
       document.getElementById('d-actions').style.display = 'flex';
@@ -1163,6 +1261,11 @@ GRAPH_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+# The page's mood colours come from MOOD_COLORS, so the strip, the Mood
+# strategy and /mood cannot drift apart.
+GRAPH_HTML = GRAPH_HTML.replace("__MOOD_COLORS__", json.dumps(MOOD_COLORS))
 
 
 async def serve_graph_ui(request: Request) -> HTMLResponse:
