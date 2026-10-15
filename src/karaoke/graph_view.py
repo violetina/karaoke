@@ -464,6 +464,7 @@ GRAPH_HTML = """<!DOCTYPE html>
       border-color: #475569;
     }
     .btn-secondary:hover { background: #475569; }
+    .btn-secondary.active { background: #0e7490; box-shadow: 0 0 0 1px #38bdf8 inset; }
     .btn-apply {
       background: #0284c7;
       border-color: #0369a1;
@@ -594,6 +595,8 @@ GRAPH_HTML = """<!DOCTYPE html>
         <button class="btn-secondary" onclick="loadNowPlaying()">Now Playing</button>
         <button class="btn-secondary" id="songrec-btn" onclick="findWithSongrec()"
                 title="Identify what is audible (radio mode, the output, or the mic) and locate it">🎙 Find with songrec</button>
+        <button class="btn-secondary" id="follow-btn" onclick="toggleFollow()" aria-pressed="false"
+                title="Re-center on each new song from radio mode or the desktop player">📡 Follow</button>
       </div>
     </div>
     <div class="filter-bar">
@@ -842,16 +845,34 @@ GRAPH_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Ask the server to place a song: it queues processing when the song is
+    // missing or unanalysed, and the graph re-seeds once it is ready.
+    async function locateAndSeed(artist, title, quiet) {
+      const resp = await fetch('/api/locate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artist, title }),
+      });
+      const loc = await resp.json();
+      if (loc.track_id) seedGraph(loc.track_id);
+      if (loc.status === 'queued') {
+        toast(`${title}: ${loc.pending.length ? 'needs ' + loc.pending.join(', ') : 'adding to library'}; processing…`);
+        waitUntilPlaceable(artist, title, loc.track_id);
+      } else if (!quiet) {
+        toast(`Now playing: ${artist} — ${title}`);
+      }
+      return loc;
+    }
+
     async function loadNowPlaying() {
       toast('Checking current desktop playing track...');
       try {
         const resp = await fetch('/api/now_playing');
         const data = await resp.json();
-        if (data.track_id) {
-          document.getElementById('seed-input').value = data.track_id;
-          document.getElementById('playlist-select').value = '';
-          history.replaceState(null, '', `?track_id=${data.track_id}`);
-          loadGraph({ track_id: data.track_id });
+        if (data.title) {
+          await locateAndSeed(data.artist || '', data.title, false);
+        } else if (data.track_id) {
+          seedGraph(data.track_id);
         } else if (data.artist || data.title) {
           const q = (data.artist && data.title) ? `${data.artist} - ${data.title}` : (data.title || data.artist);
           document.getElementById('seed-input').value = q;
@@ -873,6 +894,55 @@ GRAPH_HTML = """<!DOCTYPE html>
     }
 
     let songrecPoll = null;
+
+    // --- Follow mode: re-center on each new song ---------------------------
+    const FOLLOW_EVERY_MS = 10000;
+    // Hands off while the user explores: a re-seed would yank the graph away.
+    const FOLLOW_QUIET_MS = 20000;
+    let followTimer = null;
+    let followedKey = null;
+    let lastInteraction = 0;
+
+    function setFollowButton(on) {
+      const btn = document.getElementById('follow-btn');
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      btn.classList.toggle('active', on);
+      btn.textContent = on ? '📡 Following' : '📡 Follow';
+    }
+
+    async function followTick() {
+      if (Date.now() - lastInteraction < FOLLOW_QUIET_MS) return;
+      try {
+        const data = await (await fetch('/api/now_playing')).json();
+        if (data.status !== 'playing' || !data.title) return;
+        const key = `${(data.artist || '').toLowerCase()}|${data.title.toLowerCase()}`;
+        if (key === followedKey) return;
+        followedKey = key;
+        const via = data.player === 'radio' || data.player === 'tui-radio' ? ' (radio)' : '';
+        toast(`Following${via}: ${data.artist} — ${data.title}`);
+        await locateAndSeed(data.artist || '', data.title, true);
+      } catch (e) { /* transient; next tick retries */ }
+    }
+
+    function toggleFollow(force) {
+      const on = typeof force === 'boolean' ? force : !followTimer;
+      if (followTimer) { clearInterval(followTimer); followTimer = null; }
+      if (on) {
+        followedKey = null;            // place the current song right away
+        lastInteraction = 0;
+        followTick();
+        followTimer = setInterval(followTick, FOLLOW_EVERY_MS);
+      }
+      setFollowButton(on);
+      try { localStorage.setItem('graph-follow', on ? '1' : '0'); } catch (e) {}
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      let saved = null;
+      try { saved = localStorage.getItem('graph-follow'); } catch (e) {}
+      const param = new URLSearchParams(location.search).get('follow');
+      if (param === '1' || (param === null && saved === '1')) toggleFollow(true);
+    });
 
     async function findWithSongrec() {
       const btn = document.getElementById('songrec-btn');
@@ -1014,6 +1084,20 @@ GRAPH_HTML = """<!DOCTYPE html>
       cy.on('tap', 'node', function(evt) {
         const node = evt.target;
         showNodeDetails(node.data('raw'));
+      });
+      cy.on('tap grab pan zoom', function(evt) {
+        // Programmatic fits fire zoom too; only count what a person did.
+        if (evt.originalEvent) lastInteraction = Date.now();
+      });
+      // The layout fits the graph to the canvas, which blows a lone node (a
+      // song not analysed yet) up to fill the screen. Cap the fit, not the
+      // user: manual zoom stays free.
+      cy.one('layoutstop', function() {
+        const MAX_FIT_ZOOM = 1.5;
+        if (cy.zoom() > MAX_FIT_ZOOM) {
+          cy.zoom(MAX_FIT_ZOOM);
+          cy.center();
+        }
       });
 
       // Auto-select the seed node and show its details in the sidebar
@@ -1194,6 +1278,29 @@ async def api_identify(request: Request) -> JSONResponse:
     except Exception as exc:
         log.warning("api_identify failed: %s", exc)
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+    return JSONResponse(result)
+
+
+async def api_locate(request: Request) -> JSONResponse:
+    """Place a named song, queueing processing when the graph cannot yet.
+
+    Separate from now_playing on purpose: that is also an MCP tool, and a
+    lookup should not start downloads as a side effect.
+    """
+    import anyio
+
+    from . import song_finder
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    artist = str(body.get("artist") or "").strip()
+    title = str(body.get("title") or "").strip()
+    if not title:
+        return JSONResponse({"status": "error", "message": "title is required"},
+                            status_code=400)
+    result = await anyio.to_thread.run_sync(song_finder.locate, artist, title)
     return JSONResponse(result)
 
 
