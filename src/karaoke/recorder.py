@@ -21,6 +21,7 @@ needs.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
@@ -154,10 +155,11 @@ def start(source: str = "", *, keep_audio: bool = False,
         directory = recordings_dir() / time.strftime("%Y%m%d-%H%M%S",
                                                      time.localtime(started))
         directory.mkdir(parents=True, exist_ok=True)
+        _ensure_owner_column(c)
         cur = c.execute(
-            "INSERT INTO recordings (started_at, source, dir, status, keep_audio, note)"
-            " VALUES (%s, %s, %s, 'recording', %s, %s) RETURNING recording_id",
-            (started, src, str(directory), 1 if keep_audio else 0, note),
+            "INSERT INTO recordings (started_at, source, dir, status, keep_audio, note, pid)"
+            " VALUES (%s, %s, %s, 'recording', %s, %s, %s) RETURNING recording_id",
+            (started, src, str(directory), 1 if keep_audio else 0, note, os.getpid()),
         )
         recording_id = int(cur.fetchone()["recording_id"])
         c.commit()
@@ -307,11 +309,34 @@ def stop(recording_id: int) -> None:
     log.info("recording %d stopped", recording_id)
 
 
+def _ensure_owner_column(conn) -> None:
+    """Add ``recordings.pid`` to databases predating it."""
+    conn.execute("ALTER TABLE recordings ADD COLUMN IF NOT EXISTS pid INTEGER")
+
+
+def _owner_alive(pid: Optional[int]) -> bool:
+    """Whether the process that started a recording still exists."""
+    if not pid or pid == os.getpid():
+        # Ours but not in _sessions: this process lost it. Unknown: rows from
+        # before the column existed, which keep the old treatment.
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def reconcile_stale(conn: Optional[object] = None) -> list[int]:
     """Close out rows left at 'recording' by a process that did not exit cleanly.
 
     A session only lives in the process that started it, so a row still marked
     'recording' with nothing running is a crash or a kill -- not a live capture.
+    "Nothing running" means in *any* process: `karaoke -r --record` captures
+    from its own process, and ctrl-api closing that row out on every restart
+    marked a live radio recording complete while it was still being written.
     Leaving it makes the listing lie about what is happening, and hides the fact
     that its audio is complete and analysable.
 
@@ -320,12 +345,14 @@ def reconcile_stale(conn: Optional[object] = None) -> list[int]:
     own = conn is None
     c = conn or localcache.connect()
     try:
+        _ensure_owner_column(c)
         rows = c.execute(
-            "SELECT recording_id FROM recordings WHERE status = 'recording'"
+            "SELECT recording_id, pid FROM recordings WHERE status = 'recording'"
         ).fetchall()
         running = set(active_sessions())
         stale = [int(r["recording_id"]) for r in rows
-                 if int(r["recording_id"]) not in running]
+                 if int(r["recording_id"]) not in running
+                 and not _owner_alive(r["pid"])]
         for recording_id in stale:
             c.execute(
                 "UPDATE recordings SET status = 'complete', ended_at = %s,"

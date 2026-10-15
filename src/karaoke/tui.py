@@ -54,8 +54,8 @@ from textual.screen import ModalScreen
 from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
                              Select, Static)
 
-from . import (detect, localcache, playerctl, recorder, sample_audio,
-               staging, track_analysis, visuals)
+from . import (detect, live_state, localcache, playerctl, recorder,
+               sample_audio, staging, track_analysis, visuals)
 from .api_client import ApiClient
 from .browse import open_song_url
 from .dj_chat import DJChatScreen
@@ -2165,7 +2165,27 @@ class KaraokeTui(App):
                     # short-circuiting on an unchanged key.
                     self._sync_key = None
                     log.info("mic: %s - %s", ref.artist, ref.title)
-            self._mic_stop.wait(MIC_REIDENTIFY_S)
+            # Wait out the interval in heartbeat-sized steps, so views in
+            # other processes (ctrl-api's /mood) keep trusting the anchor.
+            deadline = time.monotonic() + MIC_REIDENTIFY_S
+            while not self._mic_stop.is_set():
+                self._publish_mic()
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self._mic_stop.wait(min(live_state.HEARTBEAT_S, left))
+        live_state.clear("tui-radio")
+
+    def _publish_mic(self) -> None:
+        """Publish the mic anchor with the same lead _mic_position adds."""
+        ref = self._mic_ref
+        known = ref is not None and bool(ref.title) and ref.offset is not None
+        live_state.publish(
+            "tui-radio",
+            artist=ref.artist if known else "", title=ref.title if known else "",
+            offset=ref.offset if known else None,
+            offset_mono=ref.offset_mono if known else None,
+            lead=DEFAULT_LEAD_S, status="in sync" if known else "listening")
 
     def action_toggle_mic(self) -> None:
         """`R`: follow room audio via the microphone (songrec)."""
@@ -2173,6 +2193,7 @@ class KaraokeTui(App):
 
         if self._mic_stop is not None and not self._mic_stop.is_set():
             self._mic_stop.set()
+            live_state.clear("tui-radio")
             self._mic_ref = None
             self._sync_key = None
             self.notify("Mic off")

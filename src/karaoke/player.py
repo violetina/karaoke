@@ -830,6 +830,19 @@ def play_radio_synced(
     stop = threading.Event()
     nudge = [float(extra_latency)]  # live per-line adjustment (v/b keys)
 
+    def publish_live() -> None:
+        """Tell views in other processes (ctrl-api's /mood) where we are."""
+        from . import live_state
+
+        with lock:
+            snapshot = dict(state)
+        live_state.publish(
+            "radio", artist=snapshot["artist"], title=snapshot["title"],
+            offset=snapshot["offset"] if snapshot["key"] else None,
+            offset_mono=snapshot["offset_mono"] if snapshot["key"] else None,
+            nudge=nudge[0], status=snapshot["status"], session_id=session_id,
+            recording_id=rec_state["recording_id"])
+
     def apply(ref) -> None:
         """Fold a fresh identification into shared state."""
         if ref is None or not ref.title or ref.offset is None:
@@ -845,6 +858,7 @@ def play_radio_synced(
                 state["offset"] = ref.offset
                 state["offset_mono"] = ref.offset_mono
                 state["status"] = "in sync"
+            publish_live()
             localcache.log_event("radio", "relock", artist=ref.artist, title=ref.title)
             localcache.record_radio_track(session_id, ref.artist, ref.title, offset_s=ref.offset)
             if rec_state["is_recording"] and rec_state["recording_id"] is not None:
@@ -883,6 +897,7 @@ def play_radio_synced(
             state["offset_mono"] = ref.offset_mono
             state["has_lyrics"] = bool(tl.lines)
             state["status"] = "in sync" if tl.lines else "no synced lyrics for this track"
+        publish_live()
 
     def identifier() -> None:
         # First pass immediately, then every interval.
@@ -936,6 +951,7 @@ def play_radio_synced(
     console.print(f"[bold cyan]Radio karaoke[/] (session #{session_id})  [dim](listening — v/b nudge, r rec, q to stop)[/]")
     th = threading.Thread(target=identifier, daemon=True)
     th.start()
+    last_publish = 0.0
     try:
         with _KeyReader() as keys, \
                 Live(frame(), console=console, refresh_per_second=10, screen=False) as live:
@@ -964,10 +980,18 @@ def play_radio_synced(
                     elif k == "0":  # reset nudge to the CLI-provided baseline
                         nudge[0] = float(extra_latency)
                 live.update(frame())
+                # A heartbeat, and the nudge within one: v/b change the
+                # playhead other views reckon from.
+                if k or time.monotonic() - last_publish >= 2.0:
+                    publish_live()
+                    last_publish = time.monotonic()
                 time.sleep(0.05)
     except KeyboardInterrupt:
         console.print("\n[dim]stopped[/]")
     finally:
+        from . import live_state
+
+        live_state.clear("radio")
         stop.set()
         if rec_state["is_recording"]:
             _stop_recording()

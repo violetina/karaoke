@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS recordings (
     status       TEXT NOT NULL DEFAULT 'recording',
                  -- recording | complete | analysed | discarded | failed
     keep_audio   INTEGER NOT NULL DEFAULT 0,
-    note         TEXT
+    note         TEXT,
+    pid          INTEGER          -- process capturing it, while recording
 );
 
 CREATE TABLE IF NOT EXISTS recording_marks (
@@ -286,7 +287,8 @@ def ensure_recording_tables(conn: Connection) -> None:
             dir          TEXT NOT NULL,
             status       TEXT NOT NULL DEFAULT 'recording',
             keep_audio   INTEGER NOT NULL DEFAULT 0,
-            note         TEXT
+            note         TEXT,
+            pid          INTEGER
         );
         CREATE TABLE IF NOT EXISTS recording_marks (
             mark_id      SERIAL PRIMARY KEY,
