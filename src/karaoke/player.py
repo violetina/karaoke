@@ -236,8 +236,13 @@ def get_synced(
     force_transcribe: bool = False,
     lyrics_file: Optional[str] = None,
     stats_mode: Optional[str] = None,
+    queue_postprocess: bool = True,
 ) -> Lyrics:
-    """Return synced lyrics, checking caches before going online."""
+    """Return synced lyrics, checking caches before going online.
+
+    ``queue_postprocess=False`` leaves queueing to the caller -- radio mode
+    queues the full chain itself (see :func:`song_finder.ensure_processed`).
+    """
     from . import localcache
 
     artist, title, album, duration = ref.artist, ref.title, ref.album, ref.duration
@@ -359,11 +364,12 @@ def get_synced(
         # radio/player never got analysed and the backlog grew every session.
         # enqueue_if_needed is best-effort, bounded, and publishes nothing when
         # the track is already complete.
-        try:
-            from .postprocess_queue import enqueue_if_needed
-            enqueue_if_needed(artist, title, ref.url or "")
-        except Exception:
-            pass
+        if queue_postprocess:
+            try:
+                from .postprocess_queue import enqueue_if_needed
+                enqueue_if_needed(artist, title, ref.url or "")
+            except Exception:
+                pass
 
     return ly
 
@@ -742,6 +748,20 @@ def play_offset_synced(
         console.print("\n[dim]stopped[/]")
 
 
+def _ensure_in_library(artist: str, title: str) -> None:
+    """Best-effort: add a radio song to the library and queue its processing."""
+    from . import localcache
+    from .logger import log
+
+    try:
+        from .song_finder import ensure_processed
+
+        outcome = ensure_processed(artist, title)
+        localcache.log_event("radio", f"library_{outcome}", artist=artist, title=title)
+    except Exception:
+        log.debug("radio: could not queue %s - %s", artist, title, exc_info=True)
+
+
 def play_radio_synced(
     *,
     mic: bool = True,
@@ -872,7 +892,13 @@ def play_radio_synced(
         localcache.log_event(
             "radio", "discover", artist=ref.artist, title=ref.title, source="songrec"
         )
-        ly = get_synced(ref, stats_mode="radio")
+        ly = get_synced(ref, stats_mode="radio", queue_postprocess=False)
+        # Every song radio hears joins the library fully processed -- also the
+        # ones without lyrics, which get_synced never stores. Off the
+        # identifier's critical path: the lyrics above are what the singer
+        # is waiting for.
+        threading.Thread(target=_ensure_in_library, args=(ref.artist, ref.title),
+                         daemon=True).start()
         tl = timeline_from_lyrics(ly)
         localcache.log_event(
             "radio", "play", artist=ref.artist, title=ref.title,
