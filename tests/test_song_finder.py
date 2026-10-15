@@ -146,3 +146,23 @@ def test_identify_status_endpoint(http, monkeypatch):
     monkeypatch.setattr(song_finder, "status",
                         lambda a, t: {"track_id": 5, "ready": True, "pending": []})
     assert http.get("/api/identify/status?artist=a&title=t").json()["ready"] is True
+
+
+def test_locate_endpoint_places_a_named_song(http, monkeypatch):
+    seen = []
+    monkeypatch.setattr(song_finder, "locate",
+                        lambda a, t: seen.append((a, t)) or {"status": "found", "track_id": 7,
+                                                             "pending": []})
+    resp = http.post("/api/locate", json={"artist": "Alien Ant Farm", "title": "Smooth Criminal"})
+    assert resp.json()["track_id"] == 7
+    assert seen == [("Alien Ant Farm", "Smooth Criminal")]
+
+
+def test_locate_endpoint_requires_a_title(http):
+    assert http.post("/api/locate", json={"artist": "x"}).status_code == 400
+
+
+def test_graph_page_offers_follow():
+    from karaoke.graph_view import GRAPH_HTML as page
+
+    assert 'id="follow-btn"' in page and "function toggleFollow" in page
