@@ -516,3 +516,64 @@ def test_full_flag_survives_the_payload_round_trip(monkeypatch):
         out = tasks.resolve_track_id.run(
             {"artist": "A", "title": "B", "url": "http://youtube.com/v", "full": flag})
         assert PostprocessContext.from_dict(out).full is flag
+
+
+def _conn_returning(row):
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = row
+    ctx = MagicMock()
+    ctx.__enter__.return_value = conn
+    return ctx
+
+
+def test_resolve_reads_the_stored_source_from_a_dict_row(monkeypatch):
+    monkeypatch.setattr(localcache, "find_track_id", MagicMock(return_value=18200))
+    monkeypatch.setattr(localcache, "find_track_by_url", MagicMock(return_value=None))
+    monkeypatch.setattr(q, "needs_postprocessing", MagicMock(return_value=["chords"]))
+    monkeypatch.setattr(localcache, "connect",
+                        MagicMock(return_value=_conn_returning({"url": "https://youtu.be/abc"})))
+    out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
+        {"artist": "The Offspring", "title": "The Kids Aren't Alright", "url": "", "full": True}))
+    assert out.url == "https://youtu.be/abc"
+
+
+def test_resolve_hands_a_newly_found_source_to_the_download(monkeypatch):
+    monkeypatch.setattr(localcache, "find_track_id", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "find_track_id_relaxed", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "find_track_by_url", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "add_track_source", MagicMock(return_value=77))
+    monkeypatch.setattr(q, "needs_postprocessing", MagicMock(return_value=["analysis", "chords"]))
+    monkeypatch.setattr(localcache, "connect", MagicMock(return_value=_conn_returning(None)))
+    monkeypatch.setattr("karaoke.youtube.search",
+                        MagicMock(return_value=[{"url": "https://www.youtube.com/watch?v=fgT9zGkiLig"}]))
+    out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
+        {"artist": "Incubus", "title": "Drive", "url": "", "full": True}))
+    assert out.track_id == 77
+    assert out.url == "https://www.youtube.com/watch?v=fgT9zGkiLig"
+
+
+def test_a_full_run_resolves_with_the_relaxed_match(monkeypatch):
+    monkeypatch.setattr(localcache, "find_track_id", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "find_track_id_relaxed", MagicMock(return_value=18955))
+    search = MagicMock()
+    monkeypatch.setattr("karaoke.youtube.search", search)
+    monkeypatch.setattr(q, "needs_postprocessing", MagicMock(return_value=[]))
+    monkeypatch.setattr(localcache, "connect",
+                        MagicMock(return_value=_conn_returning({"url": "https://youtu.be/x"})))
+    out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
+        {"artist": "Incubus", "title": "Drive", "url": "", "full": True}))
+    assert out.track_id == 18955
+    search.assert_not_called()
+
+
+def test_a_full_run_searches_a_source_for_chords_alone(monkeypatch):
+    monkeypatch.setattr(localcache, "find_track_id", MagicMock(return_value=18231))
+    monkeypatch.setattr(localcache, "find_track_by_url", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "add_track_source", MagicMock(return_value=18231))
+    monkeypatch.setattr(q, "needs_postprocessing", MagicMock(return_value=["chords"]))
+    monkeypatch.setattr(localcache, "connect", MagicMock(return_value=_conn_returning(None)))
+    monkeypatch.setattr("karaoke.youtube.search",
+                        MagicMock(return_value=[{"url": "https://www.youtube.com/watch?v=paranoid1"}]))
+    out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
+        {"artist": "Black Sabbath", "title": "Paranoid", "url": "", "full": True}))
+    assert out.url == "https://www.youtube.com/watch?v=paranoid1"

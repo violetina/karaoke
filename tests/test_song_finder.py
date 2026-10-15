@@ -166,3 +166,47 @@ def test_graph_page_offers_follow():
     from karaoke.graph_view import GRAPH_HTML as page
 
     assert 'id="follow-btn"' in page and "function toggleFollow" in page
+
+
+def test_ensure_processed_queues_the_full_chain_for_a_new_song(library, queue, monkeypatch):
+    light = []
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed",
+                        lambda *a, **k: light.append(a) or True)
+    assert song_finder.ensure_processed("DJ Agent 86", "Another One Bites The Dust") == "queued-full"
+    assert queue[0]["full"] is True
+    assert light == []                      # never both chains for one song
+
+
+def test_ensure_processed_leaves_lyric_gaps_to_the_light_chain(library, queue, monkeypatch):
+    library["Drive"] = (18955, ["timings"])
+    light = []
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed",
+                        lambda *a, **k: light.append(a) or True)
+    assert song_finder.ensure_processed("Incubus", "Drive") == "queued"
+    assert queue == [] and light == [("Incubus", "Drive", "")]
+
+
+def test_ensure_processed_on_a_complete_song_does_nothing(library, queue, monkeypatch):
+    library["Drive"] = (18955, [])
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed", lambda *a, **k: False)
+    assert song_finder.ensure_processed("Incubus", "Drive") == "complete"
+    assert queue == []
+
+
+def test_get_synced_can_leave_queueing_to_the_caller(monkeypatch):
+    from karaoke import player
+    from karaoke.identify import SongRef
+    from karaoke.lyrics import Lyrics
+
+    ly = Lyrics(synced_raw="[00:01.00] hi", plain="hi", source="lrclib")
+    monkeypatch.setattr("karaoke.localcache.connect", lambda *a, **k: nullcontext(MagicMock()))
+    monkeypatch.setattr("karaoke.localcache.find_track_id", lambda *a, **k: None)
+    monkeypatch.setattr("karaoke.localcache.add_track_and_lyrics", lambda *a, **k: None)
+    monkeypatch.setattr(player, "fetch_lrclib", lambda *a, **k: ly)
+    called = []
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed",
+                        lambda *a, **k: called.append(a))
+    player.get_synced(SongRef(artist="a", title="t"), queue_postprocess=False)
+    assert called == []
+    player.get_synced(SongRef(artist="a", title="t"))
+    assert called

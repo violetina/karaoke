@@ -133,3 +133,25 @@ def status(artist: str, title: str) -> dict[str, Any]:
             return {"track_id": None, "ready": False, "pending": list(GRAPH_STEPS)}
         missing = [p for p in needs_postprocessing(track_id, conn) if p in GRAPH_STEPS]
     return {"track_id": track_id, "ready": not missing, "pending": missing}
+
+
+def ensure_processed(artist: str, title: str) -> str:
+    """Make a heard song a complete library track. Returns what was done.
+
+    For radio mode, on each new song. A song the library lacks, or one
+    missing what search and the graph need, gets the *full* chain: the
+    playback path's light chain fetches audio only for key/BPM or lyric sync,
+    so a track missing just its chords stayed that way, and one with no
+    lyrics was never added at all. A song that is already complete goes the
+    old way, for the lyric-timing gaps the light chain still covers.
+
+    ``queued-full`` | ``queued`` | ``complete`` | ``failed``.
+    """
+    out = locate(artist, title)
+    if out["status"] == "queued":
+        return "queued-full"
+    if out["status"] != "found":
+        return "failed"
+    from .postprocess_queue import enqueue_if_needed
+
+    return "queued" if enqueue_if_needed(artist, title, "") else "complete"

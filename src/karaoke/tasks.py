@@ -128,6 +128,12 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
 
     with localcache.connect() as conn:
         track_id = localcache.find_track_id(artist, title, conn)
+        if track_id is None and context.full:
+            # A full run comes from song_finder, which located the track with
+            # the relaxed match. Resolving strictly here missed it ("Incubus -
+            # Drive"), searched YouTube for a song already in the library, and
+            # processed whatever that search returned instead.
+            track_id = localcache.find_track_id_relaxed(artist, title, conn)
         if track_id is None and url:
             found = localcache.find_track_by_url(url, conn)
             if found:
@@ -189,6 +195,12 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
             # Prefer a real watch source from the DB over a non-watchable payload URL
             if not localcache.extract_youtube_id(url):
                 url = ""
+            if url:
+                # Payload URL, or the source just found for a new track: the
+                # download step reads context.url, and leaving it at the
+                # payload's empty string made every new track "succeed"
+                # without audio -- no key, no chords.
+                context.url = url
             if not url:
                 row = conn.execute(
                     """
@@ -200,12 +212,15 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                     (track_id,),
                 ).fetchone()
                 if row:
-                    context.url = row[0]
+                    context.url = row["url"]   # rows are dicts: row[0] raised KeyError
                 else:
                     # No youtube source found! Let's do an automatic search to find one.
                     # Only if this track actually needs postprocessing (sync or analysis).
                     pending_temp = needs_postprocessing(track_id, conn)
-                    if "analysis" in pending_temp or "sync" in pending_temp:
+                    # Chords need audio too, but only a full run may fetch it
+                    # for them -- the same rule download_audio applies.
+                    wants_audio = {"analysis", "sync"} | ({"chords"} if context.full else set())
+                    if wants_audio.intersection(pending_temp):
                         try:
                             from . import youtube
                             log.info("postprocess: searching youtube for %s - %s", artist, title)
