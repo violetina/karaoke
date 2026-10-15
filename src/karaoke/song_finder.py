@@ -22,8 +22,9 @@ from typing import Any, Optional
 from .logger import log
 
 #: Steps whose absence leaves a track unplaceable in the graph. Lyric timing
-#: steps are not among them: the graph never reads lyrics.
-GRAPH_STEPS = ("analysis", "chords", "vectors")
+#: steps are not among them: the graph never reads lyrics. CLAP is: the
+#: acoustic view has no edges for a track without it.
+GRAPH_STEPS = ("analysis", "chords", "vectors", "clap")
 
 #: One recogniser at a time: a second click while songrec listens would only
 #: compete with the first for the same audio.

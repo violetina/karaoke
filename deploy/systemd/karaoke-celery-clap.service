@@ -1,0 +1,31 @@
+[Unit]
+Description=Karaoke Celery CLAP worker (timbre embeddings, one process)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_ORCHESTRATOR=celery
+Environment=RABBITMQ_HOST=localhost
+# One process holding the model; let torch use a few threads inside it. The
+# slice's CPUQuota still caps the whole background budget.
+Environment=OMP_NUM_THREADS=4
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=4
+Environment=NUMEXPR_NUM_THREADS=1
+# Its own queue (karaoke-clap): the analysis workers never load CLAP.
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-clap --loglevel=INFO --concurrency=1 --hostname=clap@%%h --events
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-celery-clap
+
+# Background work must never starve playback.
+Nice=15
+Slice=karaoke-postprocess.slice
+
+[Install]
+WantedBy=karaoke.target
