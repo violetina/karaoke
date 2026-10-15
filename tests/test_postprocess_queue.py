@@ -58,7 +58,7 @@ def test_a_missing_vector_and_chord_doc_become_pending(monkeypatch):
         def exists(self, **kw): return False
         def search(self, **kw): return {"hits": {"hits": []}}
     monkeypatch.setattr("karaoke.osclient.client", lambda *a, **k: Empty())
-    assert q._missing_search_artefacts(1) == ["vectors", "chords"]
+    assert q._missing_search_artefacts(1) == ["vectors", "chords", "clap"]
 
 
 def test_present_artefacts_are_not_pending(monkeypatch):

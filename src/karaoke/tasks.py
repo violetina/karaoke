@@ -57,6 +57,9 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
         tasks += [
             sync_lyrics.s(),
             rebuild_vectors.s(),
+            # Last, on its own queue and worker: if that worker is down, only
+            # the timbre vector waits -- lyrics, chords and search are done.
+            embed_clap.s(),
         ]
         # The final task in the chain returns the status to the orchestrator,
         # but the orchestrator itself returns None (ignore_result=True).
@@ -219,7 +222,7 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                     pending_temp = needs_postprocessing(track_id, conn)
                     # Chords need audio too, but only a full run may fetch it
                     # for them -- the same rule download_audio applies.
-                    wants_audio = {"analysis", "sync"} | ({"chords"} if context.full else set())
+                    wants_audio = {"analysis", "sync"} | ({"chords", "clap"} if context.full else set())
                     if wants_audio.intersection(pending_temp):
                         try:
                             from . import youtube
@@ -258,8 +261,9 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     needs_audio = {"analysis", "sync"}
     if context.full:
         # An explicit full run (playlist import) is a bounded set the caller
-        # has chosen to pay the downloads for, so harmony may pull audio too.
-        needs_audio = needs_audio | {"chords"}
+        # has chosen to pay the downloads for, so harmony and CLAP may pull
+        # audio too.
+        needs_audio = needs_audio | {"chords", "clap"}
     if (context.track_id is None or context.url is None
             or not needs_audio.intersection(context.pending)):
         return context.to_dict()
@@ -273,7 +277,7 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
                     context.track_id, context.url)
         # If download fails, drop every step that needs the audio. Vectors are
         # built from database rows, so they stay pending and still run.
-        for step in ("analysis", "sync", "chords"):
+        for step in ("analysis", "sync", "chords", "clap"):
             if step in context.pending:
                 context.pending.remove(step)
     return context.to_dict()
@@ -374,6 +378,22 @@ def rebuild_vectors(self, context_dict: dict[str, Any]) -> dict[str, Any]:
             log.warning("postprocess: vectors rebuild failed for track %s (%s)",
                         context.track_id, context.url)
             raise RuntimeError(f"Vectors rebuild failed for track {context.track_id}") # Retryable error
+    return context.to_dict()
+
+
+@app.task(bind=True, name="karaoke.tasks.embed_clap", autoretry_for=(Exception,),
+          retry_backoff=True, retry_jitter=True, max_retries=2)
+def embed_clap(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """CLAP timbre embedding, routed to the single-process ``karaoke-clap`` worker."""
+    context = PostprocessContext.from_dict(context_dict)
+    if (context.track_id is None or "clap" not in context.pending
+            or context.audio_path is None):
+        return context.to_dict()
+    log.info("celery embed_clap: %s - %s", context.artist, context.title)
+    from . import postprocess_worker, localcache
+    with localcache.connect() as conn:
+        postprocess_worker.run_clap_logic(context.track_id, context.audio_path, conn,
+                                          artist=context.artist, title=context.title)
     return context.to_dict()
 
 

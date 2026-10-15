@@ -301,6 +301,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     mock_upgrade_task = MagicMock()
     mock_sync_task = MagicMock()
     mock_rebuild_task = MagicMock()
+    mock_clap_task = MagicMock()
 
     # The .s() method returns a mock, and on that mock, .set() returns the final result
     mock_resolve_task_s_return_value = MagicMock()
@@ -313,6 +314,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     mock_upgrade_task.s.return_value = mock_upgrade_timings_result
     mock_sync_task.s.return_value = mock_sync_lyrics_result
     mock_rebuild_task.s.return_value = mock_rebuild_vectors_result
+    mock_clap_task.s.return_value = mock_rebuild_vectors_result
 
     monkeypatch.setattr(tasks, "resolve_track_id", mock_resolve_task)
     monkeypatch.setattr(tasks, "download_audio", mock_download_task)
@@ -321,6 +323,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     monkeypatch.setattr(tasks, "upgrade_timings", mock_upgrade_task)
     monkeypatch.setattr(tasks, "sync_lyrics", mock_sync_task)
     monkeypatch.setattr(tasks, "rebuild_vectors", mock_rebuild_task)
+    monkeypatch.setattr(tasks, "embed_clap", mock_clap_task)
 
     # Mock celery.chain and its apply_async method
     mock_chain_instance = MagicMock()
@@ -352,7 +355,8 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
         mock_harmony_task.s.return_value,
         mock_upgrade_task.s.return_value,
         mock_sync_task.s.return_value,
-        mock_rebuild_task.s.return_value
+        mock_rebuild_task.s.return_value,
+        mock_clap_task.s.return_value,
     )
     # Assert that apply_async was called on the chained object
     mock_chain_apply_async.assert_called_once_with()
@@ -384,7 +388,7 @@ def test_default_postprocess_leaves_out_the_timing_upgrade(monkeypatch):
         monkeypatch, {"artist": "A", "title": "B", "url": "http://youtube.com/v"})
     assert "upgrade_timings" not in names
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
-                     "analyze_harmony", "sync_lyrics", "rebuild_vectors"]
+                     "analyze_harmony", "sync_lyrics", "rebuild_vectors", "embed_clap"]
 
 
 def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
@@ -393,7 +397,7 @@ def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
                       "include_timings": True})
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
                      "analyze_harmony", "upgrade_timings", "sync_lyrics",
-                     "rebuild_vectors"]
+                     "rebuild_vectors", "embed_clap"]
 
 
 def test_enqueue_postprocess_uses_orchestrator(monkeypatch):
@@ -577,3 +581,35 @@ def test_a_full_run_searches_a_source_for_chords_alone(monkeypatch):
     out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
         {"artist": "Black Sabbath", "title": "Paranoid", "url": "", "full": True}))
     assert out.url == "https://www.youtube.com/watch?v=paranoid1"
+
+
+def test_embed_clap_is_routed_to_its_own_queue():
+    route = celery_app.app.conf.task_routes["karaoke.tasks.embed_clap"]
+    assert route == {"queue": celery_app.CLAP_QUEUE}
+    assert celery_app.CLAP_QUEUE != celery_app.POSTPROCESS_QUEUE
+
+
+def test_embed_clap_runs_only_when_pending_with_audio(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(postprocess_worker, "run_clap_logic",
+                        lambda tid, path, conn, **kw: calls.append((tid, path)) or True)
+    monkeypatch.setattr(localcache, "connect", MagicMock())
+    audio = tmp_path / "a.webm"
+    base = dict(artist="A", title="B", url="u", track_id=5)
+    tasks.embed_clap.run(PostprocessContext(**base, audio_path=audio, pending=["sync"]).to_dict())
+    tasks.embed_clap.run(PostprocessContext(**base, audio_path=None, pending=["clap"]).to_dict())
+    assert calls == []
+    tasks.embed_clap.run(PostprocessContext(**base, audio_path=audio, pending=["clap"]).to_dict())
+    assert calls == [(5, audio)]
+
+
+def test_a_full_run_downloads_audio_for_clap_alone(monkeypatch, tmp_path):
+    monkeypatch.setattr(postprocess_worker, "run_download_logic",
+                        MagicMock(return_value=tmp_path / "a.webm"))
+    ctx = PostprocessContext(artist="A", title="B", url="http://youtube.com/v", track_id=1,
+                             pending=["clap"], full=True)
+    out = PostprocessContext.from_dict(tasks.download_audio.run(ctx.to_dict()))
+    assert out.audio_path == tmp_path / "a.webm"
+    ctx.full = False                      # playback-driven: never downloads for CLAP
+    out = PostprocessContext.from_dict(tasks.download_audio.run(ctx.to_dict()))
+    assert out.audio_path is None

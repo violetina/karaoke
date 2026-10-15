@@ -358,3 +358,40 @@ def run_harmony_logic(track_id: int, audio_path: Path, conn,
         return False
 
 
+
+
+def run_clap_logic(track_id: int, audio_path: Path, conn,
+                   artist: str = "", title: str = "") -> bool:
+    """Embed a track with CLAP and index the vector.
+
+    Runs on its own single-process worker (``karaoke-clap`` queue): the model
+    is about a gigabyte, so loading it in each of the six analysis workers
+    would cost six.
+    """
+    try:
+        from . import clap_vector, track_analysis
+
+        if not clap_vector.available():
+            log.warning("postprocess: CLAP unavailable (torch/transformers); "
+                        "track %s not embedded", track_id)
+            return False
+        vector = clap_vector.embed_audio(str(audio_path))
+        if vector is None:
+            log.warning("postprocess: CLAP could not embed track %s (%s)",
+                        track_id, audio_path)
+            return False
+        analysis = track_analysis.get_analysis(track_id, conn)
+        key = getattr(analysis, "detected_key", None) if analysis else None
+        row = conn.execute("SELECT album FROM tracks WHERE track_id = %s",
+                           (track_id,)).fetchone()
+        if not clap_vector.store(track_id, vector, artist=artist, title=title,
+                                 album=(row["album"] if row else "") or "",
+                                 detected_key=getattr(key, "name", "") or "",
+                                 bpm=analysis.bpm if analysis else None):
+            log.warning("postprocess: could not index CLAP vector for track %s", track_id)
+            return False
+        log.info("postprocess: embedded track %s with CLAP", track_id)
+        return True
+    except Exception:
+        log.exception("postprocess: CLAP embedding failed for track %s", track_id)
+        return False

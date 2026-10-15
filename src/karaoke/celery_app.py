@@ -17,6 +17,9 @@ from .config import settings
 
 POSTPROCESS_QUEUE = os.environ.get(
     "KARAOKE_CELERY_POSTPROCESS_QUEUE", "karaoke-postprocess-celery")
+#: CLAP embedding gets its own queue and a one-process worker
+#: (karaoke-celery-clap.service): the model is ~1 GB per process.
+CLAP_QUEUE = os.environ.get("KARAOKE_CELERY_CLAP_QUEUE", "karaoke-clap")
 
 
 def broker_url() -> str:
@@ -56,6 +59,7 @@ app.conf.update(
     task_default_queue=POSTPROCESS_QUEUE,
     task_queues=(
         Queue(POSTPROCESS_QUEUE, queue_arguments={'x-max-priority': 10}),
+        Queue(CLAP_QUEUE),
     ),
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -68,6 +72,7 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_routes={
         "karaoke.tasks.postprocess_track": {"queue": POSTPROCESS_QUEUE},
+        "karaoke.tasks.embed_clap": {"queue": CLAP_QUEUE},
     },
     timezone="UTC",
 )

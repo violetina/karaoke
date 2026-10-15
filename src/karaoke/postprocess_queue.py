@@ -38,9 +38,9 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
 
     Possible values: ``"analysis"`` (no key/BPM row), ``"timings"`` (approved
     synced lyrics lack Enhanced LRC word tags), ``"sync"`` (approved lyrics are
-    plain text with no timings at all), ``"vectors"`` (no OpenSearch document)
-    and ``"chords"`` (no harmonic progression with chord motion). Empty list =
-    nothing to do.
+    plain text with no timings at all), ``"vectors"`` (no OpenSearch document),
+    ``"chords"`` (no harmonic progression with chord motion) and ``"clap"``
+    (no CLAP timbre embedding). Empty list = nothing to do.
 
     The last two are answered by OpenSearch rather than the database. Pass
     ``include_search_artefacts=False`` to skip those two round-trips when the
@@ -95,7 +95,7 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
 
 
 def _missing_search_artefacts(track_id: int) -> list[str]:
-    """Return which of ``vectors``/``chords`` are absent for this track.
+    """Return which of ``vectors``/``chords``/``clap`` are absent for this track.
 
     Never raises and never guesses: an unreachable cluster yields an empty list,
     so a broker/OpenSearch outage cannot enqueue the whole library.
@@ -133,6 +133,16 @@ def _missing_search_artefacts(track_id: int) -> list[str]:
             missing.append("chords")
     except Exception:
         log.debug("could not check progression doc for track %s", track_id)
+    try:
+        from . import clap_vector
+
+        # The acoustic graph and "sounds like" search read this; without it a
+        # track is a lone node in that view however complete it is otherwise.
+        if not os_client.exists(index=clap_vector.CLAP_INDEX,
+                                id=clap_vector.doc_id(track_id)):
+            missing.append("clap")
+    except Exception:
+        log.debug("could not check CLAP doc for track %s", track_id)
     return missing
 
 
