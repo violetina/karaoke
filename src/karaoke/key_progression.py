@@ -500,12 +500,18 @@ def store(track_id: int, prog: Progression, *, artist: str = "", title: str = ""
         ensure_index(client)
         if chords is not None:
             ensure_chord_fields(client)
-        client.index(
+        # A partial update, not a replace: chord detection can fail on a track
+        # whose chords were found on an earlier run, and indexing the whole
+        # document would then drop chord_motion and strand the track outside
+        # every structural search. Fields the new doc carries still overwrite.
+        client.update(
             index=PROGRESSION_INDEX,
             id=doc_id(track_id),
-            body=build_doc(track_id=track_id, prog=prog, artist=artist, title=title,
-                           analysed_at=datetime.now(timezone.utc).isoformat(),
-                           chords=chords),
+            body={"doc": build_doc(track_id=track_id, prog=prog, artist=artist,
+                                   title=title,
+                                   analysed_at=datetime.now(timezone.utc).isoformat(),
+                                   chords=chords),
+                  "doc_as_upsert": True},
         )
         return True
     except Exception:
