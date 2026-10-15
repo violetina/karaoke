@@ -33,7 +33,8 @@ def test_render_stage_html():
 def test_get_stage_state_idle():
     with patch("karaoke.player_open.browser_playback", return_value=None), \
          patch("karaoke.playerctl.playing_player", return_value=None), \
-         patch("karaoke.localcache.load_active_queue", return_value=None):
+         patch("karaoke.localcache.load_active_queue", return_value=None), \
+         patch("karaoke.stage_view._live_listener", return_value=None):
         state = get_stage_state()
         assert state["artist"] == ""
         assert state["title"] == ""

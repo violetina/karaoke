@@ -23,6 +23,44 @@ _chord_cache: dict[int, tuple[float, Optional[dict[str, Any]]]] = {}
 _CHORD_RECHECK_S = 5.0
 
 
+#: (checked_at, playhead) for the running recording's latest mark. Marks
+#: arrive every 45s or so; reading the table ten times a second is waste.
+_recording_cache: list[Any] = [0.0, None]
+_RECORDING_RECHECK_S = 1.0
+
+
+def _live_listener() -> Optional[dict[str, Any]]:
+    """Song and playhead from radio mode or a running recording, if either.
+
+    Neither has a player to ask: radio mode (`karaoke -r`, the TUI's mic mode)
+    publishes its songrec anchor through :mod:`karaoke.live_state`, and record
+    mode leaves identification marks in the database.
+    """
+    from . import live_state, localcache
+
+    state = live_state.current()
+    if state:
+        pos = live_state.position(state)
+        if pos is not None:
+            return {"source": state["source"], "artist": state.get("artist") or "",
+                    "title": state.get("title") or "", "position_s": pos}
+
+    now = time.time()
+    checked_at, cached = _recording_cache
+    if now - checked_at > _RECORDING_RECHECK_S:
+        try:
+            with localcache.connect() as conn:
+                cached = live_state.recording_playhead(conn, now=now)
+        except Exception as exc:
+            log.debug("stage_view: recording playhead lookup failed: %s", exc)
+            cached = None
+        _recording_cache[:] = [now, cached]
+        checked_at = now
+    if cached:
+        return {**cached, "position_s": cached["position_s"] + (now - checked_at)}
+    return None
+
+
 def _chord_state(track_id: Optional[int], position_s: float,
                  duration: float) -> dict[str, Any]:
     """The chord under the playhead, filling the track's timeline if missing."""
@@ -98,6 +136,22 @@ def get_stage_state() -> dict[str, Any]:
         if active_player:
             art_url = playerctl.art_url(active_player) or ""
             status = playerctl.status(active_player) or status
+
+    # A desktop player that is actually playing wins. Otherwise a live
+    # listener may know what the room is hearing -- and a paused browser tab
+    # left in MPRIS must not hide it.
+    sync_source = "player" if (artist or title) else ""
+    if status != "Playing":
+        live = _live_listener()
+        if live is not None:
+            artist, title = live["artist"], live["title"]
+            album, url, art_url = "", "", ""
+            # Unknown: a songrec match carries no length. The chord overlay
+            # treats that as nothing to compare rather than a mismatch.
+            duration = 0.0
+            position_s = live["position_s"]
+            status = "Playing"
+            sync_source = live["source"]
 
     # 2. Look up lyrics and audio analysis from local database
     lines: list[dict[str, Any]] = []
@@ -251,6 +305,7 @@ def get_stage_state() -> dict[str, Any]:
         "energy": energy,
         "mood": mood,
         "genre": genre,
+        "sync_source": sync_source,
         "chord_cpm": chord_cpm,
         "fifth_ratio": fifth_ratio,
         **_chord_state(track_id, position_s, duration),
@@ -1621,7 +1676,10 @@ def render_mood_html() -> str:
         const artist = data.artist || '';
 
         sentimentDiv.textContent = mood.toUpperCase() + (data.genre ? ' • ' + data.genre : '');
-        trackInfoDiv.textContent = (title && artist) ? `${title} — ${artist}` : (title || 'Karaoke Playing');
+        // Say where the song came from when it is not a player: radio and
+        // record mode dead-reckon the playhead, so their timing is an estimate.
+        const via = {radio: ' · 📻 radio', 'tui-radio': ' · 📻 radio', recording: ' · ⏺ rec'}[data.sync_source] || '';
+        trackInfoDiv.textContent = ((title && artist) ? `${title} — ${artist}` : (title || 'Karaoke Playing')) + via;
         valBpm.textContent = data.bpm ? Math.round(data.bpm) : '120';
         valEnergy.textContent = data.energy !== null ? Math.round(data.energy * 100) + '%' : '50%';
 
