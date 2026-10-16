@@ -403,6 +403,11 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.song_finder
 
+
+## Mood Timeline
+
+::: karaoke.mood_timeline
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the

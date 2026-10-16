@@ -44,8 +44,8 @@ jobs:
             mkdocs-materialx==10.0.9 \
             mkdocs-mermaid2-plugin==1.2.3 \
             mkdocs-monorepo-plugin==1.1.2 \
-            "mkdocstrings[python]==1.0.3" \
-            mkdocstrings-python==2.0.3 \
+            "mkdocstrings[python]>=1.0.7" \
+            "mkdocstrings-python>=2.0.3" \
             "mkdocs-graphviz>=1.5.3" \
             "mkdocs-glightbox>=0.5.2" \
             pyyaml
