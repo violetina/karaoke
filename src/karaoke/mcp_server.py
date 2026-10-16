@@ -1054,6 +1054,8 @@ def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
         Route("/api/identify", endpoint=graph_view.api_identify, methods=["POST"]),
         Route("/api/identify/status", endpoint=graph_view.api_identify_status),
         Route("/api/locate", endpoint=graph_view.api_locate, methods=["POST"]),
+        Route("/api/collection/save", endpoint=graph_view.api_collection_save, methods=["POST"]),
+        Route("/api/collection/play", endpoint=graph_view.api_collection_play, methods=["POST"]),
         Route("/api/now_playing", endpoint=lambda r: JSONResponse(json.loads(get_now_playing()))),
         Route("/sse", endpoint=combined),
         Route("/sse/", endpoint=combined),

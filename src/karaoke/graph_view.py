@@ -560,6 +560,49 @@ GRAPH_HTML = """<!DOCTYPE html>
       font-size: 0.9rem;
       margin-bottom: 12px;
     }
+    .collector-drop {
+      min-height: 46px;
+      margin: 8px 0;
+      padding: 6px;
+      border: 2px dashed #334155;
+      border-radius: 6px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .collector-drop.over { border-color: #38bdf8; background: rgba(56, 189, 248, 0.08); }
+    /* Shown over the graph only while a node is dragged: the side-pane box can
+       be below the fold on a short screen, and a drop target must be visible. */
+    #collector-float {
+      display: none;
+      position: fixed;
+      left: 24px;
+      bottom: 64px;
+      z-index: 50;
+      padding: 14px 22px;
+      border: 2px dashed #38bdf8;
+      border-radius: 10px;
+      background: rgba(10, 12, 19, 0.88);
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      pointer-events: none;
+    }
+    #collector-float.over { background: rgba(56, 189, 248, 0.25); }
+    .collector-hint { color: #64748b; font-size: 0.75rem; text-align: center; padding: 8px 0; }
+    .collector-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 6px; margin: 2px 0;
+      background: #141724; border: 1px solid #262c42; border-radius: 4px;
+      font-size: 0.78rem; cursor: grab;
+    }
+    .collector-item.dragging { opacity: 0.4; }
+    .collector-item .num { color: #64748b; width: 1.4em; text-align: right; }
+    .collector-item .what { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .collector-item .rm { background: none; border: none; color: #94a3b8; cursor: pointer; padding: 0 2px; }
+    .collector-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .collector-actions input {
+      flex: 1 1 100%; padding: 5px 8px; font-size: 0.8rem;
+      background: #141724; color: #f8fafc; border: 1px solid #334155; border-radius: 4px;
+    }
+    .collector-status { font-size: 0.75rem; color: #94a3b8; margin-top: 6px; min-height: 1em; }
     .mood-arc { margin-top: 10px; }
     .mood-strip {
       display: flex;
@@ -732,6 +775,7 @@ GRAPH_HTML = """<!DOCTYPE html>
 
   <div class="main">
     <div id="cy"></div>
+    <div id="collector-float">🧺 Drop to collect</div>
     <div id="sidebar">
       <div class="card" id="details-card">
         <h3 id="d-title">Select a Song Node</h3>
@@ -778,7 +822,22 @@ GRAPH_HTML = """<!DOCTYPE html>
         <div class="actions" id="d-actions" style="display: none;">
           <button onclick="playCurrentSelected()">▶ Play on Desktop</button>
           <button class="btn-secondary" onclick="recenterOnSelected()">🔍 Re-center Constellation</button>
+          <button class="btn-secondary" onclick="collectSelected()">🧺 + Collect</button>
         </div>
+      </div>
+      <div class="card" id="collector-card">
+        <strong>🧺 Collector <span id="collector-count">(0)</span></strong>
+        <div class="collector-drop" id="collector-drop">
+          <div class="collector-hint" id="collector-hint">Drag songs from the graph here, or use + Collect</div>
+          <div id="collector-list"></div>
+        </div>
+        <div class="collector-actions">
+          <input id="collector-name" placeholder="Playlist name (optional)" maxlength="80">
+          <button onclick="saveCollection()">💾 Save playlist</button>
+          <button onclick="playCollection()">▶ Play queue</button>
+          <button class="btn-secondary" onclick="clearCollection()">Clear</button>
+        </div>
+        <div class="collector-status" id="collector-status"></div>
       </div>
       <div class="card">
         <div class="legend">
@@ -1056,6 +1115,155 @@ GRAPH_HTML = """<!DOCTYPE html>
       }, 10000);
     }
 
+    // --- Collector: gather songs, save as playlist, play as queue -----------
+    let collection = [];
+    try { collection = JSON.parse(localStorage.getItem('graph-collection') || '[]'); } catch (e) {}
+    let draggingNode = null, dragStartPos = null, pointer = {x: -1, y: -1}, listDragIdx = null;
+
+    function persistCollection() {
+      try { localStorage.setItem('graph-collection', JSON.stringify(collection)); } catch (e) {}
+    }
+
+    function setCollectorStatus(msg) { document.getElementById('collector-status').textContent = msg || ''; }
+
+    function renderCollection() {
+      const list = document.getElementById('collector-list');
+      list.innerHTML = '';
+      collection.forEach((t, i) => {
+        const row = document.createElement('div');
+        row.className = 'collector-item';
+        row.draggable = true;
+        row.innerHTML = `<span class="num">${i + 1}</span><span class="what"></span><button class="rm" title="Remove">✕</button>`;
+        row.querySelector('.what').textContent = `${t.artist} — ${t.title}`;
+        row.querySelector('.what').title = `${t.artist} — ${t.title}`;
+        row.querySelector('.rm').onclick = () => { collection.splice(i, 1); persistCollection(); renderCollection(); };
+        // Reorder by dragging within the list.
+        row.addEventListener('dragstart', () => { listDragIdx = i; row.classList.add('dragging'); });
+        row.addEventListener('dragend', () => { listDragIdx = null; row.classList.remove('dragging'); });
+        row.addEventListener('dragover', e => e.preventDefault());
+        row.addEventListener('drop', e => {
+          e.preventDefault();
+          if (listDragIdx === null || listDragIdx === i) return;
+          const [moved] = collection.splice(listDragIdx, 1);
+          collection.splice(i, 0, moved);
+          persistCollection(); renderCollection();
+        });
+        list.appendChild(row);
+      });
+      document.getElementById('collector-count').textContent = `(${collection.length})`;
+      document.getElementById('collector-hint').style.display = collection.length ? 'none' : 'block';
+    }
+
+    function collectTrack(t) {
+      if (!t || t.track_id == null) return;
+      if (collection.some(x => x.track_id === t.track_id)) {
+        setCollectorStatus(`${t.title} is already collected`);
+        return;
+      }
+      collection.push({track_id: t.track_id, artist: t.artist, title: t.title});
+      persistCollection(); renderCollection();
+      setCollectorStatus(`Added ${t.title}`);
+    }
+
+    function collectSelected() {
+      if (!cy) return;
+      const sel = cy.$('node:selected');
+      if (sel.length) collectTrack(sel[0].data('raw'));
+    }
+
+    function overBox(id) {
+      const el = document.getElementById(id);
+      if (!el || el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && pointer.x >= r.left && pointer.x <= r.right && pointer.y >= r.top && pointer.y <= r.bottom;
+    }
+
+    // Either drop target counts: the box in the side pane, or the floating one.
+    function overCollector() { return overBox('collector-float') || overBox('collector-drop'); }
+
+    function showFloat(on) {
+      const f = document.getElementById('collector-float');
+      f.style.display = on ? 'block' : 'none';
+      if (!on) f.classList.remove('over');
+    }
+
+    // Graph nodes live on a canvas, so HTML drag-and-drop does not see them:
+    // follow the pointer while a node is grabbed and drop it on release.
+    document.addEventListener('mousemove', e => {
+      pointer = {x: e.clientX, y: e.clientY};
+      if (draggingNode) {
+        document.getElementById('collector-float').classList.toggle('over', overBox('collector-float'));
+        document.getElementById('collector-drop').classList.toggle('over', overBox('collector-drop'));
+      }
+    }, true);
+
+    function bindCollectorDrag() {
+      cy.on('grab', 'node', evt => {
+        draggingNode = evt.target;
+        dragStartPos = Object.assign({}, evt.target.position());
+      });
+      // Only a real drag shows the floating target, not a click to select.
+      cy.on('drag', 'node', () => { if (draggingNode) showFloat(true); });
+      cy.on('free', 'node', evt => {
+        const node = evt.target;
+        const dropped = draggingNode === node && overCollector();
+        document.getElementById('collector-drop').classList.remove('over');
+        showFloat(false);
+        draggingNode = null;
+        if (dropped) {
+          collectTrack(node.data('raw'));
+          if (dragStartPos) node.position(dragStartPos);   // back to its place in the graph
+        }
+      });
+    }
+
+    async function collectionCall(path) {
+      if (!collection.length) { setCollectorStatus('Collect some songs first'); return null; }
+      const resp = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: document.getElementById('collector-name').value,
+                              track_ids: collection.map(t => t.track_id)}),
+      });
+      return resp.json();
+    }
+
+    async function saveCollection() {
+      setCollectorStatus('Saving…');
+      try {
+        const res = await collectionCall('/api/collection/save');
+        if (!res) return;
+        if (res.status !== 'saved') { setCollectorStatus(res.message || 'Could not save'); return; }
+        setCollectorStatus(`Saved "${res.name}" (${res.count} songs) — in Load Playlist`);
+        await loadPlaylists();
+      } catch (e) { setCollectorStatus('Save failed: ' + e.message); }
+    }
+
+    async function playCollection() {
+      setCollectorStatus('Starting the queue…');
+      try {
+        const res = await collectionCall('/api/collection/play');
+        if (!res) return;
+        const skipped = (res.skipped || []).length;
+        const skipNote = skipped ? ` · ${skipped} without a YouTube source skipped` : '';
+        if (res.status === 'playing') {
+          setCollectorStatus(res.mode === 'ytmusic_queue'
+            ? `Playing ${res.count} songs as a YouTube Music queue${skipNote}`
+            : `Playing the first song; queue saved for the TUI (${res.message || ''})${skipNote}`);
+        } else if (res.status === 'nothing_playable') {
+          setCollectorStatus('None of these songs has a YouTube source to play');
+        } else {
+          setCollectorStatus(res.message || 'Could not start the queue');
+        }
+      } catch (e) { setCollectorStatus('Play failed: ' + e.message); }
+    }
+
+    function clearCollection() {
+      collection = []; persistCollection(); renderCollection(); setCollectorStatus('');
+    }
+
+    document.addEventListener('DOMContentLoaded', renderCollection);
+
     function renderCytoscape(data) {
       const elements = [];
       data.nodes.forEach(n => {
@@ -1145,6 +1353,7 @@ GRAPH_HTML = """<!DOCTYPE html>
         const node = evt.target;
         showNodeDetails(node.data('raw'));
       });
+      bindCollectorDrag();
       cy.on('tap grab pan zoom', function(evt) {
         // Programmatic fits fire zoom too; only count what a person did.
         if (evt.originalEvent) lastInteraction = Date.now();
@@ -1420,6 +1629,56 @@ async def api_identify_status(request: Request) -> JSONResponse:
                             status_code=400)
     result = await anyio.to_thread.run_sync(song_finder.status, artist, title)
     return JSONResponse(result)
+
+
+async def _collection_request(request: Request) -> tuple[str, list[int]]:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ids = []
+    for raw in body.get("track_ids") or []:
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return str(body.get("name") or ""), ids
+
+
+async def api_collection_save(request: Request) -> JSONResponse:
+    """Save the collector's songs as a playlist (offered in Load Playlist)."""
+    import anyio
+
+    from . import collection
+
+    name, ids = await _collection_request(request)
+    if not ids:
+        return JSONResponse({"status": "error", "message": "nothing collected"}, status_code=400)
+
+    def work():
+        with localcache.connect() as conn:
+            return collection.save(name, ids, conn)
+    return JSONResponse({"status": "saved", **await anyio.to_thread.run_sync(work)})
+
+
+async def api_collection_play(request: Request) -> JSONResponse:
+    """Play the collector's songs in order (YouTube Music queue + active queue)."""
+    import anyio
+
+    from . import collection
+
+    name, ids = await _collection_request(request)
+    if not ids:
+        return JSONResponse({"status": "error", "message": "nothing collected"}, status_code=400)
+
+    def work():
+        with localcache.connect() as conn:
+            return collection.play(name, ids, conn)
+    try:
+        return JSONResponse(await anyio.to_thread.run_sync(work))
+    except Exception as exc:
+        log.warning("api_collection_play failed: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 async def api_play(request: Request) -> JSONResponse:
