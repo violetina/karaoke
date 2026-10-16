@@ -210,3 +210,15 @@ def test_get_synced_can_leave_queueing_to_the_caller(monkeypatch):
     assert called == []
     player.get_synced(SongRef(artist="a", title="t"))
     assert called
+
+
+
+def test_a_song_missing_only_its_mood_timeline_takes_the_full_chain(library, queue, monkeypatch):
+    # "mood" is not a graph step, so locate() finds the song complete; the
+    # light chain would then run without audio and never build the timeline.
+    library["Drive"] = (18955, ["mood"])
+    light = []
+    monkeypatch.setattr("karaoke.postprocess_queue.enqueue_if_needed",
+                        lambda *a, **k: light.append(a) or True)
+    assert song_finder.ensure_processed("Incubus", "Drive") == "queued-full"
+    assert queue[0]["full"] is True and light == []
