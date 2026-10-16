@@ -44,25 +44,77 @@ def _get_cached_audio_path(url: str) -> Optional[Path]:
     return None
 
 
+#: Shorter than this, a "song" file is a fragment, not the audio.
+MIN_AUDIO_SECONDS = 5.0
+
+
+def audio_file_ok(path: Path) -> bool:
+    """Whether a cached file is readable audio of a plausible length.
+
+    A download can leave a broken file that looks like any other: Frugit's
+    "You Make Me Wait" was 312 KB of WebM with no valid header, and every step
+    that read it failed while the cache kept handing it out. ffprobe reads the
+    header only, so this costs tens of milliseconds, not a decode. Without
+    ffprobe the file is trusted, as before.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffprobe"):
+        return True
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nk=1:nw=1", str(path)],
+            capture_output=True, text=True, timeout=20)
+        seconds = float(res.stdout.strip()) if res.returncode == 0 else 0.0
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return False
+    return seconds >= MIN_AUDIO_SECONDS
+
+
+def _discard(path: Path, why: str) -> None:
+    log.warning("postprocess: discarding %s from the cache: %s", path, why)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def run_download_logic(url: str, cookies_from_browser: Optional[str]) -> Optional[Path]:
     """Ensure audio for a YouTube or local URL is in the cache; download if needed.
     This function can be called by Celery tasks directly.
+
+    A cached file is only reused, and a download only returned, once it
+    reads as audio (audio_file_ok); a broken one is deleted and fetched
+    again rather than handed to every later step.
     """
     if url and Path(url).is_file():
         return Path(url)
     existing = _get_cached_audio_path(url)
     if existing:
-        return existing
+        if audio_file_ok(existing):
+            return existing
+        _discard(existing, "cached file is not readable audio")
     try:
         from .youtube import fetch_metadata
         meta = fetch_metadata(url, download=True, cookies_from_browser=cookies_from_browser)
         downloaded_path_str = meta.get("path")
         if downloaded_path_str and Path(downloaded_path_str).is_file():
-            return Path(downloaded_path_str)
+            downloaded = Path(downloaded_path_str)
+            if audio_file_ok(downloaded):
+                return downloaded
+            _discard(downloaded, "download is not readable audio")
+            return None
     except Exception:
         log.exception("postprocess: download failed for %s", url)
 
-    return _get_cached_audio_path(url)
+    fallback = _get_cached_audio_path(url)
+    if fallback and audio_file_ok(fallback):
+        return fallback
+    if fallback:
+        _discard(fallback, "file left by a failed download is not readable audio")
+    return None
 
 
 def run_analysis_logic(track_id: int, audio_path: Path, conn) -> bool:
