@@ -152,8 +152,12 @@ def local_audio(track_id: int, conn) -> Optional[Path]:
                             (track_id,)).fetchall():
         url = row["url"] or ""
         candidates: list[Path] = []
-        # radio_capture: a song sliced out of a radio recording, on disk.
-        if row["kind"] in ("local", "radio_capture"):
+        # Not radio_capture: those are cut out of a continuous recording at
+        # songrec's estimate of where the song starts, and can be a minute
+        # off ("Bohemian Rhapsody" began with ~63 s of DJ talk), which puts
+        # every chord and mood a minute late. The length guard cannot catch
+        # it -- the slice is about as long as the song.
+        if row["kind"] == "local":
             candidates = [Path(url.removeprefix("file://"))]
         else:
             vid = localcache.extract_youtube_id(url)

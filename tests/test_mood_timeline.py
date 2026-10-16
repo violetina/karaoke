@@ -97,7 +97,54 @@ def test_embed_clap_also_computes_the_mood_timeline(monkeypatch, tmp_path):
     monkeypatch.setattr(postprocess_worker, "run_clap_logic", lambda *a, **k: calls.append("clap"))
     monkeypatch.setattr(postprocess_worker, "run_mood_logic", lambda *a, **k: calls.append("mood"))
     monkeypatch.setattr("karaoke.localcache.connect", MagicMock())
+    (tmp_path / "a.webm").write_bytes(b"x")
     ctx = PostprocessContext(artist="A", title="B", url="u", track_id=3,
                              audio_path=tmp_path / "a.webm", pending=["mood"])
     tasks.embed_clap.run(ctx.to_dict())
     assert calls == ["mood"]
+
+
+def test_an_undecodable_file_is_no_audio_not_a_crash(monkeypatch, tmp_path):
+    import contextlib
+
+    def broken_wav(path, rate):
+        raise RuntimeError("Unspecified internal error.")
+
+    monkeypatch.setattr("karaoke.clap_vector._load", lambda: (None, None))
+    monkeypatch.setattr("karaoke.analyze._as_wav", lambda path, rate: contextlib.nullcontext(None))
+    assert mt._audio_scores(str(tmp_path / "x.mp3")) is None          # no wav: no audio
+    monkeypatch.setattr("karaoke.analyze._as_wav", broken_wav)
+    assert mt._audio_scores(str(tmp_path / "x.mp3")) is None          # decoder raises: no audio
+
+
+def test_the_backfill_survives_a_track_that_raises(monkeypatch, capsys):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "backfill_moods", Path(__file__).resolve().parent.parent / "scripts" / "backfill_moods.py")
+    script = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = script
+    spec.loader.exec_module(script)
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = {"n": "Artist - Song"}
+    monkeypatch.setattr("karaoke.localcache.connect", lambda *a, **k: contextlib_null(conn))
+    calls = []
+
+    def analyse(tid, c):
+        calls.append(tid)
+        if tid == 2:
+            raise RuntimeError("Unspecified internal error.")
+        return None
+    monkeypatch.setattr(mt, "analyse_track", analyse)
+    assert script.main(["--track-id", "1", "--track-id", "2", "--track-id", "3"]) == 0
+    assert calls == [1, 2, 3]                     # kept going after track 2
+    assert "1 errors" in capsys.readouterr().out
+
+
+def contextlib_null(value):
+    import contextlib
+
+    return contextlib.nullcontext(value)

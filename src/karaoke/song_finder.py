@@ -146,6 +146,8 @@ def ensure_processed(artist: str, title: str) -> str:
     lyrics was never added at all. A song that is already complete goes the
     old way, for the lyric-timing gaps the light chain still covers.
 
+    A missing mood timeline also takes the full chain: it needs the audio.
+
     ``queued-full`` | ``queued`` | ``complete`` | ``failed``.
     """
     out = locate(artist, title)
@@ -153,6 +155,14 @@ def ensure_processed(artist: str, title: str) -> str:
         return "queued-full"
     if out["status"] != "found":
         return "failed"
-    from .postprocess_queue import enqueue_if_needed
+    from . import localcache
+    from .postprocess_queue import enqueue_if_needed, needs_postprocessing
 
+    # A missing mood timeline needs the audio too, which only the full chain
+    # fetches. It is not a graph step, so locate() did not queue it, and the
+    # light chain below would run without audio and leave it missing.
+    with localcache.connect() as conn:
+        pending = needs_postprocessing(out["track_id"], conn)
+    if "mood" in pending:
+        return "queued-full" if _queue_full(artist, title) else "failed"
     return "queued" if enqueue_if_needed(artist, title, "") else "complete"
