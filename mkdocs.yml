@@ -33,8 +33,7 @@ plugins:
           paths: [src]
           options:
             show_source: false
-  - mermaid2:
-      javascript: "https://unpkg.com/mermaid/dist/mermaid.min.js"
+  - mermaid2
   - glightbox
   - mkdocs_graphviz
 
@@ -60,6 +59,8 @@ markdown_extensions:
 
 extra_javascript:
   - https://cdn.jsdelivr.net/gh/rod2ik/cdn@main/mkdocs/javascripts/mkdocs-graphviz.js
+  # This allows Mermaid to render correctly in the browser
+  - https://unpkg.com/mermaid/dist/mermaid.min.js
 
 nav:
   - Overview: index.md
@@ -107,7 +108,6 @@ nav:
       - Doc workflow plan: design/documentation-agent-workflow-plan.md
       - Events & Postgres migration plan: events_and_postgres_plan.md
       - Saved playlists Postgres migration plan: saved_playlists_postgres_migration_plan.md
-      - Disk chord backfill plan: disk_chord_backfill_plan.md
       - TUI first concept: design/karaoke-tui-first-concept.md
   - Releases:
       - Version 1.1.0: releases/1.1.0.md

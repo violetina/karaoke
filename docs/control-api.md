@@ -54,6 +54,22 @@ GET /api/captions/stream SSE stream of live transcribed auto-captions
 GET /api/stage/stream    SSE stream of live playback, lyrics & rhythm
 ```
 
+### Live Mood & Stage Visualizer (`/mood`)
+
+`GET /mood` renders a responsive, sound- and vibe-reactive visual canvas synchronized to playback:
+
+- **Mood Timeline & Valence/Arousal Mapping**:
+  Evaluates 10-second windows positioned on the valence $\times$ arousal plane.
+  - **Arousal**: Extracted from CLAP audio embeddings (calibrated against the library baseline) combined with relative loudness dynamics (dB relative to track median).
+  - **Valence**: Extracted primarily from lyric semantic embeddings against tone prompts; for instrumentals, valence falls back to acoustic CLAP embeddings.
+  - **Smoothing & Stability**: Employs a 3-window moving average, hysteresis, and a 30-second minimum segment constraint to prevent jitter.
+  - **Borderliners**: Stretches within 0.15 of an axis boundary are labeled with dual moods (e.g. `SAD <-> TENDER`, `TENDER <-> HAPPY`).
+  - **Fallback Hierarchy**: Playhead timeline segment $\rightarrow$ active lyric line sentiment $\rightarrow$ room-mic caption words $\rightarrow$ overall track lyric mood (cached). Loudness never triggers anger.
+- **Harmonic Chord Overlay**:
+  Displays real-time chord symbols, active Roman numerals relative to the key tonic, and upcoming chord predictions with animated pop transitions.
+- **Duration / Edit Guard**:
+  Compares active player position and track duration against analysed audio files ($5.0\text{s}$ or $5\%$ threshold). Suppresses out-of-sync chord overlays when streaming alternate video cuts containing spoken intros or sketches.
+
 See [Live auto-captions](live-captions.md) for details on desktop PipeWire capture and Whisper transcription.
 
 ## Player controls (MPRIS)
