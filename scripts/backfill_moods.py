@@ -54,12 +54,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     with localcache.connect() as conn:
         ids = args.track_id or candidates(conn, args.limit or None)
         print(f"{len(ids)} track(s)")
-        done = failed = 0
+        done = failed = errors = 0
         for n, tid in enumerate(ids, start=1):
             t0 = time.time()
-            tl = mood_timeline.analyse_track(tid, conn)
             name = conn.execute("SELECT artist || ' - ' || title AS n FROM tracks"
                                 " WHERE track_id = %s", (tid,)).fetchone()["n"]
+            # One bad file must not end a run of thousands: report and go on.
+            try:
+                tl = mood_timeline.analyse_track(tid, conn)
+            except Exception as exc:
+                errors += 1
+                conn.rollback()
+                print(f"[{n}/{len(ids)}] {tid:>6} {name[:40]:40} ERROR {type(exc).__name__}: {exc}")
+                continue
             if tl is None:
                 failed += 1
                 print(f"[{n}/{len(ids)}] {tid:>6} {name[:40]:40} no audio")
@@ -69,7 +76,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[{n}/{len(ids)}] {tid:>6} {name[:40]:40} {s['dominant']:6} "
                   f"swings={s['swing_count']} border={s['borderline_share']:.0%} "
                   f"({time.time() - t0:.1f}s)  {s['arc'][:60]}")
-    print(f"\n{done} stored, {failed} without audio")
+    print(f"\n{done} stored, {failed} without usable audio, {errors} errors")
     return 0
 
 

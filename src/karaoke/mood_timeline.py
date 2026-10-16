@@ -362,10 +362,16 @@ def _audio_scores(audio_path: str):
     from .analyze import _as_wav
 
     model, processor = clap_vector._load()
-    with _as_wav(audio_path, clap_vector.SAMPLE_RATE) as wav:
-        if not wav:
-            return None
-        y, _sr = librosa.load(wav, sr=clap_vector.SAMPLE_RATE, mono=True)
+    try:
+        with _as_wav(audio_path, clap_vector.SAMPLE_RATE) as wav:
+            if not wav:
+                return None
+            y, _sr = librosa.load(wav, sr=clap_vector.SAMPLE_RATE, mono=True)
+    except Exception as exc:
+        # A corrupt file (libsndfile "Unspecified internal error") is no
+        # audio, not a crash: the library backfill died on one after 415 songs.
+        log.warning("mood timeline: cannot decode %s: %s", audio_path, exc)
+        return None
     span = int(clap_vector.SAMPLE_RATE * WINDOW_S)
     windows = [y[i:i + span] for i in range(0, len(y), span)]
     windows = [w for w in windows if len(w) >= clap_vector.SAMPLE_RATE * 3]
