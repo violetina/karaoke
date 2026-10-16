@@ -110,7 +110,9 @@ client().count(index=PROGRESSION_INDEX,
   497 MiB against the cap, evicting continuously. For the ~181 YouTube-only
   tracks the chain should not assume the file downloaded in `download_audio`
   still exists by the time `analyze_harmony` runs — re-resolve when the path has
-  vanished. Not yet done.
+  vanished. **Done 2026-10-16** (`tasks._audio_ready`): every step that reads
+  the audio fetches it again when the cache pruned it. It had stranded 37 of 124
+  radio songs without CLAP or a mood timeline.
 - **When the USB is unmounted, 11,489 tracks resolve to YouTube on playback**
   and will download. That is the same fallback that caused the wasted downloads
   above. Worth deciding whether that is wanted.

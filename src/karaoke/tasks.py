@@ -283,10 +283,43 @@ def download_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     return context.to_dict()
 
 
+def _audio_ready(context: "PostprocessContext") -> bool:
+    """Whether the chain's audio is on disk, fetching it again if it vanished.
+
+    The YouTube cache is capped (KARAOKE_YT_CACHE_MAX_MB, 500 by default) and
+    every download prunes the oldest files, protecting only its own. With six
+    workers downloading in parallel, a file can be pruned before a later step
+    of its own chain reads it -- CLAP runs last, on one worker, minutes later.
+    That stranded 37 of 124 radio songs without CLAP or a mood timeline, and
+    docs/disk_chord_backfill_plan.md had asked for exactly this re-fetch.
+    """
+    if context.audio_path is None:
+        return False
+    if context.audio_path.is_file():
+        return True
+    from . import localcache
+
+    if not context.url or not localcache.extract_youtube_id(context.url):
+        log.warning("postprocess: audio for %s - %s is gone and has no URL to refetch (%s)",
+                    context.artist, context.title, context.audio_path)
+        return False
+    log.info("postprocess: audio for %s - %s was pruned from the cache; fetching it again",
+             context.artist, context.title)
+    from . import postprocess_worker
+
+    path = postprocess_worker.run_download_logic(context.url, context.cookies_from_browser)
+    if path is None or not Path(path).is_file():
+        log.warning("postprocess: could not refetch audio for %s - %s", context.artist, context.title)
+        return False
+    context.audio_path = Path(path)
+    return True
+
+
 @app.task(bind=True, name="karaoke.tasks.analyze_audio", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
 def analyze_audio(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
-    if context.track_id is None or "analysis" not in context.pending or context.audio_path is None:
+    if (context.track_id is None or "analysis" not in context.pending
+            or not _audio_ready(context)):
         return context.to_dict()
     log.info("celery analyze_audio: %s - %s", context.artist, context.title)
     from . import postprocess_worker, localcache # Import localcache for database connection
@@ -309,7 +342,7 @@ def analyze_harmony(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     """
     context = PostprocessContext.from_dict(context_dict)
     if (context.track_id is None or "chords" not in context.pending
-            or context.audio_path is None):
+            or not _audio_ready(context)):
         return context.to_dict()
     log.info("celery analyze_harmony: %s - %s", context.artist, context.title)
     from . import postprocess_worker, localcache
@@ -354,7 +387,7 @@ def upgrade_timings(self, context_dict: dict[str, Any]) -> dict[str, Any]:
 @app.task(bind=True, name="karaoke.tasks.sync_lyrics", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
 def sync_lyrics(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
-    if context.track_id is None or "sync" not in context.pending or context.audio_path is None:
+    if context.track_id is None or "sync" not in context.pending or not _audio_ready(context):
         return context.to_dict()
     log.info("celery sync_lyrics: %s - %s", context.artist, context.title)
     from . import postprocess_worker, localcache
@@ -387,7 +420,7 @@ def embed_clap(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     """CLAP timbre embedding and mood timeline, on the single-process ``karaoke-clap`` worker."""
     context = PostprocessContext.from_dict(context_dict)
     wanted = {"clap", "mood"}.intersection(context.pending)
-    if context.track_id is None or not wanted or context.audio_path is None:
+    if context.track_id is None or not wanted or not _audio_ready(context):
         return context.to_dict()
     log.info("celery embed_clap: %s - %s (%s)", context.artist, context.title,
              ", ".join(sorted(wanted)))
