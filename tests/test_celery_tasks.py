@@ -109,6 +109,7 @@ def test_analyze_audio_no_pending_or_no_audio(tmp_path):
     assert result_no_audio == context_no_audio.to_dict()
 
 def test_analyze_audio_success(monkeypatch, tmp_path):
+    (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_analysis_logic = MagicMock(return_value=True)
     monkeypatch.setattr(postprocess_worker, "run_analysis_logic", mock_run_analysis_logic)
     monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
@@ -123,6 +124,7 @@ def test_analyze_audio_success(monkeypatch, tmp_path):
     mock_run_analysis_logic.assert_called_once_with(context.track_id, context.audio_path, ANY)
 
 def test_analyze_audio_failure(monkeypatch, tmp_path):
+    (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_analysis_logic = MagicMock(return_value=False)
     monkeypatch.setattr(postprocess_worker, "run_analysis_logic", mock_run_analysis_logic)
     monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
@@ -192,6 +194,7 @@ def test_sync_lyrics_no_pending_or_no_audio(tmp_path):
     assert result_no_audio == context_no_audio.to_dict()
 
 def test_sync_lyrics_success(monkeypatch, tmp_path):
+    (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_sync_logic = MagicMock(return_value=True)
     monkeypatch.setattr(postprocess_worker, "run_sync_logic", mock_run_sync_logic)
     monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
@@ -206,6 +209,7 @@ def test_sync_lyrics_success(monkeypatch, tmp_path):
     mock_run_sync_logic.assert_called_once_with(context.track_id, context.audio_path, ANY)
 
 def test_sync_lyrics_failure(monkeypatch, tmp_path):
+    (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_sync_logic = MagicMock(return_value=False)
     monkeypatch.setattr(postprocess_worker, "run_sync_logic", mock_run_sync_logic)
     monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
@@ -595,6 +599,7 @@ def test_embed_clap_runs_only_when_pending_with_audio(monkeypatch, tmp_path):
                         lambda tid, path, conn, **kw: calls.append((tid, path)) or True)
     monkeypatch.setattr(localcache, "connect", MagicMock())
     audio = tmp_path / "a.webm"
+    audio.write_bytes(b"x")
     base = dict(artist="A", title="B", url="u", track_id=5)
     tasks.embed_clap.run(PostprocessContext(**base, audio_path=audio, pending=["sync"]).to_dict())
     tasks.embed_clap.run(PostprocessContext(**base, audio_path=None, pending=["clap"]).to_dict())
@@ -620,3 +625,34 @@ def test_the_clap_queue_does_not_share_the_postprocess_routing_key():
     clap, main = queues[celery_app.CLAP_QUEUE], queues[celery_app.POSTPROCESS_QUEUE]
     assert clap.routing_key == celery_app.CLAP_QUEUE
     assert clap.routing_key != main.routing_key
+
+
+
+def test_a_pruned_file_is_fetched_again_before_the_step_runs(monkeypatch, tmp_path):
+    # The YouTube cache evicts the oldest files on every download; with six
+    # parallel downloads a chain's file can vanish before its CLAP step.
+    fresh = tmp_path / "again.webm"
+    fresh.write_bytes(b"x")
+    fetched, embedded = [], []
+    monkeypatch.setattr(postprocess_worker, "run_download_logic",
+                        lambda url, cookies: fetched.append(url) or fresh)
+    monkeypatch.setattr(postprocess_worker, "run_clap_logic",
+                        lambda tid, path, conn, **kw: embedded.append(path) or True)
+    monkeypatch.setattr(localcache, "connect", MagicMock())
+    ctx = PostprocessContext(artist="Alan Walker", title="Alone",
+                             url="https://www.youtube.com/watch?v=1-xGerv5FOk", track_id=18989,
+                             audio_path=tmp_path / "pruned.webm", pending=["clap"], full=True)
+    out = PostprocessContext.from_dict(tasks.embed_clap.run(ctx.to_dict()))
+    assert fetched == ["https://www.youtube.com/watch?v=1-xGerv5FOk"]
+    assert embedded == [fresh] and out.audio_path == fresh
+
+
+def test_a_vanished_file_without_a_url_is_skipped_not_fetched(monkeypatch, tmp_path):
+    fetch = MagicMock()
+    monkeypatch.setattr(postprocess_worker, "run_download_logic", fetch)
+    monkeypatch.setattr(postprocess_worker, "run_clap_logic", MagicMock())
+    ctx = PostprocessContext(artist="A", title="B", url="", track_id=1,
+                             audio_path=tmp_path / "gone.flac", pending=["clap"])
+    tasks.embed_clap.run(ctx.to_dict())
+    fetch.assert_not_called()
+    postprocess_worker.run_clap_logic.assert_not_called()

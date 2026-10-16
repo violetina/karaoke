@@ -97,6 +97,7 @@ def test_embed_clap_also_computes_the_mood_timeline(monkeypatch, tmp_path):
     monkeypatch.setattr(postprocess_worker, "run_clap_logic", lambda *a, **k: calls.append("clap"))
     monkeypatch.setattr(postprocess_worker, "run_mood_logic", lambda *a, **k: calls.append("mood"))
     monkeypatch.setattr("karaoke.localcache.connect", MagicMock())
+    (tmp_path / "a.webm").write_bytes(b"x")
     ctx = PostprocessContext(artist="A", title="B", url="u", track_id=3,
                              audio_path=tmp_path / "a.webm", pending=["mood"])
     tasks.embed_clap.run(ctx.to_dict())
