@@ -230,5 +230,40 @@ If the broker is unreachable, `enqueue_if_needed()` is a deliberate no-op (so th
 never blocks/crashes). Start `make mq-port-forward` first. Confirm reachability:
 `(echo > /dev/tcp/localhost/5672) && echo ok`.
 
+### Whisper sync redelivered in a loop / worker dies with `PRECONDITION_FAILED`
+RabbitMQ closes a channel whose message stays unacknowledged longer than its
+consumer timeout (30 min). With `task_acks_late=True`, a Whisper sync on a long
+track under load outran it: the worker died and the message was redelivered —
+to run Whisper from the start again (six copies of one instrumental, 2026-10-18).
+`sync_lyrics` is therefore acknowledged on receipt (`acks_late=False`); the rest
+of the chain keeps late acks. A sync lost to a crash is re-queued by the next
+playback or backfill.
+
+### A song whose sync can't succeed keeps being re-synced
+It shouldn't any more: a sync that gives up deterministically (duration cap, no
+timings, no line anchored on a heard word) is remembered in `sync_failures`
+with a hash of the lyrics, and `needs_postprocessing` stops reporting `sync`
+for that track until its lyrics change. Typical case: instrumentals with
+mis-attached lyrics.
+
+### Redoing a step that is already done
+`needs_postprocessing` only reports what is *missing*. To redo something, pass
+named steps — they run even when done:
+`publish_postprocess_task(artist, title, full=True, steps=["chords", "mood"])`.
+The TUI's `P` does exactly that for the playing song (chords, and the mood
+timeline that reads them).
+
+### Mood timeline backfill
+`scripts/backfill_moods.py --limit 0` re-analyses every track without a current
+`MOOD_VERSION` timeline (resumable: done rows are skipped). One process uses
+about 2.5 cores; to go faster run shards — split the remaining ids into N lists
+and give each process its own `--track-id` list (two copies of the plain
+command would work through the same songs). Run them in
+`karaoke-postprocess.slice`, and mind its caps (`CPUQuota=600%`,
+`MemoryHigh=8G`): shards beyond the quota only share the same six cores, and
+over `MemoryHigh` they swap. Raise it for the session only:
+`systemctl --user set-property --runtime karaoke-postprocess.slice CPUQuota=1200% MemoryHigh=14G MemoryMax=18G`
+(reverts at reboot). Re-run `make smart-playlists PUSH=1` afterwards.
+
 ### Queue lost after a broker restart
 Expected — it's non-durable by design. Rebuild it: `make postprocess-enqueue-all`.
