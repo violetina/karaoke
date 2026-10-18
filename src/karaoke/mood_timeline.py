@@ -44,7 +44,7 @@ from typing import Any, Optional
 
 from .logger import log
 
-MOOD_VERSION = 1
+MOOD_VERSION = 2
 
 #: Each window is one CLAP forward pass, CLAP's own input length.
 WINDOW_S = 10.0
@@ -104,13 +104,70 @@ WINDOW_WORDS_SHARE = 0.25
 QUADRANT = {(True, True): "happy", (False, True): "angry",
             (False, False): "sad", (True, False): "tender"}
 
+#: The sound's *character*, scored like the moods (calibrated CLAP prompts).
+#: Four quadrant moods could not say what Tina heard: "energetic",
+#: "theatrical", "festive chaos" and -- twice, for Hendrix -- "the blues,
+#: frustrated", all came out "angry". Probed on her 16 judged songs, the
+#: character's top two contained her word 10 times (chance ~3); "bluesy" won
+#: on both Hendrix blues, "energetic"/"dramatic" on the Primer build-up,
+#: "dreamy" on Red Star. Weak: festive, theatrical, and sad-vs-warm without
+#: words -- those still lean on lyrics and harmony.
+CHARACTER_PROMPTS: dict[str, tuple[str, ...]] = {
+    "aggressive": ("aggressive angry heavy distorted music", "furious violent screaming music"),
+    "energetic": ("energetic driving upbeat music", "powerful pumping energetic beat"),
+    "dramatic": ("dramatic theatrical cinematic music", "grand dramatic build-up"),
+    "festive": ("festive chaotic party brass music", "wild celebration dance music"),
+    "bluesy": ("bluesy frustrated crying blues guitar", "slow aching electric blues"),
+    "dreamy": ("dreamy ethereal spacey music", "floating atmospheric dreamy sound"),
+    "romantic": ("romantic tender love song", "intimate warm romantic ballad"),
+    "melancholic": ("melancholic sad lonely music", "mournful heartbroken slow song"),
+    "calm": ("calm peaceful relaxed music", "quiet gentle soft music"),
+    "uplifting": ("uplifting motivating hopeful music", "inspiring positive anthem"),
+    "cheerful": ("cheerful happy bright playful music", "sunny feel-good pop"),
+    "tense": ("tense dark ominous suspenseful music", "brooding threatening music"),
+}
+CHARACTERS = tuple(CHARACTER_PROMPTS)
+
+#: Within each mood, which characters name a feeling, and what it is called.
+#: The quadrant decides *where* on the plane; the character says *what kind*.
+FEELINGS_BY_MOOD: dict[str, dict[str, str]] = {
+    "angry": {"aggressive": "angry", "bluesy": "frustrated", "energetic": "intense",
+              "dramatic": "dramatic", "tense": "tense"},
+    "happy": {"cheerful": "cheerful", "energetic": "energetic", "festive": "festive",
+              "uplifting": "uplifting", "dramatic": "dramatic"},
+    "tender": {"romantic": "romantic", "dreamy": "dreamy", "calm": "calm",
+               "uplifting": "hopeful"},
+    "sad": {"melancholic": "melancholic", "bluesy": "blue", "dreamy": "wistful"},
+}
+#: Broad words that lose a near-tie to a specific one: Tina called "Let's Do
+#: It" romantic, where calm led romantic by 0.03.
+GENERIC_FEELINGS = {"calm", "cheerful", "energetic"}
+NEAR_TIE_Z = 0.15
+#: When no character stands out. Dark-and-intense is "intense", not "angry":
+#: anger has to be heard (an aggressive sound) or said (confrontational words).
+DEFAULT_FEELING = {"angry": "intense", "happy": "happy", "tender": "tender", "sad": "sad"}
+
+#: A character must beat its library baseline by this much (z) to name the
+#: feeling; below it the quadrant's default stands.
+CHARACTER_MIN_Z = 0.3
+
+#: Sound and words this far apart, in opposite directions, are a contrast
+#: worth naming rather than averaging away -- bittersweet. Set high on
+#: purpose: CLAP reads most soft acoustic music as warm, so a modest gap is
+#: that bias, not a feeling. At 0.3 "The Will to Death" came out bittersweet;
+#: Tina hears it as plainly sad.
+CONTRAST_SOUND = 0.6
+CONTRAST_WORDS = 0.5
+
 
 # -- calibration ---------------------------------------------------------------
 
 def _calibration_path() -> Path:
     from .config import settings
 
-    return Path(settings.data_dir) / "mood_calibration.json"
+    # One file per version: a newer build must not overwrite the baselines a
+    # running older worker reads, or the two would rebuild over each other.
+    return Path(settings.data_dir) / f"mood_calibration.v{MOOD_VERSION}.json"
 
 
 def _unit(rows):
@@ -131,6 +188,19 @@ def _audio_prompt_matrix():
     rows = []
     for mood in AUDIO_MOODS:
         vecs = [clap_vector.embed_text(p) for p in AUDIO_PROMPTS[mood]]
+        rows.append(np.mean([v for v in vecs if v], axis=0))
+    return _unit(rows)
+
+
+def _character_prompt_matrix():
+    """Unit text vectors for the sound characters, like the mood prompts."""
+    import numpy as np
+
+    from . import clap_vector
+
+    rows = []
+    for name in CHARACTERS:
+        vecs = [clap_vector.embed_text(p) for p in CHARACTER_PROMPTS[name]]
         rows.append(np.mean([v for v in vecs if v], axis=0))
     return _unit(rows)
 
@@ -159,6 +229,7 @@ def build_calibration(*, clap_sample: int = 4000, lyric_sample: int = 300) -> di
         query={"_source": ["clap_vector"],
                "query": {"function_score": {"random_score": {"seed": 7}}}}))]
     audio = _unit(vectors) @ _audio_prompt_matrix().T
+    characters = _unit(vectors) @ _character_prompt_matrix().T
 
     with localcache.connect() as conn:
         rows = conn.execute(
@@ -172,6 +243,8 @@ def build_calibration(*, clap_sample: int = 4000, lyric_sample: int = 300) -> di
         "version": MOOD_VERSION,
         "built_at": time.time(),
         "audio_mean": audio.mean(axis=0).tolist(), "audio_std": audio.std(axis=0).tolist(),
+        "character_mean": characters.mean(axis=0).tolist(),
+        "character_std": characters.std(axis=0).tolist(),
         "tone_mean": tones.mean(axis=0).tolist(), "tone_std": tones.std(axis=0).tolist(),
         "samples": {"audio": len(vectors), "lyrics": len(texts)},
     }
@@ -209,10 +282,20 @@ class Segment:
     arousal: float
     #: The mood across the nearer boundary, when the stretch is borderline.
     alt: Optional[str] = None
+    #: The finer word for this stretch: "frustrated", "dreamy", "festive"...
+    feeling: str = ""
+    #: When sound and words pull opposite ways: "bittersweet" or "ironic".
+    contrast: Optional[str] = None
 
     @property
     def label(self) -> str:
         return f"{self.mood}↔{self.alt}" if self.alt else self.mood
+
+    @property
+    def describe(self) -> str:
+        """The feeling with its tension, e.g. "longing" or "cheerful, ironic"."""
+        word = self.feeling or self.mood
+        return f"{word}, {self.contrast}" if self.contrast else word
 
 
 @dataclass
@@ -259,9 +342,68 @@ def _smooth(values, width: int = 3):
                      for i in range(len(values))])
 
 
+def feeling_for(mood: str, alt: Optional[str], character: Optional[dict[str, float]],
+                context: Optional[dict[str, Any]] = None) -> str:
+    """The finer word for a stretch, from its quadrant, sound character and context.
+
+    ``context`` may carry ``tone`` (the lyrics' clear tone, e.g. "angry and
+    confrontational") and ``blues`` (the chords say blues).
+    """
+    context = context or {}
+    # Sad edging into tender is the in-between Tina called "longing"
+    # ("I Put a Spell on You": sad <-> longing).
+    if {mood, alt} == {"sad", "tender"}:
+        return "longing"
+    if mood in ("angry", "sad") and context.get("blues"):
+        return "frustrated" if mood == "angry" else "blue"
+    if mood == "angry" and (context.get("tone") or "").startswith("angry"):
+        return "angry"
+    if mood == "angry" and (context.get("tone") or "").startswith("defiant"):
+        return "defiant"
+    options = FEELINGS_BY_MOOD.get(mood, {})
+    if character:
+        ranked = sorted(((character.get(c, float("-inf")), name)
+                         for c, name in options.items()), reverse=True)
+        if ranked and ranked[0][0] >= CHARACTER_MIN_Z:
+            best_z, best = ranked[0]
+            if best in GENERIC_FEELINGS:
+                for z, name in ranked[1:]:
+                    if name not in GENERIC_FEELINGS and best_z - z <= NEAR_TIE_Z:
+                        return name
+            return best
+    return DEFAULT_FEELING.get(mood, mood)
+
+
+def contrast_for(sound_v: Optional[float], words_v: Optional[float],
+                 context: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Name a pull between sound and words instead of averaging it away.
+
+    "ironic" needs the lyrics to read clearly cynical: a gap alone mostly
+    meant *bittersweet* (warm sound, sad words), and the meaning model reads
+    "Pow Wow" -- Tina: cheerful surface, war underneath -- as tender, so it
+    cannot be found from the gap.
+    """
+    context = context or {}
+    if (context.get("tone") or "").startswith("cynical"):
+        return "ironic"
+    if sound_v is None or words_v is None:
+        return None
+    if sound_v >= CONTRAST_SOUND and words_v <= -CONTRAST_WORDS:
+        return "bittersweet"
+    return None
+
+
 def build(valence, arousal, *, window_s: float = WINDOW_S,
-          duration_s: Optional[float] = None, has_lyrics: bool = False) -> MoodTimeline:
-    """Smoothed per-window valence/arousal -> segments, swings and borderliners."""
+          duration_s: Optional[float] = None, has_lyrics: bool = False,
+          character=None, sound_v=None, words_v=None,
+          context: Optional[dict[str, Any]] = None) -> MoodTimeline:
+    """Smoothed per-window valence/arousal -> segments, swings and borderliners.
+
+    ``character`` (windows x CHARACTERS z-scores), ``sound_v`` and
+    ``words_v`` (per window) are optional: with them, each segment also gets
+    a feeling and, where sound and words disagree, a contrast.
+    """
+    import numpy as np
     v, a = _smooth(valence), _smooth(arousal)
     n = len(v)
     duration = duration_s if duration_s is not None else n * window_s
@@ -310,12 +452,23 @@ def build(valence, arousal, *, window_s: float = WINDOW_S,
             break
         runs = [(s, e) for _, s, e in merged]
 
+    char = np.asarray(character, dtype=float) if character is not None else None
+    snd = np.asarray(sound_v, dtype=float) if sound_v is not None else None
+    wrd = np.asarray(words_v, dtype=float) if words_v is not None else None
     segments = []
     for lab, s, e in merged:
         sv, sa = float(v[s:e].mean()), float(a[s:e].mean())
         _, alt = classify(sv, sa)
-        segments.append(Segment(start_s=s * window_s, end_s=min(e * window_s, duration),
-                                mood=lab, valence=sv, arousal=sa, alt=alt))
+        means = (dict(zip(CHARACTERS, char[s:e].mean(axis=0)))
+                 if char is not None and len(char) >= e else None)
+        segments.append(Segment(
+            start_s=s * window_s, end_s=min(e * window_s, duration),
+            mood=lab, valence=sv, arousal=sa, alt=alt,
+            feeling=feeling_for(lab, alt, means, context),
+            contrast=contrast_for(
+                float(snd[s:e].mean()) if snd is not None and len(snd) >= e else None,
+                float(wrd[s:e].mean()) if wrd is not None and len(wrd) >= e else None,
+                context)))
     return MoodTimeline(segments=segments, duration_s=duration, has_lyrics=has_lyrics,
                         summary=summarise(segments, duration))
 
@@ -344,6 +497,14 @@ def summarise(segments: list[Segment], duration_s: float) -> dict[str, Any]:
     swings = [{"at_s": round(b.start_s, 1), "from": a.mood, "to": b.mood,
                "jump": round(((b.valence - a.valence) ** 2 + (b.arousal - a.arousal) ** 2) ** 0.5, 3)}
               for a, b in zip(segments, segments[1:])]
+    feel_time: dict[str, float] = {}
+    contrast_time: dict[str, float] = {}
+    for seg in segments:
+        span = seg.end_s - seg.start_s
+        if seg.feeling:
+            feel_time[seg.feeling] = feel_time.get(seg.feeling, 0.0) + span
+        if seg.contrast:
+            contrast_time[seg.contrast] = contrast_time.get(seg.contrast, 0.0) + span
     minutes = duration_s / 60.0 if duration_s else 0.0
     dominant = max(time_in, key=time_in.get)
     return {
@@ -354,6 +515,12 @@ def summarise(segments: list[Segment], duration_s: float) -> dict[str, Any]:
         "swings_per_minute": round(len(swings) / minutes, 2) if minutes else 0.0,
         "borderline_share": round(border / duration_s, 3) if duration_s else 0.0,
         "shares": {m: round(t / duration_s, 3) for m, t in time_in.items()} if duration_s else {},
+        "dominant_feeling": max(feel_time, key=feel_time.get) if feel_time else dominant,
+        "feeling_arc": " → ".join(s.describe for s in segments),
+        # A contrast counts for the song when it holds for at least a third.
+        "contrast": (max(contrast_time, key=contrast_time.get)
+                     if contrast_time and duration_s
+                     and max(contrast_time.values()) / duration_s >= 1 / 3 else None),
     }
 
 
@@ -401,10 +568,12 @@ def _audio_scores(audio_path: str):
                                return_tensors="pt")
             feats.append(clap_vector._unwrap(model.get_audio_features(**inputs)).numpy())
     cal = calibration()
-    sims = _unit(np.concatenate(feats)) @ _audio_prompt_matrix().T
-    z = (sims - np.array(cal["audio_mean"])) / np.array(cal["audio_std"])
+    emb = _unit(np.concatenate(feats))
+    z = ((emb @ _audio_prompt_matrix().T) - np.array(cal["audio_mean"])) / np.array(cal["audio_std"])
+    char = ((emb @ _character_prompt_matrix().T) - np.array(cal["character_mean"])) \
+        / np.array(cal["character_std"])
     rms = np.array([float(np.sqrt(np.mean(w ** 2))) for w in windows])
-    return z, rms, len(y) / clap_vector.SAMPLE_RATE
+    return z, char, rms, len(y) / clap_vector.SAMPLE_RATE
 
 
 def _meaning_valence(texts: list[str]):
@@ -427,15 +596,35 @@ def _meaning_valence(texts: list[str]):
     return out
 
 
+_tone_labels: Optional[dict[str, list[float]]] = None
+
+
+def _lyric_tone(text: str) -> Optional[str]:
+    """The lyrics' tone when the classifier is clear about it, else None."""
+    global _tone_labels
+    from . import tone
+
+    if len((text or "").strip()) < 80:
+        return None
+    if _tone_labels is None:
+        _tone_labels = tone.label_vectors()
+    verdict = tone.classify(text, _tone_labels)
+    return verdict.tone if verdict is not None and verdict.clear else None
+
+
 def analyse(audio_path: str, lyric_lines: list[tuple[float, str]],
-            plain_lyrics: str = "") -> Optional[MoodTimeline]:
-    """A track's mood timeline from its audio and (timed) lyrics."""
+            plain_lyrics: str = "", *, blues: bool = False) -> Optional[MoodTimeline]:
+    """A track's mood timeline from its audio and (timed) lyrics.
+
+    ``blues``: the chord analysis calls the track a blues, which turns dark
+    intensity into frustration rather than anger.
+    """
     import numpy as np
 
     scored = _audio_scores(audio_path)
     if scored is None:
         return None
-    z, rms, duration = scored
+    z, char, rms, duration = scored
     d = {m: z[:, i] for i, m in enumerate(AUDIO_MOODS)}
     db = 20 * np.log10(np.maximum(rms, 1e-6))
     loud = np.clip((db - np.median(db)) / LOUDNESS_DB, -1.5, 1.5)
@@ -444,6 +633,8 @@ def analyse(audio_path: str, lyric_lines: list[tuple[float, str]],
 
     whole = "\n".join(t for _, t in lyric_lines) or plain_lyrics
     song_v = _meaning_valence([whole])[0] if whole else None
+    context = {"tone": _lyric_tone(whole), "blues": blues}
+    words = None
     if song_v is None:
         valence = audio_v
     else:
@@ -457,7 +648,8 @@ def analyse(audio_path: str, lyric_lines: list[tuple[float, str]],
                           else WINDOW_WORDS_SHARE * sv + (1 - WINDOW_WORDS_SHARE) * song_v
                           for sv in seg_v])
         valence = WORDS_WEIGHT * words + (1 - WORDS_WEIGHT) * audio_v
-    return build(valence, arousal, duration_s=duration, has_lyrics=song_v is not None)
+    return build(valence, arousal, duration_s=duration, has_lyrics=song_v is not None,
+                 character=char, sound_v=audio_v, words_v=words, context=context)
 
 
 # -- storage -------------------------------------------------------------------
@@ -556,7 +748,14 @@ def analyse_track(track_id: int, conn, audio_path: Optional[Path] = None) -> Opt
         if not is_transcribed(row.get("source") or ""):
             lines = [(t, x) for t, x in parse_lrc(row["synced_lyrics"] or "") if x.strip()]
             plain = row["plain_lyrics"] or ""
-    timeline = analyse(str(path), lines, plain)
+    blues = False
+    try:
+        chords_row = conn.execute("SELECT harmony FROM track_chords WHERE track_id = %s",
+                                  (track_id,)).fetchone()
+        blues = bool(chords_row and (chords_row["harmony"] or {}).get("style") == "blues")
+    except Exception:
+        conn.rollback()
+    timeline = analyse(str(path), lines, plain, blues=blues)
     if timeline is not None:
         save(track_id, timeline, conn, source_path=str(path))
     return timeline

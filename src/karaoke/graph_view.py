@@ -54,10 +54,12 @@ def _add_mood_timelines(nodes: dict[int, dict[str, Any]], strategy: str) -> None
 
         with localcache.connect() as conn:
             mood_timeline.ensure_schema(conn)
+            # Any version: older timelines lack feelings but still show their
+            # moods, so a version bump does not blank the graph until the
+            # backfill has recomputed everything.
             rows = conn.execute(
                 "SELECT track_id, duration_s, segments, summary FROM track_moods"
-                " WHERE track_id = ANY(%s) AND mood_version = %s",
-                (list(nodes), mood_timeline.MOOD_VERSION)).fetchall()
+                " WHERE track_id = ANY(%s)", (list(nodes),)).fetchall()
     except Exception as exc:
         log.debug("graph: mood timeline lookup failed: %s", exc)
         return
@@ -68,12 +70,15 @@ def _add_mood_timelines(nodes: dict[int, dict[str, Any]], strategy: str) -> None
             continue
         node["dominant_mood"] = summary["dominant"]
         node["mood_source"] = "timeline"
-        node["mood_arc"] = summary.get("arc", "")
+        node["mood_arc"] = summary.get("feeling_arc") or summary.get("arc", "")
+        node["mood_feeling"] = summary.get("dominant_feeling")
+        node["mood_contrast"] = summary.get("contrast")
         node["mood_swings"] = summary.get("swing_count", 0)
         node["mood_borderline"] = summary.get("borderline_share", 0.0)
         node["mood_duration"] = row["duration_s"]
         node["mood_segments"] = [[round(seg["start_s"], 1), round(seg["end_s"], 1),
-                                  seg["mood"], seg.get("alt")]
+                                  seg["mood"], seg.get("alt"), seg.get("feeling"),
+                                  seg.get("contrast")]
                                  for seg in (row["segments"] or [])]
         if strategy in ("mood", "feeling", "sentiment"):
             node["color"] = MOOD_COLORS.get(summary["dominant"], "#94a3b8")
@@ -1397,7 +1402,7 @@ GRAPH_HTML = """<!DOCTYPE html>
       const total = track.mood_duration || segs[segs.length - 1][1] || 1;
       const strip = document.getElementById('d-moodstrip');
       strip.innerHTML = '';
-      segs.forEach(([start, end, mood, alt]) => {
+      segs.forEach(([start, end, mood, alt, feeling, contrast]) => {
         const div = document.createElement('div');
         const c1 = MOOD_COLORS[mood] || MOOD_COLORS.neutral;
         const c2 = alt ? (MOOD_COLORS[alt] || MOOD_COLORS.neutral) : null;
@@ -1405,7 +1410,9 @@ GRAPH_HTML = """<!DOCTYPE html>
         // Borderline stretches are striped in both moods.
         div.style.background = c2
           ? `repeating-linear-gradient(45deg, ${c1} 0 6px, ${c2} 6px 12px)` : c1;
-        div.title = `${fmtTime(start)}–${fmtTime(end)}  ${mood}${alt ? ' ↔ ' + alt : ''}`;
+        div.title = `${fmtTime(start)}–${fmtTime(end)}  ${feeling || mood}`
+          + (feeling ? ` (${mood})` : (alt ? ' ↔ ' + alt : ''))
+          + (contrast ? ` · ${contrast}` : '');
         strip.appendChild(div);
       });
       const swings = track.mood_swings || 0;

@@ -25,7 +25,8 @@ def test_a_node_gets_its_arc_swings_and_segments(monkeypatch):
     assert n["dominant_mood"] == "angry"            # the timeline wins over lyrics alone
     assert n["color"] == graph_view.MOOD_COLORS["angry"]
     assert n["mood_arc"] == "sad → angry" and n["mood_swings"] == 1
-    assert n["mood_segments"] == [[0.0, 40.0, "sad", None], [40.0, 269.0, "angry", "sad"]]
+    assert n["mood_segments"] == [[0.0, 40.0, "sad", None, None, None],
+                                  [40.0, 269.0, "angry", "sad", None, None]]
     assert nodes[7] == {"dominant_mood": "happy"}    # no timeline: untouched
 
 
@@ -44,3 +45,17 @@ def test_the_page_carries_the_mood_colours_and_strip():
     assert "__MOOD_COLORS__" not in page
     assert '"angry": "#ef4444"' in page
     assert 'id="d-moodstrip"' in page and "function renderMoodArc" in page
+
+
+def test_a_version_2_timeline_brings_its_feelings(monkeypatch):
+    row = {"track_id": 8547, "duration_s": 300.0,
+           "segments": [{"start_s": 0.0, "end_s": 300.0, "mood": "angry", "alt": None,
+                         "feeling": "frustrated", "contrast": None}],
+           "summary": {"dominant": "angry", "dominant_feeling": "frustrated", "arc": "angry",
+                       "feeling_arc": "frustrated", "swing_count": 0, "borderline_share": 0}}
+    monkeypatch.setattr("karaoke.localcache.connect", lambda *a, **k: nullcontext(_conn_with([row])))
+    monkeypatch.setattr("karaoke.mood_timeline.ensure_schema", lambda conn: None)
+    nodes = {8547: {}}
+    graph_view._add_mood_timelines(nodes, "mood")
+    assert nodes[8547]["mood_arc"] == "frustrated"
+    assert nodes[8547]["mood_segments"][0][4] == "frustrated"
