@@ -83,7 +83,11 @@ def no_live_broker(monkeypatch):
     overrides this.
     """
     from unittest.mock import MagicMock
-    from celery.app.task import Task
+    try:
+        from celery.app.task import Task
+    except ImportError:
+        # The API-only CI job runs without Celery: nothing to publish with.
+        return
 
     monkeypatch.setattr(Task, "apply_async",
                         lambda self, *a, **k: MagicMock(id="test-no-broker"))
