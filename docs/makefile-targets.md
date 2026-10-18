@@ -58,6 +58,7 @@ recording-analyse            Decompile a recording into the DB (ID=...)
 recording-show               Show a recording's derived track list (ID=...)
 recordings                   List record-mode sessions
 sample                       Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
+smart-playlists              Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
 stats                        Show play + radio-discovery stats from the local cache
 systemd-down                 Stop all karaoke services
 systemd-install              Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
