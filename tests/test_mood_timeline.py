@@ -148,3 +148,14 @@ def contextlib_null(value):
     import contextlib
 
     return contextlib.nullcontext(value)
+
+
+def test_a_segment_is_named_by_its_own_average():
+    # Hysteresis kept "angry" running into a stretch whose average is warm and
+    # calm ("Simple Song" at 3:00); the label must follow the average.
+    valence = [-0.5] * 4 + [0.12] * 8
+    arousal = [0.9] * 4 + [0.18, -0.12] * 4
+    tl = mt.build(valence, arousal)
+    for seg in tl.segments:
+        assert seg.mood == mt.classify(seg.valence, seg.arousal)[0]
+    assert tl.segments[-1].mood != "angry"
