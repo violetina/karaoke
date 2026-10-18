@@ -402,7 +402,14 @@ def upgrade_timings(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     return context.to_dict()
 
 
-@app.task(bind=True, name="karaoke.tasks.sync_lyrics", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
+# Acknowledged on receipt, unlike the rest of the chain (task_acks_late).
+# Whisper on a long track under load can outrun RabbitMQ's 30-minute ack
+# timeout: the broker then closes the channel, the worker dies, and the
+# message is redelivered -- to run Whisper from the start again, forever.
+# Observed: six copies of one 5-minute instrumental and a dead worker. A sync
+# lost to a crash is re-queued by the next playback or backfill instead.
+@app.task(bind=True, name="karaoke.tasks.sync_lyrics", autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2,
+          acks_late=False)
 def sync_lyrics(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
     if context.track_id is None or "sync" not in context.pending or not _audio_ready(context):

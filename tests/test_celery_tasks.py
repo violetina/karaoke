@@ -681,3 +681,9 @@ def test_a_remembered_sync_failure_continues_the_chain(monkeypatch, tmp_path):
                              audio_path=tmp_path / "audio.mp3", pending=["sync", "clap", "mood"])
     out = PostprocessContext.from_dict(tasks.sync_lyrics.run(ctx.to_dict()))   # no raise
     assert out.pending == ["clap", "mood"]                                    # the rest still runs
+
+
+def test_whisper_sync_is_acknowledged_on_receipt():
+    """A Whisper run longer than RabbitMQ's ack timeout must not be redelivered."""
+    assert tasks.sync_lyrics.acks_late is False
+    assert tasks.analyze_audio.acks_late is True     # the rest keep late acks
