@@ -212,6 +212,9 @@ mcp: ## Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
 	$(PYTHON) -m karaoke.dj_chat
 
+smart-playlists: ## Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
+	$(PYTHON) -m karaoke.smart_playlists $${PUSH:+--push} $${DRY:+--dry-run}
+
 k8s-build: ## Build the library API container image
 	# --network=host: the default docker bridge has no working DNS on this host,
 	# so pip cannot resolve pypi.org during the build without it.
