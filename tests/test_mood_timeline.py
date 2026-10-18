@@ -159,3 +159,59 @@ def test_a_segment_is_named_by_its_own_average():
     for seg in tl.segments:
         assert seg.mood == mt.classify(seg.valence, seg.arousal)[0]
     assert tl.segments[-1].mood != "angry"
+
+
+# -- feelings ---------------------------------------------------------------
+
+def test_dark_intensity_is_not_anger_without_an_angry_sound_or_words():
+    assert mt.feeling_for("angry", None, None) == "intense"
+    assert mt.feeling_for("angry", None, {"aggressive": 1.2, "energetic": 0.4}) == "angry"
+    assert mt.feeling_for("angry", None, {"energetic": 1.4, "aggressive": 0.1}) == "intense"
+    assert mt.feeling_for("angry", None, {"dramatic": 0.9}) == "dramatic"
+
+
+def test_blues_is_frustrated_not_angry():
+    # Tina, on two Hendrix blues: "frustrated++ -- the blues, not angry".
+    assert mt.feeling_for("angry", None, {"bluesy": 1.5, "aggressive": 1.0}) == "frustrated"
+    assert mt.feeling_for("angry", None, {"aggressive": 1.5}, {"blues": True}) == "frustrated"
+    assert mt.feeling_for("sad", None, None, {"blues": True}) == "blue"
+
+
+def test_angry_words_make_it_angry():
+    assert mt.feeling_for("angry", None, {"energetic": 1.0},
+                          {"tone": "angry and confrontational"}) == "angry"
+
+
+def test_sad_edging_into_tender_is_longing():
+    assert mt.feeling_for("sad", "tender", {"melancholic": 1.5}) == "longing"
+    assert mt.feeling_for("tender", "sad", None) == "longing"
+
+
+def test_a_weak_character_leaves_the_quadrant_default():
+    assert mt.feeling_for("tender", None, {"dreamy": 0.1, "romantic": 0.2}) == "tender"
+    assert mt.feeling_for("tender", None, {"dreamy": 1.1, "romantic": 0.2}) == "dreamy"
+
+
+def test_contrast_bittersweet_and_ironic():
+    assert mt.contrast_for(0.7, -0.6) == "bittersweet"           # warm sound, sad words
+    assert mt.contrast_for(0.45, -0.87) is None                 # soft-music bias, not a feeling
+    assert mt.contrast_for(0.6, 0.5) is None
+    assert mt.contrast_for(None, None, {"tone": "cynical and sarcastic"}) == "ironic"
+
+
+def test_build_names_feelings_per_segment():
+    n = 9
+    char = [[0.0] * len(mt.CHARACTERS) for _ in range(n)]
+    for row in char:
+        row[mt.CHARACTERS.index("bluesy")] = 1.4
+    tl = mt.build([-0.5] * n, [1.0] * n, character=char,
+                  sound_v=[0.7] * n, words_v=[-0.6] * n)
+    seg = tl.segments[0]
+    assert (seg.mood, seg.feeling, seg.contrast) == ("angry", "frustrated", "bittersweet")
+    assert tl.summary["dominant_feeling"] == "frustrated"
+    assert tl.summary["contrast"] == "bittersweet"
+
+
+def test_a_specific_feeling_wins_a_near_tie_with_a_generic_one():
+    assert mt.feeling_for("tender", None, {"calm": 0.89, "romantic": 0.86}) == "romantic"
+    assert mt.feeling_for("tender", None, {"calm": 1.4, "romantic": 0.5}) == "calm"

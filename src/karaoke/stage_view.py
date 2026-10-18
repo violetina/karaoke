@@ -317,6 +317,8 @@ def get_stage_state() -> dict[str, Any]:
     
     mood = "neutral"
     mood_alt: Optional[str] = None
+    mood_feeling: Optional[str] = None
+    mood_contrast: Optional[str] = None
     mood_source = ""
     genre = ""
     # The track's mood timeline (sound + lyric meaning, per ten seconds) is
@@ -325,6 +327,8 @@ def get_stage_state() -> dict[str, Any]:
     segment = _mood_segment(track_id, artist, title, position_s, duration)
     if segment is not None:
         mood, mood_alt, mood_source = segment["mood"], segment.get("alt"), "timeline"
+        # Version 2 timelines carry the finer word and any sound/words tension.
+        mood_feeling, mood_contrast = segment.get("feeling") or None, segment.get("contrast")
     elif active_line_idx >= 0 and active_line_idx < len(lines):
         try:
             from karaoke.visuals import mood_of
@@ -377,6 +381,8 @@ def get_stage_state() -> dict[str, Any]:
         "mood": mood,
         # Set when the stretch sits on a boundary: show both, not a guess.
         "mood_alt": mood_alt,
+        "mood_feeling": mood_feeling,
+        "mood_contrast": mood_contrast,
         "mood_source": mood_source,
         "genre": genre,
         "sync_source": sync_source,
@@ -1750,7 +1756,11 @@ def render_mood_html() -> str:
         const artist = data.artist || '';
 
         // A borderline stretch is shown as both moods rather than a guess.
-        const moodText = data.mood_alt ? `${mood.toUpperCase()} ↔ ${data.mood_alt.toUpperCase()}` : mood.toUpperCase();
+        // The feeling ("FRUSTRATED", "LONGING") when the timeline has one; the
+        // quadrant mood still picks the images and colours.
+        const word = (data.mood_feeling || mood).toUpperCase();
+        const moodText = (data.mood_feeling || !data.mood_alt ? word : `${word} ↔ ${data.mood_alt.toUpperCase()}`)
+          + (data.mood_contrast ? ` · ${data.mood_contrast}` : '');
         sentimentDiv.textContent = moodText + (data.genre ? ' • ' + data.genre : '');
         // Say where the song came from when it is not a player: radio and
         // record mode dead-reckon the playhead, so their timing is an estimate.
