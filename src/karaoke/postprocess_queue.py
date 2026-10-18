@@ -243,7 +243,8 @@ def enqueue_if_needed(
 
 def publish_postprocess_task(artist: str, title: str, url: str = "",
                              include_timings: bool = False,
-                             full: bool = False) -> bool:
+                             full: bool = False,
+                             steps: Optional[list[str]] = None) -> bool:
     """Publish a track post-processing task to RabbitMQ.
 
     Returns True if successfully published, False otherwise.
@@ -258,6 +259,10 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
     default, because the library is 90% built from disk and a library-wide
     chord backfill would re-fetch files already on the drive. Pass True for a
     bounded, explicitly chosen set -- a playlist import.
+
+    ``steps`` runs exactly those steps, done or not -- a re-run asked for by
+    name (the TUI's "P" redoes chords). Without it the chain runs whatever
+    :func:`needs_postprocessing` finds missing.
     """
     if not (artist or title):
         return False
@@ -269,6 +274,8 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
         "include_timings": bool(include_timings),
         "full": bool(full),
     }
+    if steps:
+        payload["steps"] = list(steps)
 
     if orchestrator() != "legacy":
         try:

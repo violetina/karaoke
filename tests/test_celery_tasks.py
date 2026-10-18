@@ -48,6 +48,29 @@ def test_resolve_track_id_found(monkeypatch):
     mock_extract_youtube_id.assert_called_once()
     mock_needs_postprocessing.assert_called_once()
 
+def test_resolve_track_id_runs_named_steps_even_when_done(monkeypatch):
+    """The TUI's "P" redoes chords: named steps replace the missing-step check."""
+    monkeypatch.setattr(localcache, "find_track_id", MagicMock(return_value=123))
+    monkeypatch.setattr(localcache, "find_track_by_url", MagicMock(return_value=None))
+    monkeypatch.setattr(localcache, "extract_youtube_id", MagicMock(return_value="video_id"))
+    monkeypatch.setattr(q, "needs_postprocessing", MagicMock(return_value=[]))
+    monkeypatch.setattr(localcache, "connect", MagicMock())
+
+    payload = {"artist": "A", "title": "B", "url": "http://youtube.com/v1", "full": True,
+               "steps": ["chords", "mood", "bogus"]}
+    context = PostprocessContext.from_dict(tasks.resolve_track_id.run(payload))
+    assert context.pending == ["chords", "mood"]
+    assert context.full is True
+
+
+def test_publish_passes_named_steps(monkeypatch):
+    sent = []
+    monkeypatch.setattr(q, "orchestrator", lambda: "celery")
+    monkeypatch.setattr(tasks, "enqueue_postprocess", lambda p: sent.append(p) or "id")
+    assert q.publish_postprocess_task("A", "B", full=True, steps=["chords"])
+    assert sent[0]["steps"] == ["chords"] and sent[0]["full"] is True
+
+
 def test_resolve_track_id_not_found():
     mock_find_track_id = MagicMock(return_value=None)
     mock_find_track_by_url = MagicMock(return_value=None)

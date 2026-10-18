@@ -274,6 +274,27 @@ def genre_line(row) -> str:
     return label
 
 
+def mood_line(track_id: int, conn) -> str:
+    """The stored mood timeline in a few words: "tender → happy (dreamy)".
+
+    Empty when there is no timeline of the current version -- an older one
+    was classified by rules since replaced.
+    """
+    from . import mood_timeline
+
+    if not mood_timeline.has_current(track_id, conn):
+        return ""
+    summary = (mood_timeline.load(track_id, conn) or {}).get("summary") or {}
+    arc = summary.get("arc") or summary.get("dominant") or ""
+    if arc.count("→") > 3:
+        # A busy song: the full arc would not fit a notification.
+        arc = f"{summary.get('dominant') or ''}, {summary.get('swing_count', 0)} swings"
+    feeling = summary.get("dominant_feeling") or ""
+    if feeling and feeling not in arc:
+        return f"{arc} ({feeling})"
+    return arc
+
+
 def classification_line(genre_row, tone_row) -> str:
     """Genre qualified by the attitude of its words: "cynical pop".
 
@@ -1240,6 +1261,7 @@ class KaraokeTui(App):
         ("minus", "mood_down", "Mood-"),
         ("equals_sign", "mood_up", "Mood+"),
         ("A", "approve_postprocess", "Post-process"),
+        ("P", "process_chords", "Redo chords"),
         ("k", "sample_key", "Sample key/BPM"),
         ("slash", "focus_search", "Search"),
         ("greater_than_sign", "queue_next", "Queue next"),
@@ -2220,30 +2242,53 @@ class KaraokeTui(App):
         Pure enough to test: does the DB lookup and the publish, returns what
         happened, and leaves the notifying to the caller.
 
-        Requires lyrics to exist. Post-processing derives word timings from the
-        approved lyrics and key/BPM from the audio; with no lyrics there is
-        nothing to upgrade, and the track is already queued as a lyric gap for
-        the backfill to pick up instead.
+        The same ingest radio mode uses (song_finder): a song the library
+        lacks is found and added, and the chain runs in full -- it may
+        download audio for chords, CLAP and the mood timeline, which the
+        silent playback path does not. Lyrics are not required: a song
+        without words still gets its sound, chords and mood.
         """
+        from . import song_finder
         from .postprocess_queue import needs_postprocessing, publish_postprocess_task
 
         if not (artist or title):
             return False, "Nothing playing to approve"
         with localcache.connect() as conn:
-            track_id = localcache.find_track_id(artist, title, conn)
-            if track_id is None:
-                return False, f"{artist} - {title} is not in the library yet"
-            cached = localcache.get_lyrics_by_track_id(track_id, conn)
-            if cached is None or not (cached.synced_raw or cached.plain):
-                return False, f"No lyrics for {title} yet — queued as a gap"
-            pending = needs_postprocessing(track_id, conn)
+            track_id = localcache.find_track_id_relaxed(artist, title, conn)
+            pending = needs_postprocessing(track_id, conn) if track_id is not None else []
+        if track_id is None:
+            out = song_finder.locate(artist, title)
+            if out.get("status") == "queued":
+                return True, f"Adding {title} to the library: full processing queued"
+            return False, f"Could not queue {title}: {out.get('message') or 'broker unreachable'}"
         if not pending:
             return False, f"{title} is already fully processed"
         # "A" is the explicit ask, so this is the one path that opts into the
         # rate-limited word-timing upgrade.
-        if not publish_postprocess_task(artist, title, url, include_timings=True):
+        if not publish_postprocess_task(artist, title, url, include_timings=True, full=True):
             return False, "Broker unreachable — nothing queued"
         return True, f"Queued {title}: {', '.join(pending)}"
+
+    def process_chords(self, artist: str, title: str, url: str = "") -> tuple[bool, str]:
+        """Re-detect chords for a track, done or not. Returns (ok, message).
+
+        The mood timeline is redone with them: its blues reading ("frustrated"
+        rather than "angry") comes from the chord harmony. A failed chord
+        detection keeps the chords found earlier (key_progression.store
+        updates, it does not replace).
+        """
+        from .postprocess_queue import publish_postprocess_task
+
+        if not (artist or title):
+            return False, "Nothing playing"
+        with localcache.connect() as conn:
+            track_id = localcache.find_track_id_relaxed(artist, title, conn)
+        if track_id is None:
+            return False, f"{title} is not in the library yet — press A to add it"
+        if not publish_postprocess_task(artist, title, url, full=True,
+                                        steps=["chords", "mood"]):
+            return False, "Broker unreachable — nothing queued"
+        return True, f"Queued chords + mood for {title}"
 
     def _trigger_postprocess_if_needed(self, artist: str, title: str, url: str = "") -> None:
         """Asynchronously enqueue background postprocessing if missing BPM/key/timings."""
@@ -3541,9 +3586,24 @@ class KaraokeTui(App):
                     label = classification_line(
                         localcache.genre_for(track_id, conn),
                         localcache.tone_for(track_id, conn))
+                    mood = mood_line(track_id, conn)
+                    if mood:
+                        label = f"{label} · {mood}" if label else mood
         except Exception:
             log.debug("could not read back the sampled label", exc_info=True)
         summary = f"{artist} - {title}: {key}, {bpm} BPM"
+        # The excerpt covers key, tempo and a genre; the mood timeline, chords
+        # and lyric sync need the whole song. Hand it to the ingest radio mode
+        # uses, which fetches what is missing.
+        try:
+            from . import song_finder
+
+            done = song_finder.ensure_processed(artist, title)
+        except Exception:
+            log.debug("sample: ingest hand-off failed", exc_info=True)
+            done = "failed"
+        if done == "queued-full":
+            summary += " · full processing queued"
         self.call_from_thread(self.notify,
                               f"{summary} · {label}" if label else summary)
         # The analysis panel reads from the DB, so refresh it now the row exists.
@@ -3719,6 +3779,15 @@ class KaraokeTui(App):
         artist, title, url = self._current_song
         self._postprocess_enqueued.discard((artist.lower(), title.lower()))
         ok, message = self.approve_postprocess(artist, title, url)
+        self.notify(message, severity="information" if ok else "warning")
+
+    def action_process_chords(self) -> None:
+        """`P`: re-detect the chords of whatever is playing (and its mood)."""
+        if not self._current_song:
+            self.notify("Nothing playing", severity="warning")
+            return
+        artist, title, url = self._current_song
+        ok, message = self.process_chords(artist, title, url)
         self.notify(message, severity="information" if ok else "warning")
 
     def action_browse_recordings(self) -> None:

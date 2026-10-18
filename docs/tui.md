@@ -48,7 +48,9 @@ go stale. The ones worth knowing:
 | `C` | clear active queue |
 | `F` | focus mode — hides everything but the lyrics |
 | `R` | mic/radio mode (songrec) |
-| `A` | queue the playing track for post-processing |
+| `A` | full processing for the playing track, as radio mode does: adds it to the library if missing, fetches audio for chords, CLAP and mood, upgrades word timings |
+| `P` | redo chords (and the mood timeline that reads them) for the playing track |
+| `k` | sample key/BPM off the speakers, show genre · tone · mood, then queue whatever else the song is missing |
 | `T` | stats — library, pipeline, listening, keys, tempo |
 | `?` | key reference |
 | `,` `.` | nudge lyric sync ∓0.1s, `S` saves it for that track |

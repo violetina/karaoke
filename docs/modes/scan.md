@@ -58,7 +58,9 @@ for the full behaviour.
 Scan mode only reads the browser — it can't download audio itself. To get
 key/BPM for what's playing, press `k` ([Sample mode](sample.md)) to record the
 output and analyse it, or `O` (`make admin`, [Record mode](record.md)) to capture unattended.
-`A` queues the track for post-processing (which needs a downloadable source).
+`A` queues the full chain, the same ingest radio mode uses: a song the library
+lacks is found and added, and audio is fetched for chords, CLAP and the mood
+timeline. `P` redoes just the chords and the mood timeline.
 
 ## Related
 
