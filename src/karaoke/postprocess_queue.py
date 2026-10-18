@@ -312,3 +312,56 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
     except Exception as exc:
         log.debug("RabbitMQ publish skipped (unreachable/failed): %s", exc)
         return False
+
+
+# -- in-flight claims ----------------------------------------------------------
+#
+# Several producers queue work for the song that is playing -- the TUI, /mood,
+# /graph's Follow and Find, radio mode -- and each re-queues while the song
+# still looks incomplete, which it does until its chain finishes. Seen live:
+# Whisper lyric sync for one song ran 7 times in 15 minutes, on several
+# workers at once. A chain therefore claims its song first; a second chain
+# for the same song is dropped while the claim is fresh.
+
+#: A claim older than this is from a chain that died without releasing it.
+CLAIM_TTL_S = 15 * 60
+
+_CLAIMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS postprocess_claims (
+    song_key   TEXT PRIMARY KEY,
+    claimed_at DOUBLE PRECISION NOT NULL
+)
+"""
+
+
+def claim_key(artist: str, title: str) -> str:
+    from .event_store import track_key
+
+    return track_key(artist, title)
+
+
+def claim(artist: str, title: str, conn: Connection, *, ttl_s: float = CLAIM_TTL_S,
+          now: Optional[float] = None) -> bool:
+    """Atomically claim a song for one chain. False if another holds it."""
+    import time
+
+    now = time.time() if now is None else now
+    conn.execute(_CLAIMS_SCHEMA)
+    row = conn.execute(
+        """
+        INSERT INTO postprocess_claims (song_key, claimed_at) VALUES (%s, %s)
+        ON CONFLICT (song_key) DO UPDATE SET claimed_at = excluded.claimed_at
+            WHERE postprocess_claims.claimed_at < %s
+        RETURNING song_key
+        """,
+        (claim_key(artist, title), now, now - ttl_s)).fetchone()
+    conn.commit()
+    return row is not None
+
+
+def release(artist: str, title: str, conn: Connection) -> None:
+    """Free a song's claim when its chain is done."""
+    conn.execute(_CLAIMS_SCHEMA)
+    conn.execute("DELETE FROM postprocess_claims WHERE song_key = %s",
+                 (claim_key(artist, title),))
+    conn.commit()

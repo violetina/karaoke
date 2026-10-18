@@ -33,6 +33,21 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
     title = (payload.get("title") or "").strip()
     log.info("celery postprocess: received %s - %s", artist, title)
 
+    # One chain per song at a time (postprocess_queue.claim): producers re-queue
+    # a playing song while it still looks incomplete. ``force`` bypasses it.
+    if not payload.get("force"):
+        try:
+            from . import localcache
+            from .postprocess_queue import claim
+
+            with localcache.connect() as conn:
+                if not claim(artist, title, conn):
+                    log.info("celery postprocess: %s - %s already in progress; skipped",
+                             artist, title)
+                    return
+        except Exception:
+            log.debug("postprocess: claim check failed; running anyway", exc_info=True)
+
     # This is the orchestrator: it resolves the track, determines pending tasks,
     # then chains the sub-tasks in sequence. If a sub-task fails, Celery's
     # retry/backoff takes over.
@@ -60,6 +75,9 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
             # Last, on its own queue and worker: if that worker is down, only
             # the timbre vector waits -- lyrics, chords and search are done.
             embed_clap.s(),
+            # Frees the song for the next chain. A chain that dies earlier
+            # leaves its claim to expire (CLAIM_TTL_S).
+            finish_postprocess.s(),
         ]
         # The final task in the chain returns the status to the orchestrator,
         # but the orchestrator itself returns None (ignore_result=True).
@@ -432,6 +450,22 @@ def embed_clap(self, context_dict: dict[str, Any]) -> dict[str, Any]:
         # The mood timeline uses the same CLAP model, already loaded here.
         if "mood" in wanted:
             postprocess_worker.run_mood_logic(context.track_id, context.audio_path, conn)
+    return context.to_dict()
+
+
+@app.task(bind=True, name="karaoke.tasks.finish_postprocess")
+def finish_postprocess(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """Last in every chain: release the song's in-flight claim."""
+    context = PostprocessContext.from_dict(context_dict)
+    try:
+        from . import localcache
+        from .postprocess_queue import release
+
+        with localcache.connect() as conn:
+            release(context.artist, context.title, conn)
+    except Exception:
+        log.debug("postprocess: could not release claim for %s - %s",
+                  context.artist, context.title, exc_info=True)
     return context.to_dict()
 
 
