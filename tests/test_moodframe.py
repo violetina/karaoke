@@ -11,6 +11,13 @@ import pytest
 from karaoke import moodframe
 
 
+@pytest.fixture(autouse=True)
+def _fresh_thumbnails():
+    moodframe._thumbs.clear()
+    yield
+    moodframe._thumbs.clear()
+
+
 @pytest.fixture()
 def pool(tmp_path):
     paths = []
@@ -69,6 +76,49 @@ def test_only_a_bounded_subset_is_scored(pool, monkeypatch):
     monkeypatch.setattr(moodframe.moodart, "mood_score", lambda px, m: 0.5)
     moodframe.score_pool(pool, "happy", limit=4, rng=random.Random(1))
     assert len(calls) == 4
+
+
+def test_a_cover_is_decoded_once_across_requests(pool, monkeypatch):
+    """The /mood page polls: repeat requests must not re-run ffmpeg."""
+    calls = []
+
+    def sample(path, cols, rows, **kw):
+        calls.append(path)
+        return [[(10, 10, 10)] * cols for _ in range(rows)]
+
+    monkeypatch.setattr(moodframe.coverart, "sample", sample)
+    monkeypatch.setattr(moodframe.moodart, "mood_score", lambda px, m: 0.5)
+    for _ in range(5):
+        moodframe.score_pool(pool, "happy", limit=len(pool))
+    assert len(calls) == len(pool)
+
+
+def test_a_changed_cover_is_decoded_again(pool, monkeypatch):
+    calls = []
+    monkeypatch.setattr(moodframe.coverart, "sample",
+                        lambda path, c, r, **kw: calls.append(path) or [[(0, 0, 0)]])
+    monkeypatch.setattr(moodframe.moodart, "mood_score", lambda px, m: 0.5)
+    moodframe.score_pool(pool[:1], "happy")
+    pool[0].write_bytes(b"a different, longer image body")
+    moodframe.score_pool(pool[:1], "happy")
+    assert len(calls) == 2
+
+
+def test_an_unreadable_cover_is_not_retried(pool, monkeypatch):
+    calls = []
+    monkeypatch.setattr(moodframe.coverart, "sample",
+                        lambda path, c, r, **kw: calls.append(path) or None)
+    for _ in range(3):
+        assert moodframe.score_pool(pool[:1], "happy") == []
+    assert len(calls) == 1
+
+
+def test_the_thumbnail_cache_is_bounded(pool, monkeypatch):
+    monkeypatch.setattr(moodframe, "MAX_THUMBS", 3)
+    monkeypatch.setattr(moodframe.coverart, "sample", lambda path, c, r, **kw: [[(0, 0, 0)]])
+    monkeypatch.setattr(moodframe.moodart, "mood_score", lambda px, m: 0.5)
+    moodframe.score_pool(pool, "happy", limit=len(pool))
+    assert len(moodframe._thumbs) == 3
 
 
 def test_scoring_skips_an_unreadable_file(pool, monkeypatch):
