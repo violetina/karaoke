@@ -89,7 +89,7 @@ class DJChatSession:
 
         if p_lower.startswith("/suggest") or p_lower in ("suggest", "next"):
             parts = user_prompt.strip().split(maxsplit=1)
-            strategy = parts[1] if len(parts) > 1 else "harmonic"
+            strategy = parts[1] if len(parts) > 1 else "flow"
             return self.cmd_suggest(strategy=strategy)
 
         if (
@@ -180,7 +180,7 @@ class DJChatSession:
                 "🎧 **Karaoke AI DJ Commands**:\n"
                 "• `/mood <how you feel or how it should sound>` — Build a set from a vibe\n"
                 "   (e.g. *'upbeat happy electronic'*, *'cynical pop'*, *'I feel wrecked'*; add `--lift` to be cheered up)\n"
-                "• `/suggest [harmonic|energy_up|cool_down|acoustic]` — Next song recommendations\n"
+                "• `/suggest [flow|harmonic|energy_up|cool_down|mood|structural|acoustic]` — Next song recommendations (flow = same sound + mood that follows on)\n"
                 "• `1`, `2`, `3`, `4` or `/queue <#>` — Add suggestion to playlist & player queue\n"
                 "• `/queue all` (or `all`) — Add all suggestions to 'dj-list'\n"
                 "• `/browse [genre=rock bpm=120-140 key=8A synced=yes]` — Page the library (`/browse more`)\n"
@@ -240,7 +240,7 @@ class DJChatSession:
             lines.append("\nTip: Type `/suggest` or `/search <artist>` to get the party rolling!")
             return "\n".join(lines)
 
-    def cmd_suggest(self, strategy: str = "harmonic") -> str:
+    def cmd_suggest(self, strategy: str = "flow") -> str:
         # Check now playing first
         now_data = json.loads(mcp_server.get_now_playing())
         seed_id = None
@@ -278,7 +278,7 @@ class DJChatSession:
             f"(`{seed.get('key')}` / Camelot `{seed.get('camelot')}` / {round(seed.get('bpm', 0))} BPM)\n"
         ]
         if not suggestions:
-            lines.append("No direct harmonic match found. Try `/suggest energy_up` or `/search`!")
+            lines.append("No match for that strategy. Try `/suggest flow`, `/suggest energy_up` or `/search`!")
         else:
             for i, s in enumerate(suggestions, 1):
                 synced_icon = "🎤 [synced]" if s.get("has_synced_lyrics") else "📝"

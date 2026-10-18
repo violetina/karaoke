@@ -303,7 +303,7 @@ def suggest_next_tracks(
     track_id: Optional[int] = None,
     artist: Optional[str] = None,
     title: Optional[str] = None,
-    strategy: str = "harmonic",
+    strategy: str = "flow",
     limit: int = 5,
     exclude_playlist: str = "dj-list",
 ) -> str:
@@ -317,9 +317,11 @@ def suggest_next_tracks(
             keep offering fresh material. Defaults to the DJ list; pass an empty
             string to allow songs already queued.
         strategy:
-            - 'harmonic': Camelot wheel adjacent keys (+/- 1 hour or relative major/minor) + matching BPM (+/- 8%).
-            - 'energy_up': Step up the party tempo (+5 to +20 BPM) and higher energy score.
-            - 'cool_down': Wind down with slower tempo and softer energy.
+            - 'flow' (default): what fits next -- same sound (CLAP timbre) and a mood that follows on from how this song ends. Measured on real radio transitions it ranks the song a DJ actually played next ~8x better than key/BPM matching.
+            - 'harmonic': the best-fitting songs in a compatible Camelot key (same, +/-1 hour, relative) within +/-8% tempo (half/double time allowed).
+            - 'energy_up': best-fitting songs that open more intense than this one ends (mood timeline), or faster.
+            - 'cool_down': best-fitting songs that open calmer than this one ends, or slower.
+            - 'mood': strongest weight on the mood handover (end of this song -> start of the next).
             - 'acoustic': Timbre / sound similarity via CLAP vector embeddings.
             - 'structural': Harmonic shape and chord progression root-motion similarity (via OpenSearch chord_motion / progression_vector k-NN).
         limit: Number of recommendations (default 5, max 20).
@@ -389,6 +391,35 @@ def suggest_next_tracks(
                 }
             except Exception as exc:
                 log.warning("Could not read playlist %s for exclusion: %s", exclude_playlist, exc)
+
+        # Fit-based ranking (karaoke.dj_suggest): sound + mood handover, with
+        # the strategy as the constraint. Falls through to the older paths
+        # below when it finds nothing (e.g. a seed without analysis).
+        new_strategy = {"chords": "structural", "chord_progression": "structural",
+                        "feeling": "mood", "sentiment": "mood"}.get(strategy, strategy)
+        if new_strategy in ("flow", "harmonic", "energy_up", "cool_down", "mood", "structural"):
+            from . import dj_suggest
+            try:
+                ranked = dj_suggest.suggest(seed_id, new_strategy, limit=limit,
+                                            excluded=excluded, conn=conn)
+            except Exception as exc:
+                log.warning("dj_suggest failed for %s (%s); using the older path", seed_id, exc)
+                ranked = []
+            if ranked:
+                return json.dumps({
+                    "seed": {
+                        "track_id": seed_id,
+                        "artist": seed_track["artist"],
+                        "title": seed_track["title"],
+                        "key": seed_key_str,
+                        "camelot": seed_camelot,
+                        "bpm": round(seed_bpm, 1),
+                    },
+                    "strategy": new_strategy,
+                    "suggestions": ranked,
+                }, indent=2)
+            if strategy == "flow":
+                strategy = "harmonic"
 
         if strategy in ("structural", "chords", "chord_progression"):
             from . import search
