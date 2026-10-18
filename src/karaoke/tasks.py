@@ -122,6 +122,15 @@ class PostprocessContext:
         return PostprocessContext(**data)
 
 
+#: Every step a chain knows, in the order needs_postprocessing reports them.
+STEPS = ("analysis", "timings", "sync", "vectors", "chords", "clap", "mood")
+
+
+def _forced_steps(payload: dict[str, Any]) -> list[str]:
+    """Steps asked for by name: they run even when already done."""
+    return [s for s in (payload.get("steps") or []) if s in STEPS]
+
+
 @app.task(
     bind=True,
     name="karaoke.tasks.resolve_track_id",
@@ -237,7 +246,7 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                 else:
                     # No youtube source found! Let's do an automatic search to find one.
                     # Only if this track actually needs postprocessing (sync or analysis).
-                    pending_temp = needs_postprocessing(track_id, conn)
+                    pending_temp = _forced_steps(payload) or needs_postprocessing(track_id, conn)
                     # Chords need audio too, but only a full run may fetch it
                     # for them -- the same rule download_audio applies.
                     wants_audio = {"analysis", "sync"} | ({"chords", "clap", "mood"} if context.full else set())
@@ -261,7 +270,7 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                                          artist, title, best_url)
                         except Exception as e:
                             log.debug("postprocess: youtube search failed: %s", e)
-        context.pending = needs_postprocessing(track_id, conn)
+        context.pending = _forced_steps(payload) or needs_postprocessing(track_id, conn)
 
     return context.to_dict() # Return dict for serialization
 

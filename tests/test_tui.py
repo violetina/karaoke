@@ -680,35 +680,79 @@ def test_approve_refuses_when_nothing_is_playing(monkeypatch, tmp_path):
     assert not ok and "Nothing playing" in msg
 
 
-def test_approve_refuses_a_track_not_in_the_library(monkeypatch, tmp_path):
+def test_approve_adds_a_track_not_in_the_library(monkeypatch, tmp_path):
+    """Like radio mode: an unknown song is located, added and fully processed."""
+    from karaoke import song_finder
     app, _ = _approver(monkeypatch, tmp_path)
+    located = []
+    monkeypatch.setattr(song_finder, "locate",
+                        lambda a, t: located.append((a, t)) or {"status": "queued"})
     ok, msg = app.approve_postprocess("Ghost", "Missing")
-    assert not ok and "not in the library" in msg
+    assert ok and located == [("Ghost", "Missing")]
+    assert "full processing" in msg
 
 
-def test_approve_refuses_when_there_are_no_lyrics(monkeypatch, tmp_path):
-    """"if text found" — with none, the gap queue is the right path, not this."""
+def test_approve_reports_when_an_unknown_track_cannot_be_queued(monkeypatch, tmp_path):
+    from karaoke import song_finder
+    app, _ = _approver(monkeypatch, tmp_path)
+    monkeypatch.setattr(song_finder, "locate",
+                        lambda a, t: {"status": "unknown", "message": "could not queue processing"})
+    ok, msg = app.approve_postprocess("Ghost", "Missing")
+    assert not ok and "could not queue" in msg
+
+
+def test_approve_queues_a_song_without_lyrics(monkeypatch, tmp_path):
+    """Sound, chords and mood do not need words; the chain skips the sync."""
+    from karaoke import postprocess_queue as pq
     app, conn = _approver(monkeypatch, tmp_path)
     _add_track(conn, synced=False, plain=False)
+    published = []
+    monkeypatch.setattr(pq, "publish_postprocess_task",
+                        lambda a, t, u="", **kw: published.append(kw) or True)
     ok, msg = app.approve_postprocess("A", "B")
-    assert not ok and "No lyrics" in msg
+    assert ok, msg
+    assert published and published[0]["full"] is True
 
 
-def test_approve_queues_when_lyrics_exist(monkeypatch, tmp_path):
+def test_approve_queues_the_full_chain_with_timings(monkeypatch, tmp_path):
     from karaoke import postprocess_queue as pq
     app, conn = _approver(monkeypatch, tmp_path)
     _add_track(conn)
     published = []
     monkeypatch.setattr(pq, "publish_postprocess_task",
-                        lambda a, t, u="", include_timings=False:
-                            published.append((a, t, u, include_timings)) or True)
+                        lambda a, t, u="", **kw: published.append((a, t, u, kw)) or True)
 
     ok, msg = app.approve_postprocess("A", "B", "https://youtu.be/x")
-    # "A" is the explicit ask, so it is the path that opts into timings.
-    assert published and published[0][3] is True
     assert ok, msg
-    assert published == [("A", "B", "https://youtu.be/x", True)]
+    # "A" is the explicit ask: timings, and downloads for chords/CLAP/mood.
+    assert published == [("A", "B", "https://youtu.be/x",
+                           {"include_timings": True, "full": True})]
     assert "analysis" in msg          # what it actually queued
+
+
+def test_process_chords_forces_chords_and_mood(monkeypatch, tmp_path):
+    from karaoke import postprocess_queue as pq
+    app, conn = _approver(monkeypatch, tmp_path)
+    _add_track(conn)
+    published = []
+    monkeypatch.setattr(pq, "publish_postprocess_task",
+                        lambda a, t, u="", **kw: published.append(kw) or True)
+    ok, msg = app.process_chords("A", "B")
+    assert ok, msg
+    assert published == [{"full": True, "steps": ["chords", "mood"]}]
+
+
+def test_process_chords_needs_a_library_track(monkeypatch, tmp_path):
+    app, _ = _approver(monkeypatch, tmp_path)
+    ok, msg = app.process_chords("Ghost", "Missing")
+    assert not ok and "press A" in msg
+
+
+def test_process_chords_is_bound_to_shift_p():
+    from karaoke.tui import KaraokeTui
+    keys = {b[0]: b[1] for b in KaraokeTui.BINDINGS if isinstance(b, tuple)}
+    assert keys["P"] == "process_chords"
+    assert keys["p"] == "previous_track"
 
 
 def test_approve_reports_an_unreachable_broker(monkeypatch, tmp_path):
