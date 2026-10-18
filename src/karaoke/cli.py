@@ -82,7 +82,10 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--import-radio", type=int, metavar="SESSION_ID",
                     help="import captured tracks from a radio session into the library")
     ap.add_argument("--reidentify", type=float, default=30.0,
-                    help="seconds between re-identifications in --radio mode (default 30)")
+                    help="with --fixed-scan: seconds between re-identifications (default 30)")
+    ap.add_argument("--fixed-scan", action="store_true",
+                    help="--radio: identify on a fixed clock instead of planning scans "
+                         "from the song's length and listening for its end")
     ap.add_argument("--timeout", "-t", type=int, default=30, help="listen timeout secs")
     ap.add_argument("--no-cache", action="store_true", help="skip OpenSearch cache, always fetch")
     ap.add_argument("--transcribe", action="store_true",
@@ -118,6 +121,7 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
         from .player import play_radio_synced
         play_radio_synced(mic=not args.output, record=args.record,
                           reidentify_interval=args.reidentify,
+                          fixed_scan=args.fixed_scan,
                           extra_latency=args.offset + lead, listen_timeout=args.timeout)
         return 0
 

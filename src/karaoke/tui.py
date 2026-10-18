@@ -210,7 +210,6 @@ SHORT_ROWS = 28
 
 # Mic (radio) mode. songrec needs a few seconds of audio; re-identifying every
 # ~30s corrects drift and catches track changes without hammering the service.
-MIC_REIDENTIFY_S = 30.0
 MIC_LISTEN_TIMEOUT = 20
 
 
@@ -2147,7 +2146,8 @@ class KaraokeTui(App):
         # lyrics run out, the footer counts down to a track change that never
         # comes, and the next re-identification is the only thing that rescues
         # it. Wrapping is right for repeat and self-correcting otherwise, since
-        # a genuine track change re-anchors within MIC_REIDENTIFY_S either way.
+        # a genuine track change re-anchors at the scan planned just after the
+        # song's end (karaoke.songwatch) either way.
         #
         # Guarded on a sane duration: a bad or missing value must not fold a
         # correct playhead back to zero.
@@ -2169,33 +2169,54 @@ class KaraokeTui(App):
         passages, and dropping the lyrics every time would be worse than
         holding the last known track.
         """
-        from .identify import identify_live
+        from . import songwatch
+        from .identify import _default_source, identify_live
+        from .player import _song_length
 
-        while not self._mic_stop.is_set():
-            try:
-                ref = identify_live(mic=True, timeout=MIC_LISTEN_TIMEOUT)
-            except Exception as exc:
-                log.debug("mic identify failed: %s", exc)
-                ref = None
-            if ref is not None and ref.title:
-                changed = (self._mic_ref is None
-                           or (ref.artist, ref.title)
-                           != (self._mic_ref.artist, self._mic_ref.title))
-                self._mic_ref = ref
-                if changed:
-                    # Force _poll_detection to re-resolve instead of
-                    # short-circuiting on an unchanged key.
-                    self._sync_key = None
-                    log.info("mic: %s - %s", ref.artist, ref.title)
-            # Wait out the interval in heartbeat-sized steps, so views in
-            # other processes (ctrl-api's /mood) keep trusting the anchor.
-            deadline = time.monotonic() + MIC_REIDENTIFY_S
+        # Planned like `karaoke -r` (karaoke.songwatch): a scan a minute before
+        # the song should end and one after it, early when the music fades or
+        # stops, backing off after misses -- not every 30 s as before.
+        plan = songwatch.ScanPlan()
+        watcher = songwatch.ChangeWatcher(_default_source(True) or "", mic=True).start()
+        length: float | None = None
+        try:
             while not self._mic_stop.is_set():
-                self._publish_mic()
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    break
-                self._mic_stop.wait(min(live_state.HEARTBEAT_S, left))
+                try:
+                    ref = identify_live(mic=True, timeout=MIC_LISTEN_TIMEOUT)
+                except Exception as exc:
+                    log.debug("mic identify failed: %s", exc)
+                    ref = None
+                if ref is not None and ref.title:
+                    changed = (self._mic_ref is None
+                               or (ref.artist, ref.title)
+                               != (self._mic_ref.artist, self._mic_ref.title))
+                    self._mic_ref = ref
+                    if changed:
+                        # Force _poll_detection to re-resolve instead of
+                        # short-circuiting on an unchanged key.
+                        self._sync_key = None
+                        length = _song_length(ref, None)
+                        watcher.song_matched()
+                        log.info("mic: %s - %s", ref.artist, ref.title)
+                    wait = plan.after_match(self.mic_elapsed(), length)
+                else:
+                    wait = plan.after_miss()
+                log.debug("mic: next scan in %.0fs (%s)", wait, plan.reason)
+                # Wait in heartbeat-sized steps, so views in other processes
+                # (ctrl-api's /mood) keep trusting the anchor.
+                deadline = time.monotonic() + wait
+                while not self._mic_stop.is_set():
+                    self._publish_mic()
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    if watcher.event.is_set():
+                        watcher.event.clear()
+                        log.info("mic: the music faded or stopped; scanning early")
+                        break
+                    self._mic_stop.wait(min(live_state.HEARTBEAT_S, left))
+        finally:
+            watcher.stop()
         live_state.clear("tui-radio")
 
     def _publish_mic(self) -> None:
