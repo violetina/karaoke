@@ -135,6 +135,10 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.detect
 
+## Song-Change Scan Planning
+
+::: karaoke.songwatch
+
 ## Event Hooks & Pub/Sub System
 
 ::: karaoke.events
