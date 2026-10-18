@@ -246,9 +246,12 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
             dur = float(res.stdout.strip())
         except Exception:
             pass
+    from .postprocess_queue import record_sync_failure
+
     if dur and dur > 900:  # 15 minutes cap for Whisper transcription
         log.warning("postprocess: skipping sync for track %s, duration %0.1fs exceeds 15min cap",
                     track_id, dur)
+        record_sync_failure(track_id, plain, "too long for Whisper", conn)
         return False
 
     try:
@@ -313,6 +316,7 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
     if not lrc.strip() or not parse_lrc(lrc):
         log.warning("postprocess: alignment produced no timings for track %s",
                     track_id)
+        record_sync_failure(track_id, plain, "alignment produced no timings", conn)
         return False
 
     # Zero anchors is refused, and this is not the coverage gate the
@@ -326,6 +330,7 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
         log.warning("postprocess: no anchored line for track %s; "
                     "timings would be evenly spaced guesses, not stored",
                     track_id)
+        record_sync_failure(track_id, plain, "no line anchored on a heard word", conn)
         return False
 
     conn.execute(

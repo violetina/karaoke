@@ -411,6 +411,18 @@ def sync_lyrics(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     from . import postprocess_worker, localcache
     with localcache.connect() as conn:
         if not postprocess_worker.run_sync_logic(context.track_id, context.audio_path, conn):
+            from .postprocess_queue import sync_gave_up
+
+            row = conn.execute("SELECT plain_lyrics FROM lyrics WHERE track_id = %s"
+                               " AND kind = 'approved'", (context.track_id,)).fetchone()
+            if row and sync_gave_up(context.track_id, row["plain_lyrics"] or "", conn):
+                # Deterministic and remembered: retrying runs Whisper twice
+                # more for the same result, and raising stops the rest of the
+                # chain -- search document, CLAP and mood never ran.
+                log.warning("postprocess: lyrics sync for track %s cannot succeed; "
+                            "continuing the chain without it", context.track_id)
+                context.pending = [p for p in context.pending if p != "sync"]
+                return context.to_dict()
             log.warning("postprocess: lyrics sync failed for track %s (%s)",
                         context.track_id, context.url)
             raise RuntimeError(f"Lyrics sync failed for track {context.track_id}") # Retryable error

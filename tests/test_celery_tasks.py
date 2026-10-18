@@ -670,3 +670,14 @@ def test_a_vanished_file_without_a_url_is_skipped_not_fetched(monkeypatch, tmp_p
     tasks.embed_clap.run(ctx.to_dict())
     fetch.assert_not_called()
     postprocess_worker.run_clap_logic.assert_not_called()
+
+
+def test_a_remembered_sync_failure_continues_the_chain(monkeypatch, tmp_path):
+    (tmp_path / "audio.mp3").write_bytes(b"x")
+    monkeypatch.setattr(postprocess_worker, "run_sync_logic", MagicMock(return_value=False))
+    monkeypatch.setattr(localcache, "connect", MagicMock())
+    monkeypatch.setattr(q, "sync_gave_up", lambda *a, **k: True)
+    ctx = PostprocessContext(artist="808 State", title="Flow Coma", url="u", track_id=2597,
+                             audio_path=tmp_path / "audio.mp3", pending=["sync", "clap", "mood"])
+    out = PostprocessContext.from_dict(tasks.sync_lyrics.run(ctx.to_dict()))   # no raise
+    assert out.pending == ["clap", "mood"]                                    # the rest still runs
