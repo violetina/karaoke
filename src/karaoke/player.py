@@ -748,6 +748,26 @@ def play_offset_synced(
         console.print("\n[dim]stopped[/]")
 
 
+def _song_length(ref, ly) -> Optional[float]:
+    """The song's length for scan planning: the lyrics source, else the library."""
+    if ly is not None and getattr(ly, "duration", None):
+        return float(ly.duration)
+    try:
+        from . import localcache
+
+        with localcache.connect() as conn:
+            tid = localcache.find_track_id_relaxed(ref.artist, ref.title, conn)
+            if tid is None:
+                return None
+            row = conn.execute("SELECT duration FROM tracks WHERE track_id = %s",
+                               (tid,)).fetchone()
+            seconds = float(row["duration"]) if row and row["duration"] else None
+    except Exception:
+        return None
+    # A full-album upload is not the song's length.
+    return seconds if seconds and seconds < 1500 else None
+
+
 def _ensure_in_library(artist: str, title: str) -> None:
     """Best-effort: add a radio song to the library and queue its processing."""
     from . import localcache
@@ -767,12 +787,16 @@ def play_radio_synced(
     mic: bool = True,
     record: bool = False,
     reidentify_interval: float = 30.0,
+    fixed_scan: bool = False,
     extra_latency: float = 0.0,
     listen_timeout: int = 30,
 ) -> None:  # pragma: no cover - interactive/live
     """Continuously follow live audio (radio/room): identify, sync, re-lock.
 
-    Runs a background thread that re-identifies every `reidentify_interval`s.
+    Runs a background thread that re-identifies the playing song. By default
+    the next scan is planned from the song's position and length, with an
+    early scan when the music fades or stops (:mod:`karaoke.songwatch`);
+    ``fixed_scan`` restores the old rhythm of every `reidentify_interval`s.
     Each result either re-anchors the current song (drift correction) or, if the
     song changed, swaps in new lyrics. Between/over speech it keeps the last song
     and shows a listening hint. Ctrl-C to stop.
@@ -845,6 +869,9 @@ def play_radio_synced(
         "offset_mono": time.monotonic(),
         "status": "listening…",
         "has_lyrics": False,
+        "duration": None,    # song length, for planning the next scan
+        "next_scan_mono": None,
+        "scan_reason": "",
     }
     lock = threading.Lock()
     stop = threading.Event()
@@ -922,19 +949,50 @@ def play_radio_synced(
             state["offset"] = ref.offset
             state["offset_mono"] = ref.offset_mono
             state["has_lyrics"] = bool(tl.lines)
+            state["duration"] = _song_length(ref, ly)
             state["status"] = "in sync" if tl.lines else "no synced lyrics for this track"
         publish_live()
 
     def identifier() -> None:
-        # First pass immediately, then every interval.
-        while not stop.is_set():
-            try:
-                ref = identify_live(mic=mic, timeout=listen_timeout)
-                apply(ref)
-            except Exception as e:  # keep the loop alive on transient errors
+        from . import songwatch
+        from .identify import _default_source
+
+        # First pass immediately; then planned (or fixed, with --fixed-scan).
+        plan = songwatch.ScanPlan()
+        watcher = None
+        if not fixed_scan:
+            watcher = songwatch.ChangeWatcher(_default_source(mic) or "", mic=mic).start()
+        try:
+            while not stop.is_set():
+                matched = False
+                try:
+                    with lock:
+                        before = state["key"]
+                    ref = identify_live(mic=mic, timeout=listen_timeout)
+                    apply(ref)
+                    matched = bool(ref is not None and ref.title and ref.offset is not None)
+                    if matched and watcher is not None and state["key"] != before:
+                        watcher.song_matched()
+                except Exception as e:  # keep the loop alive on transient errors
+                    with lock:
+                        state["status"] = f"identify error: {e}"
+                if fixed_scan:
+                    wait, reason = reidentify_interval, "fixed"
+                elif matched:
+                    wait = plan.after_match(elapsed_now(), state["duration"])
+                    reason = plan.reason
+                else:
+                    wait, reason = plan.after_miss(), plan.reason
                 with lock:
-                    state["status"] = f"identify error: {e}"
-            stop.wait(reidentify_interval)
+                    state["next_scan_mono"] = time.monotonic() + wait
+                    state["scan_reason"] = reason
+                woke = songwatch.wait_for_next_scan(stop, wait, watcher)
+                if woke == "end":
+                    with lock:
+                        state["scan_reason"] = "song ended early"
+        finally:
+            if watcher is not None:
+                watcher.stop()
 
     def elapsed_now() -> float:
         return state["offset"] + (time.monotonic() - state["offset_mono"]) + nudge[0]
@@ -966,7 +1024,13 @@ def play_radio_synced(
             rec_indicator = f"  ·  [bold red]● REC #{rec_state['recording_id']} ({m:02d}:{s:02d})[/bold red]"
         else:
             rec_indicator = "  ·  [dim]rec: off (r)[/dim]"
-        foot = f"{mood}  ·  {status}{rec_indicator}"
+        with lock:
+            next_mono, scan_reason = state["next_scan_mono"], state["scan_reason"]
+        scan_hint = ""
+        if next_mono is not None:
+            left = max(0, int(next_mono - time.monotonic()))
+            scan_hint = f"  ·  next scan {left // 60}:{left % 60:02d} ({scan_reason})"
+        foot = f"{mood}  ·  {status}{scan_hint}{rec_indicator}"
         if abs(n) > 1e-6:
             foot += f"  ·  nudge {n:+.1f}s"
         foot += "  ·  " + _NUDGE_HINT + " · r rec"
