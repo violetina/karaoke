@@ -291,12 +291,29 @@ def build(valence, arousal, *, window_s: float = WINDOW_S,
             changed = True
             break
 
+    # A segment is named by where it sits on average, not by the window
+    # labels that formed it: hysteresis can carry a label across a stretch
+    # whose own average lies in another quadrant ("Simple Song" at 3:00 was
+    # labelled angry with a warm, calm mean). Renaming can make neighbours
+    # equal, so merge and rename until nothing changes.
+    runs = [(s, e) for _, s, e in _runs(labels)]
+    while True:
+        named = [(classify(float(v[s:e].mean()), float(a[s:e].mean()))[0], s, e)
+                 for s, e in runs]
+        merged: list[tuple[str, int, int]] = []
+        for lab, s, e in named:
+            if merged and merged[-1][0] == lab:
+                merged[-1] = (lab, merged[-1][1], e)
+            else:
+                merged.append((lab, s, e))
+        if len(merged) == len(runs):
+            break
+        runs = [(s, e) for _, s, e in merged]
+
     segments = []
-    for lab, s, e in _runs(labels):
+    for lab, s, e in merged:
         sv, sa = float(v[s:e].mean()), float(a[s:e].mean())
         _, alt = classify(sv, sa)
-        if alt == lab:
-            alt = None
         segments.append(Segment(start_s=s * window_s, end_s=min(e * window_s, duration),
                                 mood=lab, valence=sv, arousal=sa, alt=alt))
     return MoodTimeline(segments=segments, duration_s=duration, has_lyrics=has_lyrics,
