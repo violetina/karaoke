@@ -14,7 +14,8 @@ Two deliberate choices about randomness:
 
 - A random **subset** of the pool is scored rather than all of it. That bounds
   the cost to a fixed number of ffmpeg calls however large the cache grows, and
-  it is also where most of the variety comes from.
+  it is also where most of the variety comes from. Each cover is decoded once
+  and its thumbnail remembered, so repeat requests cost no ffmpeg at all.
 - The winner is drawn from everything close to the best, not the single best.
   Always returning the argmax would show the same cover every time the same
   song played, which is the opposite of what was asked for.
@@ -22,6 +23,8 @@ Two deliberate choices about randomness:
 from __future__ import annotations
 
 import random
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +51,35 @@ NEAR_BEST = 0.06
 MIN_SCORE = 0.45
 
 
+# Thumbnails already decoded, by (path, mtime, size). A cached cover never
+# changes, and the /mood page asks for a cover several times a minute: without
+# this every request re-ran ffmpeg on 12 covers -- ~170 decodes a minute, two
+# to five ffmpeg processes alive at any moment. A failed read is remembered too,
+# so a broken file is not retried on every request. Bounded; ~10 KB an entry.
+MAX_THUMBS = 4096
+_thumbs: "OrderedDict[tuple[str, int, int], Optional[Pixels]]" = OrderedDict()
+_thumbs_lock = threading.Lock()
+
+
+def _thumbnail(path: Path) -> Optional[Pixels]:
+    """The cover's small scoring grid, decoded once per file version."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    with _thumbs_lock:
+        if key in _thumbs:
+            _thumbs.move_to_end(key)
+            return _thumbs[key]
+    pixels = coverart.sample(path, SCORE_COLS, SCORE_ROWS)
+    with _thumbs_lock:
+        _thumbs[key] = pixels
+        while len(_thumbs) > MAX_THUMBS:
+            _thumbs.popitem(last=False)
+    return pixels
+
+
 def art_pool(directory: Optional[Path] = None) -> list[Path]:
     """Every cached cover image available to choose from."""
     target = directory or coverart.art_cache_dir()
@@ -69,7 +101,7 @@ def score_pool(pool: list[Path], mood: str, *,
 
     scored: list[tuple[float, Path]] = []
     for path in candidates:
-        pixels = coverart.sample(path, SCORE_COLS, SCORE_ROWS)
+        pixels = _thumbnail(path)
         if pixels is None:
             # A truncated or unreadable cache entry: skip it rather than let one
             # bad file empty the pool.
