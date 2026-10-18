@@ -14,6 +14,16 @@ from karaoke import localcache # For direct access in tests
 from karaoke import postprocess_worker # For direct access in tests
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_claims(monkeypatch):
+    """These tests reuse one song across tests; claiming is tested separately."""
+    monkeypatch.setattr(q, "claim", lambda *a, **k: True)
+    monkeypatch.setattr(q, "release", lambda *a, **k: None)
+
+
 # --- Test for resolve_track_id task ---
 def test_resolve_track_id_found(monkeypatch):
     mock_find_track_id = MagicMock(return_value=123)
@@ -306,6 +316,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     mock_sync_task = MagicMock()
     mock_rebuild_task = MagicMock()
     mock_clap_task = MagicMock()
+    mock_finish_task = MagicMock()
 
     # The .s() method returns a mock, and on that mock, .set() returns the final result
     mock_resolve_task_s_return_value = MagicMock()
@@ -328,6 +339,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     monkeypatch.setattr(tasks, "sync_lyrics", mock_sync_task)
     monkeypatch.setattr(tasks, "rebuild_vectors", mock_rebuild_task)
     monkeypatch.setattr(tasks, "embed_clap", mock_clap_task)
+    monkeypatch.setattr(tasks, "finish_postprocess", mock_finish_task)
 
     # Mock celery.chain and its apply_async method
     mock_chain_instance = MagicMock()
@@ -361,6 +373,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
         mock_sync_task.s.return_value,
         mock_rebuild_task.s.return_value,
         mock_clap_task.s.return_value,
+        mock_finish_task.s.return_value,
     )
     # Assert that apply_async was called on the chained object
     mock_chain_apply_async.assert_called_once_with()
@@ -392,7 +405,8 @@ def test_default_postprocess_leaves_out_the_timing_upgrade(monkeypatch):
         monkeypatch, {"artist": "A", "title": "B", "url": "http://youtube.com/v"})
     assert "upgrade_timings" not in names
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
-                     "analyze_harmony", "sync_lyrics", "rebuild_vectors", "embed_clap"]
+                     "analyze_harmony", "sync_lyrics", "rebuild_vectors", "embed_clap",
+                     "finish_postprocess"]
 
 
 def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
@@ -401,7 +415,7 @@ def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
                       "include_timings": True})
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
                      "analyze_harmony", "upgrade_timings", "sync_lyrics",
-                     "rebuild_vectors", "embed_clap"]
+                     "rebuild_vectors", "embed_clap", "finish_postprocess"]
 
 
 def test_enqueue_postprocess_uses_orchestrator(monkeypatch):
