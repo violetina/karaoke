@@ -355,6 +355,10 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.dj_chat
 
+## DJ Next-Song Suggestions
+
+::: karaoke.dj_suggest
+
 ## Mcp Server
 
 ::: karaoke.mcp_server

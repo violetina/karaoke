@@ -396,10 +396,23 @@ def test_suggest_mood_strategy(paging_library, monkeypatch):
     monkeypatch.setattr(search, "similar_mood_for_track", lambda track_id, k: [
         {"track_id": paging_library[1], "artist": "Emotive Artist", "title": "Sad Ballad", "score": 0.92, "dominant_mood": "sad", "space": "sentiment_mood"}
     ])
+    # The mood-timeline engine (dj_suggest) answers first; the lexicon-based
+    # path is the fallback when it finds nothing.
+    from karaoke import dj_suggest
+    monkeypatch.setattr(dj_suggest, "suggest", lambda *a, **k: [])
     res_str = mcp_server.suggest_next_tracks(track_id=paging_library[0], strategy="mood", limit=3)
     data = json.loads(res_str)
     assert data["strategy"] == "mood_emotion_sentiment"
     assert len(data["suggestions"]) == 1
+
+
+def test_suggest_mood_uses_the_mood_timeline_engine_first(paging_library, monkeypatch):
+    from karaoke import dj_suggest
+    monkeypatch.setattr(dj_suggest, "suggest", lambda seed, strategy, **k: [
+        {"track_id": paging_library[1], "artist": "A", "title": "T", "reason": "romantic → dreamy"}])
+    data = json.loads(mcp_server.suggest_next_tracks(track_id=paging_library[0], strategy="mood", limit=3))
+    assert data["strategy"] == "mood"
+    assert data["suggestions"][0]["reason"] == "romantic → dreamy"
 
 
 def test_get_similarity_graph_context_and_mood(paging_library, monkeypatch):
