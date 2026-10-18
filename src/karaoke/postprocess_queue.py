@@ -82,7 +82,8 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
     # session -- and they are now arriving routinely from the player's own
     # lyrics panel, which supplies text and nothing else. Whisper can give
     # them a rhythm without being trusted for the words themselves.
-    if row and not row["synced_lyrics"] and row["plain_lyrics"]:
+    if (row and not row["synced_lyrics"] and row["plain_lyrics"]
+            and not sync_gave_up(track_id, row["plain_lyrics"], conn)):
         pending.append("sync")
 
     # 4. Search artefacts in OpenSearch: the track's own vector document, and
@@ -365,3 +366,56 @@ def release(artist: str, title: str, conn: Connection) -> None:
     conn.execute("DELETE FROM postprocess_claims WHERE song_key = %s",
                  (claim_key(artist, title),))
     conn.commit()
+
+
+# -- remembered sync failures --------------------------------------------------
+#
+# Whisper alignment fails the same way every time for some tracks -- an
+# instrumental remix with stored lyrics heard as Spanish, a 20-minute live
+# take over the cap -- and each chain then ran it three times (the step's two
+# Celery retries) before stopping the rest of the chain. A deterministic
+# failure is remembered against the exact lyrics it failed on, so new lyrics
+# for the track are tried again. A crash is not remembered: it may be
+# transient.
+
+_SYNC_FAILURES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sync_failures (
+    track_id    INTEGER PRIMARY KEY,
+    lyrics_hash TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    failed_at   DOUBLE PRECISION NOT NULL
+)
+"""
+
+
+def _lyrics_hash(plain: str) -> str:
+    import hashlib
+
+    normalised = "\n".join(ln.strip() for ln in (plain or "").splitlines() if ln.strip())
+    return hashlib.sha1(normalised.encode("utf-8")).hexdigest()
+
+
+def record_sync_failure(track_id: int, plain: str, reason: str, conn: Connection) -> None:
+    """Remember that these lyrics could not be timed for this track."""
+    import time
+
+    conn.execute(_SYNC_FAILURES_SCHEMA)
+    conn.execute(
+        """
+        INSERT INTO sync_failures (track_id, lyrics_hash, reason, failed_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (track_id) DO UPDATE SET lyrics_hash = excluded.lyrics_hash,
+            reason = excluded.reason, failed_at = excluded.failed_at
+        """, (track_id, _lyrics_hash(plain), reason, time.time()))
+    conn.commit()
+
+
+def sync_gave_up(track_id: int, plain: str, conn: Connection) -> bool:
+    """Whether syncing exactly these lyrics already failed deterministically."""
+    try:
+        conn.execute(_SYNC_FAILURES_SCHEMA)
+        row = conn.execute("SELECT lyrics_hash FROM sync_failures WHERE track_id = %s",
+                           (track_id,)).fetchone()
+    except psycopg.Error:
+        return False
+    return bool(row) and row["lyrics_hash"] == _lyrics_hash(plain)

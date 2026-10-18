@@ -80,3 +80,29 @@ def test_an_unreachable_cluster_claims_nothing_is_missing(monkeypatch):
 
     monkeypatch.setattr("karaoke.osclient.client", lambda *a, **k: None)
     assert q._missing_search_artefacts(1) == []
+
+
+# -- remembered sync failures ------------------------------------------------
+
+def _seed_plain_only(conn) -> int:
+    localcache.add_track_and_lyrics(
+        "808 State", "Flow Coma",
+        Lyrics(synced_raw="", plain="flow coma\nflow coma", source="lrclib", lines=[]),
+        url="https://www.youtube.com/watch?v=abc123DEF45", kind="youtube", conn=conn)
+    return localcache.find_track_id("808 State", "Flow Coma", conn)
+
+
+def test_a_failed_sync_is_not_pending_again_for_the_same_lyrics(tmp_path):
+    conn = localcache.connect(tmp_path / "k.db")
+    tid = _seed_plain_only(conn)
+    assert "sync" in needs_postprocessing(tid, conn, include_search_artefacts=False)
+    q.record_sync_failure(tid, "flow coma\nflow coma", "no line anchored on a heard word", conn)
+    assert "sync" not in needs_postprocessing(tid, conn, include_search_artefacts=False)
+
+
+def test_new_lyrics_are_tried_again(tmp_path):
+    conn = localcache.connect(tmp_path / "k.db")
+    tid = _seed_plain_only(conn)
+    q.record_sync_failure(tid, "flow coma\nflow coma", "alignment produced no timings", conn)
+    assert q.sync_gave_up(tid, "  flow coma\n\nflow coma ", conn)      # same words, other spacing
+    assert not q.sync_gave_up(tid, "different words entirely", conn)
