@@ -215,3 +215,13 @@ def test_build_names_feelings_per_segment():
 def test_a_specific_feeling_wins_a_near_tie_with_a_generic_one():
     assert mt.feeling_for("tender", None, {"calm": 0.89, "romantic": 0.86}) == "romantic"
     assert mt.feeling_for("tender", None, {"calm": 1.4, "romantic": 0.5}) == "calm"
+
+
+def test_prompt_matrices_are_embedded_once_per_process(monkeypatch):
+    calls = []
+    mt._matrix_cache.clear()
+    monkeypatch.setattr(mt, "_build_character_prompt_matrix", lambda: calls.append(1) or "M")
+    assert mt._character_prompt_matrix() == "M"
+    assert mt._character_prompt_matrix() == "M"
+    assert calls == [1]
+    mt._matrix_cache.clear()
