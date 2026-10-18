@@ -70,3 +70,20 @@ def clear_db():
                 END $$;
             """)
         conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def no_live_broker(monkeypatch):
+    """No test publishes a real Celery task.
+
+    The database is a test one, but the broker is not: a test that let a
+    publish through queued "A - B" on the live RabbitMQ, and the live worker
+    then searched YouTube and added that song to the real library. A test that
+    asserts on publishing patches the task or ``apply_async`` itself, which
+    overrides this.
+    """
+    from unittest.mock import MagicMock
+    from celery.app.task import Task
+
+    monkeypatch.setattr(Task, "apply_async",
+                        lambda self, *a, **k: MagicMock(id="test-no-broker"))
