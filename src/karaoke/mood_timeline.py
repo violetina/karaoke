@@ -179,8 +179,24 @@ def _unit(rows):
     return rows / norms
 
 
+#: Prompt matrices, embedded once per process. They depend only on the fixed
+#: prompts; re-embedding them for every song cost ~3.9 s a song (1.4 s for
+#: the moods, 2.5 s for the characters) -- most of a backfill's time.
+_matrix_cache: dict[str, Any] = {}
+
+
+def _cached(name: str, build):
+    if name not in _matrix_cache:
+        _matrix_cache[name] = build()
+    return _matrix_cache[name]
+
+
 def _audio_prompt_matrix():
     """Unit text vectors, one per mood, each the mean of its phrasings."""
+    return _cached("audio", _build_audio_prompt_matrix)
+
+
+def _build_audio_prompt_matrix():
     import numpy as np
 
     from . import clap_vector
@@ -194,6 +210,10 @@ def _audio_prompt_matrix():
 
 def _character_prompt_matrix():
     """Unit text vectors for the sound characters, like the mood prompts."""
+    return _cached("character", _build_character_prompt_matrix)
+
+
+def _build_character_prompt_matrix():
     import numpy as np
 
     from . import clap_vector
@@ -208,7 +228,8 @@ def _character_prompt_matrix():
 def _tone_matrix():
     from .embed import embed_text
 
-    return _unit([embed_text(f"lyrics that are {tone}") for tone in TONE_VALENCE])
+    return _cached("tone", lambda: _unit([embed_text(f"lyrics that are {tone}")
+                                          for tone in TONE_VALENCE]))
 
 
 def build_calibration(*, clap_sample: int = 4000, lyric_sample: int = 300) -> dict[str, Any]:
