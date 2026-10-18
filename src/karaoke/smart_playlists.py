@@ -236,15 +236,18 @@ def song_key(title: str) -> str:
 
 def cap_per_act(rows: list[dict[str, Any]], per_act: int = PER_ACT,
                 limit: int = MAX_TRACKS) -> list[dict[str, Any]]:
-    """At most ``per_act`` songs per act, up to ``limit``, order kept."""
+    """At most ``per_act`` songs per act, one version of each song, up to ``limit``."""
     from .dj_suggest import artist_key
 
     seen: dict[str, int] = {}
-    songs: set[tuple[str, str]] = set()
+    # One version of a song per list, whoever plays it: "Rory Gallagher &
+    # Muddy Waters" is another act but the same song, and flow order would
+    # put the two side by side because they sound alike.
+    songs: set[str] = set()
     out = []
     for r in rows:
         key = artist_key(r["artist"])
-        song = (key, song_key(r["title"]))
+        song = song_key(r["title"])
         if seen.get(key, 0) >= per_act or song in songs:
             continue
         songs.add(song)

@@ -24,6 +24,13 @@ def test_cap_allows_two_per_act_and_no_second_version_of_a_song():
     assert [r["track_id"] for r in out] == [1, 3, 5]
 
 
+def test_cap_keeps_one_version_of_a_song_across_acts():
+    rows = [_row(1, "Muddy Waters", "Who's Gonna Be Your Sweet Man"),
+            _row(2, "Rory Gallagher & Muddy Waters", "Who's Gonna Be Your Sweet Man"),
+            _row(3, "Rory Gallagher", "Bullfrog Blues")]
+    assert [r["track_id"] for r in sp.cap_per_act(rows)] == [1, 3]
+
+
 def test_cap_stops_at_the_limit():
     rows = [_row(i, f"Act {i}") for i in range(10)]
     assert len(sp.cap_per_act(rows, limit=4)) == 4
