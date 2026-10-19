@@ -59,7 +59,7 @@ text/event-stream"`, or just hit `/health`.
 |---|---|---|
 | `search_songs` | Search tracks in the library with Camelot codes, BPM, energy, and lyrics | `query`, `genre`, `key`, `min_bpm`, `max_bpm`, `only_synced_lyrics` |
 | `get_now_playing` | Inspect currently playing audio on Spotify/Chromium/VLC/MPRIS | — |
-| `suggest_next_tracks` | Harmonic transitions (Camelot wheel), energy flow, timbre (CLAP), structural chords, lyric context, or emotional mood | `track_id`, `strategy` (`harmonic`, `energy_up`, `cool_down`, `acoustic`, `structural`, `context`, `mood`), `exclude_playlist` |
+| `suggest_next_tracks` | Suggest next tracks ranked by fit (sound timbre + mood handover) under strategy constraints | `track_id`, `strategy` (`flow` [default], `harmonic`, `energy_up`, `cool_down`, `mood`, `structural`, `acoustic`), `limit`, `exclude_playlist` |
 | `analyze_lyric_vibe` | Lyric mood arc, sentiment breakdown, and singer delivery tips | `track_id` |
 | `get_dj_stats` | Play counts, top artists, crowd favorites, and discovery history | — |
 | `play_track` | Trigger playback via the host karaoke player | `track_id`, `prefer_audio_only` |
@@ -78,7 +78,7 @@ Features:
 * **Multi-Modal Similarity Dimensions:**
   * **Structural (Chord Motion):** CQT chroma 96-chord template matching and root-motion k-NN in OpenSearch (`karaoke-progression`).
   * **Context (Lyrics & Meaning):** Dense 384-dimensional semantic embeddings (`lyrics_vector` in OpenSearch `tracks` index) across 18,700+ songs, connecting tracks by lyrical narrative, theme, and storytelling.
-  * **Mood (Emotion & Feeling):** 4D emotional arc distribution (`sentiment_vector` [happy, sad, angry, tender]) and `dominant_mood` valence matching.
+  * **Mood (Emotion & Feeling):** Mood Timelines v2 (`track_moods`) providing 12 calibrated feeling labels (`dreamy`, `longing`, `frustrated`, `festive`, `romantic`...), sound/words tension (`bittersweet`, `ironic`), and striped borderline transitions.
   * **Acoustic (CLAP Timbre):** Contrastive audio-language pretraining sound embeddings.
   * **Harmonic (Camelot Key):** Circle of fifths key compatibility (+/- 1 hour or relative major/minor).
 * **Physics-based CoSE Layout:** Nodes naturally cluster into stylistic, thematic, and harmonic constellations.

@@ -135,6 +135,18 @@ SQLite file from earlier test runs.
   but it pollutes CLI and test output.
 - Celery results still persist to a separate `celery-results.sqlite`.
 
+## Operational & Pipeline Tables
+
+Several tables are managed directly by application modules rather than the legacy SQLite migrator:
+
+| Table | Created By | Purpose |
+|---|---|---|
+| `track_moods` | `mood_timeline.py` | Rolling 10s mood segments (`valence`, `arousal`, `mood`, `alt`, `feeling`, `contrast`) and summary metrics (`dominant_feeling`, `feeling_arc`, `contrast`, `swings`). Keyed by `track_id` with `mood_version`. |
+| `track_chords` | `chord_timeline.py` | Timed chord symbols and Roman numeral harmonic progressions. |
+| `postprocess_claims` | `postprocess_queue.py` | Atomic lock (`song_key`, `claimed_at`) with 15-minute TTL preventing duplicate Celery post-processing chains for tracks already in flight. |
+| `sync_failures` | `postprocess_queue.py` | Remembers deterministic Whisper alignment failures keyed by `track_id` and SHA-1 `lyrics_hash`, preventing un-alignable tracks from infinite Celery retry loops. |
+| `active_queue_state` | `localcache.py` | Active playback and queue ordering state across TUI restarts. |
+
 ## Unified event store
 
 `karaoke.event_store` implements the single `events` table from the
