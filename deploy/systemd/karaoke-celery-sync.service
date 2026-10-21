@@ -1,0 +1,32 @@
+[Unit]
+Description=Karaoke Celery sync worker (Whisper lyric sync)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target karaoke-mq-forward.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=KARAOKE_ORCHESTRATOR=celery
+Environment=RABBITMQ_HOST=localhost
+# Two Whisper runs with three threads each finish a song far sooner than six
+# single-threaded ones fighting over the slice, and hold two models, not six.
+Environment=OMP_NUM_THREADS=3
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+# Its own queue (karaoke-sync): a 10-40 minute sync never blocks the fast
+# steps of the next song. The model is cached per process, so recycle rarely.
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-sync --loglevel=INFO --concurrency=2 --max-tasks-per-child=25 --hostname=sync@%%h --events
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-celery-sync
+
+# Background work must never starve playback.
+Nice=15
+Slice=karaoke-postprocess.slice
+
+[Install]
+WantedBy=karaoke.target

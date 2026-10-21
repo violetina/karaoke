@@ -132,6 +132,18 @@ as they arrive. Keep it running while you use the app. For real use, prefer
 `make systemd-up`: it starts `karaoke-celery-worker.service`, capped by
 `karaoke-postprocess.slice` so analysis does not starve playback.
 
+Two steps run on their own queues and workers, so a slow one never sits in
+front of the fast steps of the next song:
+
+| Queue | Worker | Runs |
+|---|---|---|
+| `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, vectors, finish |
+| `karaoke-sync` | `karaoke-celery-sync` (2 processes, 3 threads each) | Whisper lyric sync (`make celery-sync-worker`) |
+| `karaoke-clap` | `karaoke-celery-clap` (1 process) | CLAP timbre embedding and mood |
+
+If `karaoke-celery-sync` is down, lyric sync waits in its queue and the rest of
+the chain waits behind it; nothing else is held up.
+
 ### 3b. Run the dashboard
 
 ```bash

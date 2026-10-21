@@ -104,6 +104,20 @@ def lines_to_lrc(lines: list[tuple[float, str]]) -> str:
     return "\n".join(out)
 
 
+#: Loaded models, one per (size, compute type) per process. Loading on every
+#: call left each long-lived Celery worker holding several copies.
+_MODELS: dict[tuple[str, str], Any] = {}  # Any: faster_whisper is imported lazily
+
+
+def _model(model_size: str, compute_type: str) -> Any:  # Any: see _MODELS
+    key = (model_size, compute_type)
+    if key not in _MODELS:
+        from faster_whisper import WhisperModel
+
+        _MODELS[key] = WhisperModel(model_size, device="cpu", compute_type=compute_type)
+    return _MODELS[key]
+
+
 def transcribe_to_words(
     audio_path: str,
     *,
@@ -124,9 +138,7 @@ def transcribe_to_words(
     unreliable, but its *rhythm* is good. Callers that hold the real lyrics can
     align them onto these timings; see :mod:`karaoke.lyric_align`.
     """
-    from faster_whisper import WhisperModel
-
-    model = WhisperModel(model_size, device="cpu", compute_type=compute_type)
+    model = _model(model_size, compute_type)
     segments, _info = model.transcribe(
         audio_path,
         initial_prompt=text,

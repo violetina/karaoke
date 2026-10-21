@@ -226,11 +226,35 @@ def test_sync_lyrics_no_pending_or_no_audio(tmp_path):
     result_no_audio = tasks.sync_lyrics.run(context_no_audio.to_dict())
     assert result_no_audio == context_no_audio.to_dict()
 
+def _conn_with_row(row):
+    """A localcache.connect stand-in whose every query returns ``row``."""
+    connect = MagicMock()
+    connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = row
+    return connect
+
+
+def test_sync_lyrics_skips_whisper_when_lyrics_were_synced_meanwhile(monkeypatch, tmp_path):
+    """"sync" is decided at chain start; the sync queue may run it hours later."""
+    (tmp_path / "audio.mp3").write_bytes(b"x")
+    mock_run_sync_logic = MagicMock(return_value=True)
+    monkeypatch.setattr(postprocess_worker, "run_sync_logic", mock_run_sync_logic)
+    monkeypatch.setattr(localcache, "connect", _conn_with_row({"synced_lyrics": "[00:01.00] hi"}))
+
+    context = PostprocessContext(
+        artist="A", title="B", url="", track_id=1,
+        audio_path=tmp_path / "audio.mp3", pending=["sync", "vectors"]
+    )
+    result = tasks.sync_lyrics.run(context.to_dict())
+
+    mock_run_sync_logic.assert_not_called()
+    assert result["pending"] == ["vectors"]
+
+
 def test_sync_lyrics_success(monkeypatch, tmp_path):
     (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_sync_logic = MagicMock(return_value=True)
     monkeypatch.setattr(postprocess_worker, "run_sync_logic", mock_run_sync_logic)
-    monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
+    monkeypatch.setattr(localcache, "connect", _conn_with_row(None))
 
     context = PostprocessContext(
         artist="A", title="B", url="http://youtube.com/vid1", track_id=1,
@@ -245,7 +269,7 @@ def test_sync_lyrics_failure(monkeypatch, tmp_path):
     (tmp_path / "audio.mp3").write_bytes(b"x")  # steps now check the file exists
     mock_run_sync_logic = MagicMock(return_value=False)
     monkeypatch.setattr(postprocess_worker, "run_sync_logic", mock_run_sync_logic)
-    monkeypatch.setattr(localcache, "connect", MagicMock()) # Fix: direct import
+    monkeypatch.setattr(localcache, "connect", _conn_with_row(None))
 
     context = PostprocessContext(
         artist="A", title="B", url="http://youtube.com/vid1", track_id=1,
@@ -444,8 +468,9 @@ def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
 def test_enqueue_postprocess_uses_orchestrator(monkeypatch):
     with patch.object(tasks.postprocess_track, "delay", return_value=MagicMock(id="task-id-123")) as mock_delay:
         payload = {"artist": "Test", "title": "Song", "url": "http://example.com",
-                   "include_timings": False, "full": False}
+                   "include_timings": False, "full": False, "claimed": True}
         monkeypatch.setenv("KARAOKE_ORCHESTRATOR", "celery") # Ensure celery path is taken
+        monkeypatch.setattr(localcache, "connect", MagicMock())  # claim is stubbed; no DB
         task_id = q.publish_postprocess_task("Test", "Song", "http://example.com")
         mock_delay.assert_called_once_with(payload) # This asserts that the orchestrator task was called with .delay()
         assert task_id == "task-id-123"
@@ -622,6 +647,16 @@ def test_a_full_run_searches_a_source_for_chords_alone(monkeypatch):
     out = PostprocessContext.from_dict(tasks.resolve_track_id.run(
         {"artist": "Black Sabbath", "title": "Paranoid", "url": "", "full": True}))
     assert out.url == "https://www.youtube.com/watch?v=paranoid1"
+
+
+def test_sync_lyrics_is_routed_to_its_own_queue():
+    route = celery_app.app.conf.task_routes["karaoke.tasks.sync_lyrics"]
+    assert route == {"queue": celery_app.SYNC_QUEUE}
+    assert celery_app.SYNC_QUEUE != celery_app.POSTPROCESS_QUEUE
+    sync_queue = next(qu for qu in celery_app.app.conf.task_queues
+                      if qu.name == celery_app.SYNC_QUEUE)
+    # Its own binding, or postprocess messages are copied here too (see CLAP).
+    assert sync_queue.routing_key == celery_app.SYNC_QUEUE
 
 
 def test_embed_clap_is_routed_to_its_own_queue():

@@ -18,9 +18,10 @@ Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 Environment=NUMEXPR_NUM_THREADS=1
-# Six consumers matches the slice's CPUQuota=600%, so the pool can fill the
-# background budget without ever contending for the cores playback needs.
-ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-postprocess-celery --loglevel=INFO --concurrency=6 --events
+# Four consumers for the fast steps; Whisper sync (karaoke-celery-sync) and
+# CLAP take the rest of the slice's CPUQuota=600%. Recycling a process after
+# 50 tasks bounds the librosa/madmom growth that pushed the slice into swap.
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-postprocess-celery --loglevel=INFO --concurrency=4 --max-tasks-per-child=50 --events
 Restart=always
 RestartSec=5
 SyslogIdentifier=karaoke-celery-worker

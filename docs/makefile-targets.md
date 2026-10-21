@@ -13,6 +13,7 @@ batch-sync-av                Batch synchronize audio vs video lyrics & calculate
 browse                       Launch the interactive song browser TUI
 browse-log                   Follow TUI/open debug logs
 celery-flower                Run the Celery/Flower dashboard on http://127.0.0.1:5555
+celery-sync-worker           Run the Celery Whisper lyric-sync worker (queue karaoke-sync)
 celery-worker                Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 clean                        Remove build artifacts
 clean-tools                  Remove cached helper tools

@@ -66,3 +66,51 @@ def test_the_last_step_releases_the_claim(db):
     tasks.finish_postprocess.run(PostprocessContext(artist="A", title="B", url="").to_dict())
     with localcache.connect() as c:
         assert q.claim("A", "B", c)
+
+
+def test_publishing_claims_the_song_so_a_second_publish_is_not_queued(db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(q, "orchestrator", lambda: "celery")
+    monkeypatch.setattr(tasks, "enqueue_postprocess", lambda p: sent.append(p) or "id")
+    assert q.publish_postprocess_task("808 State", "Flow Coma")
+    assert q.publish_postprocess_task("808 State", "Flow Coma")    # in flight: still "queued"
+    assert len(sent) == 1 and sent[0]["claimed"] is True
+
+
+def test_a_claimed_payload_starts_its_chain(db, monkeypatch):
+    """The producer's claim is the chain's own; the task must not refuse it."""
+    started = []
+
+    class FakeChain:
+        def __init__(self, *sigs):
+            started.append(sigs)
+
+        def apply_async(self):
+            return None
+
+    monkeypatch.setattr(tasks, "chain", FakeChain)
+    with localcache.connect() as c:
+        assert q.claim("A", "B", c)
+    tasks.postprocess_track.run({"artist": "A", "title": "B", "url": "", "claimed": True})
+    assert len(started) == 1
+
+
+def test_a_failed_publish_releases_its_claim(db, monkeypatch):
+    def broken(_payload):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(q, "orchestrator", lambda: "celery")
+    monkeypatch.setattr(tasks, "enqueue_postprocess", broken)
+    assert not q.publish_postprocess_task("A", "B")
+    with localcache.connect() as c:
+        assert q.claim("A", "B", c)
+
+
+def test_explicit_asks_are_not_claimed_at_publish(db, monkeypatch):
+    """Named steps and the timing upgrade claim in the task, as before."""
+    sent = []
+    monkeypatch.setattr(q, "orchestrator", lambda: "celery")
+    monkeypatch.setattr(tasks, "enqueue_postprocess", lambda p: sent.append(p) or "id")
+    q.publish_postprocess_task("A", "B", steps=["chords"])
+    q.publish_postprocess_task("A", "B", include_timings=True)
+    assert len(sent) == 2 and not any(p.get("claimed") for p in sent)

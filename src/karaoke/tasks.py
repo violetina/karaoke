@@ -34,8 +34,9 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
     log.info("celery postprocess: received %s - %s", artist, title)
 
     # One chain per song at a time (postprocess_queue.claim): producers re-queue
-    # a playing song while it still looks incomplete. ``force`` bypasses it.
-    if not payload.get("force"):
+    # a playing song while it still looks incomplete. ``force`` bypasses it, and
+    # ``claimed`` means the producer already took it (publish_postprocess_task).
+    if not payload.get("force") and not payload.get("claimed"):
         try:
             from . import localcache
             from .postprocess_queue import claim
@@ -426,9 +427,19 @@ def sync_lyrics(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     context = PostprocessContext.from_dict(context_dict)
     if context.track_id is None or "sync" not in context.pending or not _audio_ready(context):
         return context.to_dict()
-    log.info("celery sync_lyrics: %s - %s", context.artist, context.title)
     from . import postprocess_worker, localcache
     with localcache.connect() as conn:
+        # "sync" was decided when the chain started, which on this queue can be
+        # hours ago. A duplicate chain for the same song, or a sync that landed
+        # meanwhile, must not cost another Whisper run.
+        row = conn.execute("SELECT synced_lyrics FROM lyrics WHERE track_id = %s"
+                           " AND kind = 'approved'", (context.track_id,)).fetchone()
+        if row and row["synced_lyrics"]:
+            log.info("celery sync_lyrics: %s - %s already synced; skipped",
+                     context.artist, context.title)
+            context.pending = [p for p in context.pending if p != "sync"]
+            return context.to_dict()
+        log.info("celery sync_lyrics: %s - %s", context.artist, context.title)
         if not postprocess_worker.run_sync_logic(context.track_id, context.audio_path, conn):
             from .postprocess_queue import sync_gave_up
 

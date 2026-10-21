@@ -20,6 +20,10 @@ POSTPROCESS_QUEUE = os.environ.get(
 #: CLAP embedding gets its own queue and a one-process worker
 #: (karaoke-celery-clap.service): the model is ~1 GB per process.
 CLAP_QUEUE = os.environ.get("KARAOKE_CELERY_CLAP_QUEUE", "karaoke-clap")
+#: Whisper lyric sync gets its own queue and worker (karaoke-celery-sync.service).
+#: One sync is 10-40 minutes of CPU; sharing the FIFO with the fast steps put a
+#: wall of them in front of every new song and kept all six slots busy.
+SYNC_QUEUE = os.environ.get("KARAOKE_CELERY_SYNC_QUEUE", "karaoke-sync")
 
 
 def broker_url() -> str:
@@ -63,6 +67,7 @@ app.conf.update(
         # default exchange with the *postprocess* key, so every postprocess
         # message was also copied here and the CLAP worker ran it too.
         Queue(CLAP_QUEUE, routing_key=CLAP_QUEUE),
+        Queue(SYNC_QUEUE, routing_key=SYNC_QUEUE),
     ),
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -76,6 +81,7 @@ app.conf.update(
     task_routes={
         "karaoke.tasks.postprocess_track": {"queue": POSTPROCESS_QUEUE},
         "karaoke.tasks.embed_clap": {"queue": CLAP_QUEUE},
+        "karaoke.tasks.sync_lyrics": {"queue": SYNC_QUEUE},
     },
     timezone="UTC",
 )
