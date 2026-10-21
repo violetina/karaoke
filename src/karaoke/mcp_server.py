@@ -1094,17 +1094,9 @@ def delete_playlist(playlist_id: str, delete_remote_ytmusic: bool = False) -> st
         target_id = pl["playlist_id"] if pl and pl.get("playlist_id") else pid
         target_name = (pl.get("name") if pl else "") or pid
 
-        resolved_dj_id = ""
-        try:
-            from . import ytmusic_playlist
-            resolved_dj_id, _ = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
-        except Exception:
-            pass
-
         if (
             target_id.lower() in _PROTECTED_DJ_NAMES
             or target_name.strip().lower() in _PROTECTED_DJ_NAMES
-            or (resolved_dj_id and target_id == resolved_dj_id)
         ):
             return json.dumps({
                 "error": "Refusing to delete the primary 'dj-list' playlist. Use clear_dj_playlist to empty it instead.",

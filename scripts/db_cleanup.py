@@ -856,8 +856,8 @@ def audit_and_fix_messed_up_lyrics(
     }
 
 
-def repair_harmony_styles_and_quote_truncations(conn, dry_run: bool = False) -> dict[str, int]:
-    """Recompute track_chords harmony styles under updated _style() rules and repair truncated trailing quotes."""
+def repair_harmony_styles(conn, dry_run: bool = False) -> int:
+    """Recompute track_chords harmony styles under updated _style() rules."""
     from psycopg.types.json import Jsonb
     from karaoke import harmony
 
@@ -894,22 +894,9 @@ def repair_harmony_styles_and_quote_truncations(conn, dry_run: bool = False) -> 
                         (Jsonb(h), r["track_id"]),
                     )
 
-    quote_repairs = 0
-    # Titles where an older .strip('"') stripped the closing quote of an embedded quoted phrase
-    cur.execute("SELECT track_id, title FROM tracks WHERE title LIKE '%\"%'")
-    for r in cur.fetchall():
-        t = r["title"] or ""
-        if t.count('"') % 2 == 1 and not t.startswith('"') and not t.endswith('"'):
-            quote_repairs += 1
-            if not dry_run:
-                cur.execute(
-                    "UPDATE tracks SET title = %s WHERE track_id = %s",
-                    (t + '"', r["track_id"]),
-                )
-
-    if not dry_run and (style_updates or quote_repairs):
+    if not dry_run and style_updates:
         conn.commit()
-    return {"style_updates": style_updates, "quote_repairs": quote_repairs}
+    return style_updates
 
 
 def main() -> None:
