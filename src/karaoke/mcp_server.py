@@ -776,6 +776,70 @@ def play_track(track_id: int, prefer_audio_only: bool = False) -> str:
 
 
 @dj_mcp.tool()
+def play_playlist(
+    playlist_id: str = "dj-list",
+    start_position: int = 1,
+    prefer_audio_only: bool = True,
+) -> str:
+    """Play a whole DJ or saved playlist in YouTube Music, starting at a given song.
+
+    Opens a watch URL carrying the playlist (`watch?v=<video>&list=<PL...>`), so
+    playback starts immediately and YouTube Music advances through the rest. A
+    bare playlist page would only open, not play.
+
+    Args:
+        playlist_id: Saved playlist ID or slug (default 'dj-list', or e.g. 'funny-happy').
+        start_position: 1-based position of the song to start with (default 1).
+        prefer_audio_only: If true, opens the audio player rather than the full karaoke view.
+    """
+    playlist = json.loads(get_dj_playlist(playlist_id=playlist_id))
+    tracks = playlist.get("tracks") or []
+    if not tracks:
+        return json.dumps({"error": f"Playlist '{playlist_id}' has no tracks."})
+    if not 1 <= start_position <= len(tracks):
+        return json.dumps({
+            "error": f"start_position must be between 1 and {len(tracks)}.",
+        })
+
+    start = tracks[start_position - 1]
+    yt_pid = playlist.get("playlist_id") or ""
+    video_id = start.get("video_id") or ""
+    if not video_id:
+        return json.dumps({
+            "error": (
+                f"Track at position {start_position} has no YouTube video id; "
+                "use play_track for a single song."
+            ),
+            "track_id": start.get("track_id"),
+        })
+
+    url = f"https://music.youtube.com/watch?v={video_id}"
+    if yt_pid.startswith(("PL", "VL", "RD", "OLAK5")):
+        url += f"&list={yt_pid}"
+
+    from .player_open import open_song_url
+    pid = open_song_url(
+        url,
+        "youtube_music",
+        artist=start.get("artist") or "",
+        title=start.get("title") or "",
+        prefer_audio=prefer_audio_only,
+    )
+
+    return json.dumps({
+        "status": "launched",
+        "pid": pid,
+        "playlist_id": yt_pid,
+        "name": playlist.get("name"),
+        "track_count": len(tracks),
+        "start_position": start_position,
+        "artist": start.get("artist"),
+        "title": start.get("title"),
+        "url": url,
+    }, indent=2)
+
+
+@dj_mcp.tool()
 def add_to_dj_playlist(
     track_id: Optional[int] = None,
     artist: Optional[str] = None,

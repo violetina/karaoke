@@ -63,6 +63,7 @@ text/event-stream"`, or just hit `/health`.
 | `analyze_lyric_vibe` | Lyric mood arc, sentiment breakdown, and singer delivery tips | `track_id` |
 | `get_dj_stats` | Play counts, top artists, crowd favorites, and discovery history | — |
 | `play_track` | Trigger playback via the host karaoke player | `track_id`, `prefer_audio_only` |
+| `play_playlist` | Play a whole DJ/saved playlist in YouTube Music from a given song (watch URL with `list=`, so it auto-advances) | `playlist_id`, `start_position`, `prefer_audio_only` |
 | `add_to_dj_playlist` | Add one or more tracks to `dj-list` or any custom playlist slug (e.g. `funny-happy`), syncing with YouTube Music | `track_id`, `track_ids` (batch), `artist`, `title`, `playlist_id`, `playlist_name` |
 | `get_dj_playlist` | Retrieve tracks, positions, and metadata from a DJ or saved playlist | `playlist_id` (default `dj-list`) |
 | `list_playlists` | List all saved playlists (DJ lists, custom playlists, smart playlists, YouTube Music playlists) | `source_kind`, `limit` |
