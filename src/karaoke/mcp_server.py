@@ -25,7 +25,7 @@ from .logger import log
 
 dj_mcp = MCPServer(
     name="karaoke-dj",
-    version="1.1.0",
+    version="1.2.0",
     instructions=(
         "You are the resident AI Karaoke DJ & MC. Use these tools to query the "
         "local song library (18,000+ tracks), search by v2 chord progressions (Roman numerals "
