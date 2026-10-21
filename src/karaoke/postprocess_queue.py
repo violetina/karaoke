@@ -247,7 +247,8 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
                              steps: Optional[list[str]] = None) -> bool:
     """Publish a track post-processing task to RabbitMQ.
 
-    Returns True if successfully published, False otherwise.
+    Returns True if successfully published -- or if the song is already in
+    flight, so the work is queued either way -- and False otherwise.
     Safe: catches pika exceptions so the TUI/app never crashes.
 
     ``include_timings`` adds the word-timing upgrade to the chain. It is off by
@@ -278,6 +279,25 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
         payload["steps"] = list(steps)
 
     if orchestrator() != "legacy":
+        # Claim before publishing, not when the chain starts: behind a busy
+        # queue the chain starts late, and every producer re-queued the playing
+        # song meanwhile. Explicit asks (named steps, the timing upgrade) still
+        # claim in the task, as before, so they are never reported as dropped.
+        claimed = False
+        if not steps and not include_timings:
+            try:
+                from . import localcache
+
+                with localcache.connect() as conn:
+                    if not claim(artist, title, conn):
+                        log.info("post-processing for %s - %s already in flight;"
+                                 " not queued again", artist, title)
+                        return True
+                claimed = True
+                payload["claimed"] = True
+            except Exception:
+                log.debug("postprocess: publish-time claim failed; the task will claim",
+                          exc_info=True)
         try:
             from .tasks import enqueue_postprocess
             task_id = enqueue_postprocess(payload)
@@ -286,6 +306,14 @@ def publish_postprocess_task(artist: str, title: str, url: str = "",
             return task_id
         except Exception as exc:
             log.debug("Celery publish skipped (unreachable/failed): %s", exc)
+            if claimed:
+                try:
+                    from . import localcache
+
+                    with localcache.connect() as conn:
+                        release(artist, title, conn)
+                except Exception:
+                    log.debug("postprocess: could not release claim", exc_info=True)
             return None
 
     host = os.environ.get("RABBITMQ_HOST", "localhost")

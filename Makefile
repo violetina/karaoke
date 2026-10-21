@@ -37,7 +37,7 @@ K8S_NAMESPACE ?= karaoke
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run vector-status folder-scan \
-        mq-port-forward postprocess-worker celery-worker celery-flower postprocess-enqueue-all \
+        mq-port-forward postprocess-worker celery-worker celery-sync-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
         recordings recording-show recording-analyse batch-enrich-vectors batch-sync-av
@@ -316,8 +316,14 @@ postprocess-worker: ## Run the host-side post-processing worker (analysis + word
 celery-worker: ## Run the Celery post-processing worker (CLAP/audio sync workflow tasks)
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
 		-A karaoke.celery_app:app worker -Q karaoke-postprocess-celery \
-		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-6} \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-4} \
 		--events
+
+celery-sync-worker: ## Run the Celery Whisper lyric-sync worker (queue karaoke-sync)
+	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src OMP_NUM_THREADS=$${THREADS:-3} $(VENV)/bin/celery \
+		-A karaoke.celery_app:app worker -Q karaoke-sync \
+		--loglevel=$${LOGLEVEL:-INFO} --concurrency=$${CONCURRENCY:-2} \
+		--hostname=sync@%h --events
 
 celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
 	KARAOKE_ORCHESTRATOR=celery PYTHONPATH=src $(VENV)/bin/celery \
@@ -370,6 +376,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-clap.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-sync.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-flower.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-kiosk.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-webtui.service $(HOME)/.config/systemd/user/
@@ -389,7 +396,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mpris karaoke-mq-forward karaoke-celery-worker karaoke-celery-clap karaoke-celery-flower karaoke-kiosk karaoke-webtui karaoke-relay karaoke-mcp karaoke-obot-tunnel 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mpris karaoke-mq-forward karaoke-celery-worker karaoke-celery-clap karaoke-celery-sync karaoke-celery-flower karaoke-kiosk karaoke-webtui karaoke-relay karaoke-mcp karaoke-obot-tunnel 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \
