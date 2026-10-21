@@ -136,11 +136,20 @@ def _metadata_format() -> str:
 
 
 def list_players() -> list[str]:
-    """MPRIS names of every player playerctl can see."""
+    """MPRIS names of every external player playerctl can see.
+
+    Excludes ``karaoke`` (our own virtual MPRIS controller service from
+    :mod:`karaoke.mpris_service`) so the platform never mistakes its own
+    ``Karaoke - Idle`` placeholder for an active desktop media player.
+    """
     out = _run(["playerctl", "--list-all"])
     if not out:
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    return [
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and not line.strip().lower().startswith("karaoke")
+    ]
 
 
 def playing_players() -> list[str]:

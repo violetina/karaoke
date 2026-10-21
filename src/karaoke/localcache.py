@@ -244,6 +244,10 @@ def normalize_gap_metadata(artist: str, title: str) -> Optional[tuple[str, str]]
     t = clean_page_title(title or "")
     if not a or not t:
         return None
+    if a.lower() == "karaoke" and t.lower() == "idle":
+        return None
+    if "het archief voor onderwijs" in t.lower():
+        return None
     # YouTube titles repeat the artist ("Red Hot Chili Peppers - Suck My Kiss"),
     # which LRCLIB's exact endpoint cannot match. Drop the redundant prefix.
     prefix = re.match(rf"^{re.escape(a)}\s*[-–—:]\s*(?P<rest>.+)$", t, re.I)
@@ -1300,16 +1304,17 @@ def close_pool() -> None:
         except Exception:
             pass
 
+class _AutoCloseConnection(psycopg.Connection):
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        super().__exit__(exc_type, exc_val, exc_tb)
+        self.close()
+
+
 def connect(db_path: Optional[Path] = None) -> Connection:
     pool = get_pool()
     conn = pool.getconn()
-    
-    class AutoCloseConnection(conn.__class__):
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            super().__exit__(exc_type, exc_val, exc_tb)
-            self.close()
-
-    conn.__class__ = AutoCloseConnection
+    if not isinstance(conn, _AutoCloseConnection):
+        conn.__class__ = _AutoCloseConnection
 
     _closed = False
     def pool_close():
@@ -2434,9 +2439,9 @@ def get_saved_playlist_tracks(
             """,
             (playlist_id,),
         ).fetchall()
-        if not rows and playlist_id == "dj-list":
-            pl = find_saved_playlist_by_id("dj-list", conn=c)
-            if pl and pl.get("playlist_id") and pl["playlist_id"] != "dj-list":
+        if not rows:
+            pl = find_saved_playlist_by_id(playlist_id, conn=c)
+            if pl and pl.get("playlist_id") and pl["playlist_id"] != playlist_id:
                 return get_saved_playlist_tracks(pl["playlist_id"], conn=c)
 
         return [
@@ -2453,6 +2458,17 @@ def get_saved_playlist_tracks(
     finally:
         if own:
             c.close()
+
+
+def _slug_display_name(playlist_id: str) -> str:
+    pid = (playlist_id or "").strip()
+    if not pid or pid.lower() in ("dj-list", "karaoke: dj list", "karaoke ai dj list"):
+        return "Karaoke AI DJ List"
+    if pid.startswith(("PL", "VL", "RD", "OLAK5")):
+        return "Karaoke AI DJ List"
+    words = [w for w in re.split(r"[-_\s]+", pid) if w]
+    titled = " ".join(w.upper() if (w.isupper() and len(w) <= 4) else w.capitalize() for w in words)
+    return f"Karaoke: {titled}" if not titled.lower().startswith("karaoke") else titled
 
 
 def find_saved_playlist_by_id(
@@ -2483,6 +2499,18 @@ def find_saved_playlist_by_id(
                 ORDER BY updated_at DESC LIMIT 1
                 """,
                 ("%DJ List%",),
+            ).fetchone()
+        elif not r and not playlist_id.startswith(("PL", "VL", "RD", "OLAK5")):
+            expected_name = _slug_display_name(playlist_id)
+            plain_name = expected_name.removeprefix("Karaoke: ").strip()
+            r = c.execute(
+                """
+                SELECT playlist_id, name, search_query, track_count, url, source_kind, created_at, updated_at
+                FROM saved_playlists
+                WHERE lower(name) IN (lower(%s), lower(%s), lower(%s))
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (playlist_id, expected_name, plain_name),
             ).fetchone()
         if not r:
             return None
@@ -2624,6 +2652,8 @@ def ensure_dj_playlist(
     conn: Optional[Connection] = None,
 ) -> dict[str, Any]:
     """Ensure the DJ playlist exists in saved_playlists, creating it if missing."""
+    if name == "Karaoke AI DJ List" and playlist_id not in ("", "dj-list", "Karaoke: DJ List", "Karaoke AI DJ List"):
+        name = _slug_display_name(playlist_id)
     own = conn is None
     c = conn or connect()
     try:

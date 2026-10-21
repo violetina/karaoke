@@ -59,13 +59,16 @@ text/event-stream"`, or just hit `/health`.
 |---|---|---|
 | `search_songs` | Search tracks in the library with Camelot codes, BPM, energy, and lyrics | `query`, `genre`, `key`, `min_bpm`, `max_bpm`, `only_synced_lyrics` |
 | `get_now_playing` | Inspect currently playing audio on Spotify/Chromium/VLC/MPRIS | — |
-| `suggest_next_tracks` | Harmonic transitions (Camelot wheel), energy flow, timbre (CLAP), structural chords, lyric context, or emotional mood | `track_id`, `strategy` (`harmonic`, `energy_up`, `cool_down`, `acoustic`, `structural`, `context`, `mood`), `exclude_playlist` |
+| `suggest_next_tracks` | Suggest next tracks ranked by fit (sound timbre + mood handover) under strategy constraints | `track_id`, `strategy` (`flow` [default], `harmonic`, `energy_up`, `cool_down`, `mood`, `structural`, `acoustic`), `limit`, `exclude_playlist` |
 | `analyze_lyric_vibe` | Lyric mood arc, sentiment breakdown, and singer delivery tips | `track_id` |
 | `get_dj_stats` | Play counts, top artists, crowd favorites, and discovery history | — |
 | `play_track` | Trigger playback via the host karaoke player | `track_id`, `prefer_audio_only` |
-| `add_to_dj_playlist` | Add track to the persistent `dj-list` playlist by ID or title/artist; re-adding is a no-op | `track_id`, `artist`, `title`, `playlist_id` |
-| `get_dj_playlist` | Retrieve tracks, positions, and metadata from the DJ playlist | `playlist_id` (default `dj-list`) |
-| `clear_dj_playlist` | Empty all tracks from the DJ playlist | `playlist_id` (default `dj-list`) |
+| `add_to_dj_playlist` | Add one or more tracks to `dj-list` or any custom playlist slug (e.g. `funny-happy`), syncing with YouTube Music | `track_id`, `track_ids` (batch), `artist`, `title`, `playlist_id`, `playlist_name` |
+| `get_dj_playlist` | Retrieve tracks, positions, and metadata from a DJ or saved playlist | `playlist_id` (default `dj-list`) |
+| `list_playlists` | List all saved playlists (DJ lists, custom playlists, smart playlists, YouTube Music playlists) | `source_kind`, `limit` |
+| `clear_dj_playlist` | Empty all tracks from a DJ playlist locally and on YouTube Music | `playlist_id` (default `dj-list`) |
+| `search_by_chords` | Search tracks by v2 chord progressions (Roman numerals like `'ii V I'` or chord names like `'Am F C G'`), functional harmony style (`jazz-functional`, `blues`, `andalusian`, `triadic`, `mixed`), and cadences | `progression`, `chords_used`, `style`, `cadence`, `form`, `min_blues_score`, `key`, `only_synced_lyrics` |
+| `get_track_chords` | Inspect a track's v2 chord timeline, functional harmony summary, cadences, and top recurring chord/Roman progressions | `track_id`, `artist`, `title`, `max_chords` |
 | `get_similarity_graph` | Generate node-link graph data across chord motion, semantic lyrics, emotional mood, CLAP timbre, or Camelot keys | `track_id`, `playlist_id`, `strategy` (`structural`, `context`, `mood`, `acoustic`, `harmonic`), `hops`, `limit_per_node` |
 
 ### Interactive Similarity Constellation (`/graph`)
@@ -78,7 +81,7 @@ Features:
 * **Multi-Modal Similarity Dimensions:**
   * **Structural (Chord Motion):** CQT chroma 96-chord template matching and root-motion k-NN in OpenSearch (`karaoke-progression`).
   * **Context (Lyrics & Meaning):** Dense 384-dimensional semantic embeddings (`lyrics_vector` in OpenSearch `tracks` index) across 18,700+ songs, connecting tracks by lyrical narrative, theme, and storytelling.
-  * **Mood (Emotion & Feeling):** 4D emotional arc distribution (`sentiment_vector` [happy, sad, angry, tender]) and `dominant_mood` valence matching.
+  * **Mood (Emotion & Feeling):** Mood Timelines v2 (`track_moods`) providing 12 calibrated feeling labels (`dreamy`, `longing`, `frustrated`, `festive`, `romantic`...), sound/words tension (`bittersweet`, `ironic`), and striped borderline transitions.
   * **Acoustic (CLAP Timbre):** Contrastive audio-language pretraining sound embeddings.
   * **Harmonic (Camelot Key):** Circle of fifths key compatibility (+/- 1 hour or relative major/minor).
 * **Physics-based CoSE Layout:** Nodes naturally cluster into stylistic, thematic, and harmonic constellations.

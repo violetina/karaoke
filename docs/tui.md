@@ -58,15 +58,21 @@ go stale. The ones worth knowing:
 ## AI DJ Booth & `dj-list` Playlist Management (`D`)
 
 Pressing `D` opens the interactive **AI DJ Booth**:
-- **Harmonic Flow Suggestions**: Suggests Camelot wheel adjacent keys (+/- 1 step, relative major/minor) and matching BPMs from currently playing or crowd top tracks.
-- **Numbered 1-Click Queuing**: Suggestions are formatted as `[1]`, `[2]`, `[3]`, `[4]` with track details. Simply type `1`, `2`, `all`, or click `[+ Add #1]` / `[+ Add All]` to queue without needing raw track IDs.
+- **Fit-Based Flow Suggestions**: Suggests tracks using sound timbre (CLAP) and mood timeline handover (how the next track picks up where the current track ends), with harmonic (Camelot wheel) and tempo compatibility applied as constraints. Capped at one song per act.
+- **Numbered 1-Click Queuing**: Suggestions are formatted as `[1]`, `[2]`, `[3]`, `[4]` with track details and explanations (e.g. `same sound · frustrated → blue · compatible key 2A→3A · 99 BPM (-4)`). Simply type `1`, `2`, `all`, or click `[+ Add #1]` / `[+ Add All]` to queue without needing raw track IDs.
 - **Persistent `dj-list` Playlist**: Tracks added via the DJ are stored in PostgreSQL under the canonical `dj-list` playlist.
 - **Live Player Sync & Follow**: Pressing `[🎧 Follow DJ]` or running `/follow-dj` loads `dj-list` directly into the live player queue and tracks playback changes.
 - **Commands**:
   - `/mood <vibe>`: Build a set from a feeling or a description — `/mood upbeat
     happy electronic`, `/mood cynical pop`, `/mood I feel wrecked`. Add
     `--lift` to be picked up rather than matched. See below for how it works.
-  - `/suggest [strategy]`: Recommend next tracks (`harmonic`, `energy_up`, `cool_down`, `acoustic`).
+  - `/suggest [strategy]`: Recommend next tracks ranked by fit (`timbre + 0.1 * mood flow`). Strategies act as constraints:
+    - `flow` (default): fit only (best sound match + mood continuation);
+    - `harmonic`: compatible Camelot key (same, $\pm 1$ hour, relative) and tempo within $\pm 8\%$ (half/double tempo allowed), ranked by fit;
+    - `energy_up` / `cool_down`: opening intensity above or below the closing intensity on the mood timeline, or tempo direction;
+    - `mood`: mood handover weighted up;
+    - `structural`: chord motion + harmony style + timbre;
+    - `acoustic`: CLAP timbre embedding similarity.
     Songs already in `dj-list` are skipped, so repeated calls keep offering new
     material rather than what you just queued.
   - `1`..`4` or `/queue <#|query|track_id>`: Add to `dj-list` and player queue.

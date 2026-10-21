@@ -90,6 +90,55 @@ for an analysed track, needs no cluster):
 - **Tempo → spatial frequency:** a fast track gets a busier field (kept within
   ~1–4 cycles across the panel, so it stays a pattern rather than noise).
 
+Cached cover scoring decodes each image once into memory, preventing redundant disk/decompression passes across `/mood` requests.
+
+## Mood Timelines v2: Feelings & Contrast (`karaoke.mood_timeline`)
+
+While the TUI's visuals panel displays per-line lyric sentiment, the platform also computes a continuous **Mood Timeline v2** (`track_moods` table, `MOOD_VERSION = 2`) over rolling 10-second audio windows.
+
+### Two axes, calibrated baseline
+
+1. **Arousal (calm $\leftrightarrow$ intense)**: Measured from audio using zero-shot CLAP prompts averaged with track-relative loudness dynamics (dB against track median).
+2. **Valence (dark $\leftrightarrow$ warm)**: Derived from lyric sentence embeddings scored against tone prompts (`WORDS_WEIGHT = 0.85`). Soft audio reads "tender" to audio models whether it's a love song or a eulogy; lyric meaning separates them. Instrumentals fall back to audio CLAP alone.
+
+Both axes are calibrated against library baselines (`mood_calibration.v2.json`) so scores reflect deviations above the baseline rather than raw model biases.
+
+### 12 Calibrated Feelings
+
+Four quadrant moods (`happy`, `sad`, `angry`, `tender`) are too coarse to describe complex musical nuance (e.g. Jimi Hendrix blues previously scored as "angry"). Mood v2 resolves specific **feelings** by evaluating 12 calibrated CLAP character prompts against sound, lyric tone, and harmonic structure:
+
+| Quadrant | Sound Characters & Context | Resolved Feeling | Default (No Character Standout) |
+|---|---|---|---|
+| **`angry`** | `aggressive` $\to$ `angry`<br>`bluesy` or blues chords $\to$ `frustrated`<br>`energetic` $\to$ `intense`<br>`dramatic` $\to$ `dramatic`<br>`tense` $\to$ `tense` | `frustrated`, `angry`, `intense`, `dramatic`, `tense` | `intense` (requires aggressive sound or confrontational lyrics to be called `angry`) |
+| **`happy`** | `cheerful` $\to$ `cheerful`<br>`energetic` $\to$ `energetic`<br>`festive` $\to$ `festive`<br>`uplifting` $\to$ `uplifting`<br>`dramatic` $\to$ `dramatic` | `cheerful`, `festive`, `uplifting` | `happy` |
+| **`tender`** | `romantic` $\to$ `romantic`<br>`dreamy` $\to$ `dreamy`<br>`calm` $\to$ `calm`<br>`uplifting` $\to$ `hopeful` | `romantic`, `dreamy`, `calm`, `hopeful` | `tender` |
+| **`sad`** | `melancholic` $\to$ `melancholic`<br>`bluesy` or blues chords $\to$ `blue`<br>`dreamy` $\to$ `wistful`<br>Sad $\leftrightarrow$ tender boundary $\to$ `longing` | `melancholic`, `blue`, `wistful`, `longing` | `sad` |
+
+Specific words win near-ties over generic ones (`calm`, `cheerful`, `energetic`).
+
+### Sound vs. Words Contrast
+
+When audio and lyrics pull in opposite directions, Mood v2 names the tension rather than averaging it away:
+
+- **`bittersweet`**: Strongly warm acoustic sound ($\text{sound valence} \ge 0.6$) under dark/sad lyrics ($\text{words valence} \le -0.5$).
+- **`ironic`**: Upbeat surface music combined with cynical / sarcastic lyric tone.
+
+### Segment Averaging & Stability
+
+- **Mean-based naming**: Segments are classified by `classify(mean_valence, mean_arousal)` rather than window labels carried over by hysteresis, and adjacent segments with the same label merge.
+- **Summary**: Produces `dominant_feeling`, `feeling_arc` (e.g. `"tender → happy (dreamy)"`), `contrast`, and swing counts.
+- **Process caching**: Prompt matrices are embedded once per process, reducing backfill time from ~15s down to ~9s per track.
+
+### Platform Integration
+
+- **`/mood` Web Stage (`stage_view.py`)**: Renders `FEELING · contrast` (e.g. `FRUSTRATED · bittersweet`) while retaining quadrant colors for background illumination.
+- **`/graph` Explorer (`graph_view.py`)**: Displays `feeling (mood) · contrast` in node tooltips, uses `feeling_arc`, and renders borderline stretches as dual-color diagonal stripes.
+- **TUI Shortcuts**:
+  - `k`: Samples key/BPM and displays the v2 mood arc and dominant feeling (`mood_line`).
+  - `P`: Re-runs chords and triggers mood timeline recalculation (`steps=["chords", "mood"]`).
+- **Smart Playlists**: Drives rules like `Bittersweet & Ironic`, `Dreamy`, `Blue & Frustrated`, `Longing`, `Romantic`, and `Party`.
+- **DJ Suggestions**: Supplies the mood handover metric between consecutive tracks.
+
 ## Sentiment (`visuals`)
 
 `visuals.analyze_sentiment(text)` aggregates the per-line moods of the visible

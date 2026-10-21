@@ -12,7 +12,6 @@ from typing import Any, Optional
 from karaoke.config import settings
 from karaoke.lyrics import clean_title
 from karaoke.youtube import fetch_metadata, parse_youtube_title, search
-from karaoke.analyze import analyze_audio
 from karaoke import localcache, track_analysis
 
 # Two tracks whose durations differ by <= this many seconds are considered the
@@ -492,6 +491,8 @@ def run_orphan_cache_healing(conn) -> None:
             known_urls.add(url)
 
             # Analyze the local audio file now that it is mapped
+            from karaoke.analyze import analyze_audio
+
             print("  -> Running audio analysis on local file...")
             result = analyze_audio(str(file_path))
             key = result.key
@@ -606,12 +607,265 @@ def fix_doubled_lyrics(conn, dry_run: bool = False) -> int:
     return fixed
 
 
+def prune_junk_tracks(conn, dry_run: bool = False) -> int:
+    """Delete non-song rows (browser tabs, idle placeholders, empty-artist commands)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT track_id, artist, title
+        FROM tracks
+        WHERE (lower(artist) = 'karaoke' AND lower(title) = 'idle')
+           OR lower(title) LIKE '%%het archief voor onderwijs%%'
+           OR (COALESCE(artist, '') = '' AND lower(title) IN ('print', 'help', 'stage', 'idle', 'unknown'))
+        ORDER BY track_id
+        """
+    )
+    rows = cur.fetchall()
+    for r in rows:
+        tid = r["track_id"]
+        print(f"Pruning non-song track ID {tid}: '{r['artist']}' - '{r['title']}'")
+        if not dry_run:
+            for tbl in (
+                "lyrics",
+                "sources",
+                "track_analysis",
+                "track_sync_offsets",
+                "spotify_lookups",
+                "restricted_tracks",
+                "track_notes",
+                "alignment_support",
+                "track_art",
+                "track_genre",
+                "track_tone",
+                "track_moods",
+                "track_chords",
+                "track_analysis_history",
+                "radio_session_tracks",
+                "sync_failures",
+            ):
+                try:
+                    cur.execute(f"DELETE FROM {tbl} WHERE track_id = %s", (tid,))
+                except Exception:
+                    pass
+            cur.execute("DELETE FROM tracks WHERE track_id = %s", (tid,))
+    if not dry_run:
+        cur.execute(
+            """
+            DELETE FROM lyric_gaps
+            WHERE (lower(artist) = 'karaoke' AND lower(title) = 'idle')
+               OR lower(title) LIKE '%%het archief voor onderwijs%%'
+            """
+        )
+    print(f"Pruned {len(rows)} non-song track(s).")
+    return len(rows)
+
+
+def audit_and_fix_messed_up_lyrics(
+    conn,
+    *,
+    dry_run: bool = False,
+    fetch_online: bool = False,
+    enqueue_sync: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Detect and repair tracks with mismatched or poorly aligned synced lyrics.
+
+    Categories detected:
+    - ``overrun``: last LRC timestamp runs > 10s past ``tracks.duration``.
+    - ``edition_clash``: identical ``synced_lyrics`` text shared across multiple
+      tracks whose durations differ by > 25s, where this track's duration
+      disagrees with the LRC span (last_t > dur + 5s or dur - last_t > 45s).
+    - ``poor_alignment``: Whisper alignment with >= 8 lines where < 25% of lines
+      anchored on a heard word.
+
+    When ``not dry_run``, clears the mismatched ``synced_lyrics`` (preserving
+    ``plain_lyrics`` so Whisper can re-align against the track's actual audio),
+    optionally attempts a duration-validated LRCLIB lookup first
+    (``fetch_online=True``), and optionally enqueues tracks with downloadable
+    audio for background Whisper sync (``enqueue_sync=True``).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import hashlib
+    from karaoke.lyrics import fetch_lrclib, parse_lrc
+    from karaoke.postprocess_queue import (
+        enqueue_if_needed,
+        has_downloadable_source,
+    )
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT t.track_id, t.artist, t.title, t.album, t.duration,
+               l.lyric_id, l.source, l.synced_lyrics, l.plain_lyrics,
+               a.lines AS sup_lines, a.anchored AS sup_anchored,
+               a.longest_gap_s, a.unanchored_fraction
+        FROM tracks t
+        JOIN lyrics l ON l.track_id = t.track_id AND l.kind = 'approved'
+        LEFT JOIN alignment_support a ON a.track_id = t.track_id
+        WHERE COALESCE(l.synced_lyrics, '') != ''
+        ORDER BY t.track_id
+        """
+    )
+    rows = cur.fetchall()
+
+    by_lrc: dict[str, list[dict[str, Any]]] = {}
+    parsed_rows: list[dict[str, Any]] = []
+    for r in rows:
+        lines = parse_lrc(r["synced_lyrics"])
+        if not lines:
+            continue
+        item = dict(r)
+        item["last_t"] = lines[-1][0]
+        item["n_lines"] = len(lines)
+        parsed_rows.append(item)
+        h = hashlib.md5(r["synced_lyrics"].strip().encode()).hexdigest()
+        by_lrc.setdefault(h, []).append(item)
+
+    clash_ids: set[int] = set()
+    edition_clashes: list[dict[str, Any]] = []
+    for h, grp in by_lrc.items():
+        if len(grp) < 2:
+            continue
+        durs = [float(x["duration"]) for x in grp if x["duration"] and float(x["duration"]) > 30]
+        if len(durs) < 2 or (max(durs) - min(durs)) <= 25.0:
+            continue
+        for x in grp:
+            dur = float(x["duration"]) if x["duration"] else None
+            last_t = x["last_t"]
+            if dur and (last_t > dur + 5.0 or (dur - last_t) > 45.0):
+                clash_ids.add(int(x["track_id"]))
+                edition_clashes.append(x)
+
+    overruns: list[dict[str, Any]] = []
+    poor_alignments: list[dict[str, Any]] = []
+
+    for x in parsed_rows:
+        tid = int(x["track_id"])
+        dur = float(x["duration"]) if x["duration"] else None
+        if dur and 30.0 < dur < 1200.0 and x["last_t"] > dur + 10.0 and tid not in clash_ids:
+            overruns.append(x)
+        if x.get("sup_lines") and int(x["sup_lines"]) >= 8:
+            ratio = float(x.get("sup_anchored") or 0) / int(x["sup_lines"])
+            if ratio < 0.25:
+                poor_alignments.append(x)
+
+    all_flagged: dict[int, tuple[str, dict[str, Any]]] = {}
+    for x in edition_clashes:
+        all_flagged[int(x["track_id"])] = ("edition_clash", x)
+    for x in overruns:
+        all_flagged.setdefault(int(x["track_id"]), ("overrun", x))
+    for x in poor_alignments:
+        all_flagged.setdefault(int(x["track_id"]), ("poor_alignment", x))
+
+    print(
+        f"Lyrics audit found {len(all_flagged)} messed-up track(s): "
+        f"{len(edition_clashes)} edition clashes, {len(overruns)} timestamp overruns, "
+        f"{len(poor_alignments)} poor Whisper alignments (<25% anchored)."
+    )
+
+    if dry_run or not all_flagged:
+        return {
+            "edition_clash": edition_clashes,
+            "overrun": overruns,
+            "poor_alignment": poor_alignments,
+        }
+
+    online_results: dict[int, Any] = {}
+    if fetch_online:
+        candidates = [
+            (tid, x)
+            for tid, (reason, x) in sorted(all_flagged.items())
+            if reason in ("edition_clash", "overrun") and x.get("duration")
+        ]
+
+        def _lookup(item: tuple[int, dict[str, Any]]) -> tuple[int, Any]:
+            tid_i, row_i = item
+            try:
+                res = fetch_lrclib(
+                    row_i["artist"] or "",
+                    row_i["title"] or "",
+                    album=row_i["album"] or "",
+                    duration=float(row_i["duration"]),
+                    timeout=5.0,
+                )
+                return tid_i, res
+            except Exception:
+                return tid_i, None
+
+        if len(candidates) <= 1:
+            for item in candidates:
+                k, v = _lookup(item)
+                online_results[k] = v
+        else:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for k, v in pool.map(_lookup, candidates):
+                    online_results[k] = v
+
+    upgraded_online = 0
+    cleared_to_plain = 0
+    enqueued = 0
+
+    for tid, (reason, x) in sorted(all_flagged.items()):
+        artist = x["artist"] or ""
+        title = x["title"] or ""
+        plain = (x["plain_lyrics"] or "").strip()
+        if not plain and x["synced_lyrics"]:
+            plain = "\n".join(txt for _, txt in parse_lrc(x["synced_lyrics"]))
+
+        replaced = False
+        ly = online_results.get(tid)
+        if ly is not None:
+            if ly.has_synced:
+                cur.execute(
+                    "UPDATE lyrics SET synced_lyrics = %s, plain_lyrics = COALESCE(NULLIF(%s, ''), plain_lyrics), source = 'lrclib' WHERE lyric_id = %s",
+                    (ly.synced_raw, ly.plain, x["lyric_id"]),
+                )
+                cur.execute("DELETE FROM alignment_support WHERE track_id = %s", (tid,))
+                try:
+                    cur.execute("DELETE FROM sync_failures WHERE track_id = %s", (tid,))
+                except Exception:
+                    pass
+                upgraded_online += 1
+                replaced = True
+            elif ly.plain and len(ly.plain) > len(plain):
+                plain = ly.plain
+
+        if not replaced:
+            cur.execute(
+                "UPDATE lyrics SET synced_lyrics = '', plain_lyrics = %s, source = CASE WHEN source = 'no_youtube_captions' THEN 'lrclib' ELSE source END WHERE lyric_id = %s",
+                (plain, x["lyric_id"]),
+            )
+            cur.execute("DELETE FROM alignment_support WHERE track_id = %s", (tid,))
+            try:
+                cur.execute("DELETE FROM sync_failures WHERE track_id = %s", (tid,))
+            except Exception:
+                pass
+            cleared_to_plain += 1
+            if enqueue_sync and has_downloadable_source(tid, conn):
+                if enqueue_if_needed(artist, title, conn=conn):
+                    enqueued += 1
+
+    conn.commit()
+    print(
+        f"Lyrics repair complete: {upgraded_online} replaced with duration-matched LRCLIB, "
+        f"{cleared_to_plain} reset to plain text for Whisper re-alignment ({enqueued} enqueued)."
+    )
+    return {
+        "edition_clash": edition_clashes,
+        "overrun": overruns,
+        "poor_alignment": poor_alignments,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Karaoke DB cleanup / dedup / self-healing")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report duplicates without merging or healing.")
     parser.add_argument("--dedup-only", action="store_true",
                         help="Only run deduplication (skip source/cache healing).")
+    parser.add_argument("--fix-lyrics", action="store_true",
+                        help="Audit and fix mismatched synced lyrics, edition clashes, and poor alignments.")
+    parser.add_argument("--enqueue-sync", action="store_true",
+                        help="Enqueue repaired tracks for background Whisper re-alignment.")
     args = parser.parse_args()
 
     print("Using database: PostgreSQL (via localcache.connect())")
@@ -621,12 +875,22 @@ def main() -> None:
     try:
         if args.dry_run:
             # Read-only: report duplicates, touch nothing.
+            prune_junk_tracks(conn, dry_run=True)
             run_deduplication(conn, dry_run=True)
             fix_doubled_lyrics(conn, dry_run=True)
+            audit_and_fix_messed_up_lyrics(conn, dry_run=True)
             return
+        # 0. Prune non-song browser tabs and idle placeholders
+        prune_junk_tracks(conn)
         # 1. Deduplication & Lyrics Undoubling
         run_deduplication(conn)
         fix_doubled_lyrics(conn)
+        if args.fix_lyrics:
+            audit_and_fix_messed_up_lyrics(
+                conn,
+                fetch_online=True,
+                enqueue_sync=args.enqueue_sync,
+            )
         conn.commit()
         if not args.dedup_only:
             # 2. Source healing

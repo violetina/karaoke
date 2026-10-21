@@ -27,6 +27,8 @@ It combines local music metadata, LRCLIB synced lyrics, optional Whisper transcr
 - [Vector search and training plan](vector-search-plan.md): rebuild OpenSearch from SQLite for semantic search, sentiment and timing experiments.
 - [API reference](api.md): generated from Python docstrings via mkdocstrings.
 - [Workflow](workflow.md): operational project flow.
+- [Smart playlists](smart-playlists.md): auto-generated Genre: and Smart: playlists refreshed with mood and CLAP flow.
+- [Karaoke DJ & MCP](mcp-server.md): MCP server, AI DJ booth, and Cytoscape similarity graph.
 - [Troubleshooting](troubleshooting.md): known runtime and setup issues.
 
 ## Quick start

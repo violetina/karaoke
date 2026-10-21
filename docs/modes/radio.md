@@ -23,6 +23,16 @@ the highlight would sit a couple of lines behind. `karaoke -r` applies the same
 figure (`DEFAULT_LEAD_S`, overridable there with `--lead`), so the TUI and CLI
 stay in step.
 
+## Song-change scan planning (`karaoke.songwatch`)
+
+Rather than running songrec on an arbitrary fixed 30-second loop (~86 queries/hour), radio mode schedules scans based on track duration:
+
+- **After a match**: Plans the next scan **1 minute before the expected end** (catching radio edits and DJ cuts, which typically truncate 30–60s) and a follow-up scan right as the song ends. Intervals are bounded between 20 seconds and 5 minutes (or 60 seconds if track duration is unknown).
+- **After a miss** (talk, DJ banter, station jingles): Backs off exponentially through 30s → 60s → 120s → 180s.
+- **Audio level end detection (`EndDetector`)**: Streams audio via `parec` and triggers an early scan when audio level drops 30 dB below the track's loudness (18 dB on room microphones) for 1.5 seconds. This detects track fade-outs and track transitions instantly.
+- **Reduction**: Cuts query frequency by ~58% (from ~86 scans/hour down to ~36/hour) with zero mid-song false triggers.
+- **Restoring fixed scans**: `--fixed-scan` restores the legacy fixed 30s clock if desired. The CLI status display shows when the next scan is scheduled and why.
+
 ## Matching tolerance
 
 Lookup tolerates spelling differences between sources — songrec stores

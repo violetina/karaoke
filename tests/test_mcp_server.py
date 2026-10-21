@@ -6,7 +6,30 @@ import json
 import time
 import pytest
 
-from karaoke import mcp_server, player_open
+from karaoke import mcp_server, player_open, ytmusic_playlist
+
+
+@pytest.fixture(autouse=True)
+def _no_live_ytmusic(monkeypatch):
+    """Stub remote YouTube Music API calls so tests never mutate the user's real YTMusic playlists."""
+    monkeypatch.setattr(
+        ytmusic_playlist,
+        "resolve_or_create_dj_playlist",
+        lambda name="Karaoke: DJ List", client=None, conn=None, playlist_key="dj-list": (
+            playlist_key or "dj-list",
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        ytmusic_playlist,
+        "add_track_to_ytmusic_playlist",
+        lambda playlist_id, artist, title, video_id="", client=None: (True, video_id or "mockvid12345"),
+    )
+    monkeypatch.setattr(
+        ytmusic_playlist,
+        "clear_ytmusic_playlist",
+        lambda playlist_id, client=None: True,
+    )
 
 
 def test_mcp_server_definition():
@@ -20,6 +43,9 @@ def test_mcp_server_definition():
     assert "get_dj_stats" in tool_names
     assert "play_track" in tool_names
     assert "get_similarity_graph" in tool_names
+    assert "list_playlists" in tool_names
+    assert "search_by_chords" in tool_names
+    assert "get_track_chords" in tool_names
 
 
 def test_search_songs():
@@ -494,4 +520,87 @@ def test_get_similarity_graph_filters(paging_library, monkeypatch):
     assert graph_data["stats"]["min_score"] == 0.60
     for edge in graph_data["edges"]:
         assert edge["weight"] >= 0.60
+
+
+def test_custom_playlist_batch_add_and_list_playlists(paging_library):
+    """Custom playlist slugs format cleanly, support batch track_ids, and appear in list_playlists."""
+    res = json.loads(
+        mcp_server.add_to_dj_playlist(
+            track_ids=paging_library[:3],
+            playlist_id="funny-happy",
+        )
+    )
+    assert res["ok"] is True
+    assert res["playlist_name"] == "Karaoke: Funny Happy"
+    assert res["added_count"] == 3
+    assert len(res["tracks"]) == 3
+
+    got = json.loads(mcp_server.get_dj_playlist(playlist_id="funny-happy"))
+    assert got["name"] == "Karaoke: Funny Happy"
+    assert got["track_count"] == 3
+
+    listed = json.loads(mcp_server.list_playlists(source_kind="dj"))
+    names = [p["name"] for p in listed["playlists"]]
+    assert "Karaoke: Funny Happy" in names
+
+
+def test_search_by_chords_and_get_track_chords(paging_library):
+    """Verify v2 chord progression search (Roman numerals & chord names) and get_track_chords."""
+    from psycopg.types.json import Jsonb
+    from karaoke import chord_timeline, localcache
+
+    tid = paging_library[0]
+    chords_rows = [
+        {"at": 0.0, "end": 2.0, "name": "Dm7", "roman": "ii7"},
+        {"at": 2.0, "end": 4.0, "name": "G7", "roman": "V7"},
+        {"at": 4.0, "end": 8.0, "name": "Cmaj7", "roman": "Imaj7"},
+        {"at": 8.0, "end": 10.0, "name": "Am7", "roman": "vi7"},
+        {"at": 10.0, "end": 12.0, "name": "Dm7", "roman": "ii7"},
+        {"at": 12.0, "end": 14.0, "name": "G7", "roman": "V7"},
+        {"at": 14.0, "end": 18.0, "name": "Cmaj7", "roman": "Imaj7"},
+    ]
+    harmony_doc = {
+        "style": "jazz-functional",
+        "ii_v_i": 2,
+        "minor_ii_v_i": 0,
+        "ii_v": 2,
+        "tritone_subs": 1,
+        "secondary_dominants": 1,
+        "backdoor": 0,
+        "andalusian": 0,
+        "dominant_share": 0.25,
+        "blues_score": 0.05,
+        "cadences_per_minute": 4.0,
+        "fifth_chains_per_minute": 4.0,
+        "key_tonic": 0,
+        "key_minor": False,
+    }
+    with localcache.connect() as conn:
+        chord_timeline.ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO track_chords (track_id, chords_version, duration_s, chords, harmony, source_path, updated_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (tid, 2, 18.0, Jsonb(chords_rows), Jsonb(harmony_doc), "", time.time()),
+        )
+
+    # 1. Search by Roman progression 'ii V I' (matches ii7 -> V7 -> Imaj7)
+    by_roman = json.loads(mcp_server.search_by_chords(progression="ii V I"))
+    assert by_roman["count"] == 1
+    assert by_roman["tracks"][0]["track_id"] == tid
+    assert by_roman["tracks"][0]["progression_matches"] == 2
+    assert "Dm7 (ii7) -> G7 (V7) -> Cmaj7 (Imaj7)" in by_roman["tracks"][0]["matched_excerpt"]
+
+    # 2. Search by chord names 'Dm G C' (matches Dm7 -> G7 -> Cmaj7)
+    by_names = json.loads(mcp_server.search_by_chords(progression="Dm G C", style="jazz-functional", cadence="ii_v_i"))
+    assert by_names["count"] == 1
+    assert by_names["tracks"][0]["track_id"] == tid
+
+    # 3. Inspect full v2 chord timeline & recurring progressions
+    detail = json.loads(mcp_server.get_track_chords(track_id=tid))
+    assert detail["track_id"] == tid
+    assert detail["chords_version"] == 2
+    assert detail["harmony"]["style"] == "jazz-functional"
+    assert detail["top_roman_progressions"][0]["roman"] == "ii7 -> V7 -> Imaj7"
+    assert detail["top_roman_progressions"][0]["count"] == 2
+
 
