@@ -2536,14 +2536,17 @@ def find_saved_playlist_by_id(
             (playlist_id,),
         ).fetchone()
         if not r and playlist_id == "dj-list":
+            # Match the default list by name only: custom playlists (e.g.
+            # "Karaoke: Funny Happy") are also source_kind 'dj', so matching on
+            # kind made the most recently touched custom list win.
             r = c.execute(
                 """
                 SELECT playlist_id, name, search_query, track_count, url, source_kind, created_at, updated_at
                 FROM saved_playlists
-                WHERE (name ILIKE %s OR source_kind = 'dj') AND url LIKE '%%list=PL%%'
+                WHERE lower(name) IN ('karaoke: dj list', 'karaoke ai dj list', 'karaoke dj list')
+                  AND url LIKE '%%list=PL%%'
                 ORDER BY updated_at DESC LIMIT 1
                 """,
-                ("%DJ List%",),
             ).fetchone()
         elif not r and not playlist_id.startswith(("PL", "VL", "RD", "OLAK5")):
             expected_name = _slug_display_name(playlist_id)

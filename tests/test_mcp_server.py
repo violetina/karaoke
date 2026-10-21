@@ -664,5 +664,60 @@ def test_delete_playlist(paging_library, monkeypatch):
         assert localcache.find_saved_playlist_by_id("PLde7bFUxcmZI", conn=conn) is not None
 
 
+@pytest.fixture
+def dj_and_custom_playlists():
+    """The live layout that broke 'dj-list': the real DJ list is source_kind
+    'youtube_music', and a custom list is source_kind 'dj' and touched later."""
+    from karaoke import localcache
+
+    localcache.save_playlist(
+        "PLdjlist0001",
+        "Karaoke: DJ List",
+        tracks=[
+            {"track_id": 1, "artist": "Queen", "title": "Don't Stop Me Now", "video_id": "vidqueen001"},
+            {"track_id": 2, "artist": "ELO", "title": "Mr. Blue Sky", "video_id": "videlo00002"},
+        ],
+        url="https://music.youtube.com/playlist?list=PLdjlist0001",
+        source_kind="youtube_music",
+    )
+    time.sleep(0.01)
+    localcache.save_playlist(
+        "PLfunny00001",
+        "Karaoke: Funny Happy",
+        tracks=[{"track_id": 3, "artist": "Rick Astley", "title": "Never Gonna Give You Up", "video_id": "dQw4w9WgXcQ"}],
+        url="https://music.youtube.com/playlist?list=PLfunny00001",
+        source_kind="dj",
+    )
 
 
+def test_dj_list_lookup_ignores_newer_custom_dj_playlist(dj_and_custom_playlists):
+    """'dj-list' must resolve to the DJ List by name, not to any source_kind 'dj' playlist."""
+    from karaoke import localcache
+
+    pl = localcache.find_saved_playlist_by_id("dj-list")
+    assert pl["playlist_id"] == "PLdjlist0001"
+    assert pl["name"] == "Karaoke: DJ List"
+
+
+def test_play_playlist_opens_watch_url_with_list(launcher, dj_and_custom_playlists):
+    """play_playlist starts the chosen song inside its playlist so YouTube Music keeps going."""
+    calls, _ = launcher
+    res = json.loads(mcp_server.play_playlist(playlist_id="PLfunny00001"))
+    assert res["status"] == "launched"
+    assert res["url"] == "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=PLfunny00001"
+    assert calls[0].arguments["url"] == res["url"]
+    assert calls[0].arguments["kind"] == "youtube_music"
+
+
+def test_play_playlist_start_position(launcher, dj_and_custom_playlists):
+    calls, _ = launcher
+    res = json.loads(mcp_server.play_playlist(playlist_id="PLdjlist0001", start_position=2))
+    assert res["title"] == "Mr. Blue Sky"
+    assert res["url"] == "https://music.youtube.com/watch?v=videlo00002&list=PLdjlist0001"
+
+
+def test_play_playlist_rejects_bad_position(launcher, dj_and_custom_playlists):
+    calls, _ = launcher
+    res = json.loads(mcp_server.play_playlist(playlist_id="PLdjlist0001", start_position=3))
+    assert "error" in res
+    assert calls == []
