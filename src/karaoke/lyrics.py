@@ -36,13 +36,13 @@ def _stamp_seconds(m: "re.Match[str]") -> float:
 # because LRCLIB indexes the primary artist only.
 _TITLE_SUFFIX = re.compile(
     r"""\s*(?:
-        [-–—]\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?|radio\s+edit|
+        [-–—]\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|radio\s+edit|
                    single\s+version|album\s+version|mono|stereo|
-                   \d{4}\s+remaster(?:ed)?|re-?recorded(?:\s+\d{4})?|
+                   \d{4}\s+remaster(?:ed)?(?:\s+version)?|re-?recorded(?:\s+\d{4})?|
                    acoustic|demo|edit|extended(?:\s+mix)?|bonus\s+track)
-        |\(\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?|radio\s+edit|
+        |\(\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|radio\s+edit|
                  single\s+version|album\s+version|mono|stereo|
-                 \d{4}\s+remaster(?:ed)?|re-?recorded(?:\s+\d{4})?|
+                 \d{4}\s+remaster(?:ed)?(?:\s+version)?|re-?recorded(?:\s+\d{4})?|
                  acoustic|demo|edit|extended(?:\s+mix)?|bonus\s+track|
                  feat\.?[^)]*|ft\.?[^)]*|with[^)]*)\s*\)
     )\s*$""",
@@ -50,17 +50,37 @@ _TITLE_SUFFIX = re.compile(
 )
 
 
+_OUTER_QUOTES = (
+    ('"', '"'),
+    ("'", "'"),
+    ("\u201c", "\u201d"),
+    ("\u2018", "\u2019"),
+)
+
+
+def _strip_outer_quotes(text: str) -> str:
+    out = text.strip()
+    while len(out) >= 2 and (out[0], out[-1]) in _OUTER_QUOTES:
+        inner = out[1:-1]
+        if out[0] in inner or out[-1] in inner:
+            break
+        out = inner.strip()
+    return out
+
+
 def clean_title(title: str) -> str:
-    """Strip trailing streaming-service suffixes (- Live, (Remastered), etc).
+    """Strip trailing streaming-service suffixes (- Live, (Remastered), etc) and outer quote wrappers.
 
     Applied repeatedly so stacked suffixes like "Song - Live (Remastered 2011)"
-    collapse to "Song". Returns the input unchanged if nothing matches.
+    or '"Heroes" (2017 Remastered Version)' collapse to "Song" / "Heroes".
+    Returns the input unchanged if nothing matches.
     """
     prev = None
-    out = title.strip()
+    out = _strip_outer_quotes(title)
     while out and out != prev:
         prev = out
         out = _TITLE_SUFFIX.sub("", out).strip()
+        out = _strip_outer_quotes(out)
     return out or title.strip()
 
 

@@ -98,6 +98,10 @@ def test_clean_title_strips_dash_suffixes():
 
 def test_clean_title_strips_paren_suffixes():
     assert clean_title("Song (Remastered)") == "Song"
+    assert clean_title('"Heroes" (2017 Remastered Version)') == "Heroes"
+    assert clean_title('Epitaph - Including "March for No Reason" and "Tomorrow and Tomorrow"') == (
+        'Epitaph - Including "March for No Reason" and "Tomorrow and Tomorrow"'
+    )
     assert clean_title("Song (Live)") == "Song"
     assert clean_title("Song (feat. Someone)") == "Song"
     assert clean_title("Song (Radio Edit)") == "Song"

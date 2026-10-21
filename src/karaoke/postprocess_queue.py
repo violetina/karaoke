@@ -208,6 +208,8 @@ def enqueue_if_needed(
     try:
         track_id = localcache.find_track_id(artist, title, c)
         if track_id is None:
+            track_id = localcache.find_track_id_relaxed(artist, title, c)
+        if track_id is None:
             # Unknown track: still enqueue so the worker can resolve+download
             # it -- but only if there is something to download.
             if url and not is_downloadable(url):

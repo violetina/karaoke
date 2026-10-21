@@ -2646,6 +2646,30 @@ def clear_saved_playlist_tracks(
             c.close()
 
 
+def delete_saved_playlist(
+    playlist_id: str,
+    conn: Optional[Connection] = None,
+) -> bool:
+    """Delete a saved playlist and all its tracks from the local database."""
+    if not playlist_id:
+        return False
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_saved_searches_and_playlists_schema(c)
+        exists = c.execute(
+            "SELECT 1 FROM saved_playlists WHERE playlist_id = %s",
+            (playlist_id,),
+        ).fetchone() is not None
+        c.execute("DELETE FROM saved_playlist_tracks WHERE playlist_id = %s", (playlist_id,))
+        c.execute("DELETE FROM saved_playlists WHERE playlist_id = %s", (playlist_id,))
+        c.commit()
+        return exists
+    finally:
+        if own:
+            c.close()
+
+
 def ensure_dj_playlist(
     playlist_id: str = "dj-list",
     name: str = "Karaoke AI DJ List",
@@ -2671,25 +2695,6 @@ def ensure_dj_playlist(
             )
             pl = find_saved_playlist_by_id(playlist_id, conn=c)
         return pl or {"playlist_id": playlist_id, "name": name, "track_count": 0}
-    finally:
-        if own:
-            c.close()
-
-
-def delete_saved_playlist(
-    playlist_id: str,
-    conn: Optional[Connection] = None,
-) -> None:
-    """Delete a saved playlist and its tracks from SQLite."""
-    if not playlist_id:
-        return
-    own = conn is None
-    c = conn or connect()
-    try:
-        ensure_saved_searches_and_playlists_schema(c)
-        c.execute("DELETE FROM saved_playlists WHERE playlist_id = %s", (playlist_id,))
-        c.execute("DELETE FROM saved_playlist_tracks WHERE playlist_id = %s", (playlist_id,))
-        c.commit()
     finally:
         if own:
             c.close()

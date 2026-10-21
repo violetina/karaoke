@@ -158,12 +158,24 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
 
     with localcache.connect() as conn:
         track_id = localcache.find_track_id(artist, title, conn)
-        if track_id is None and context.full:
-            # A full run comes from song_finder, which located the track with
-            # the relaxed match. Resolving strictly here missed it ("Incubus -
-            # Drive"), searched YouTube for a song already in the library, and
-            # processed whatever that search returned instead.
+        if track_id is None:
+            # Relaxed lookup resolves quote/punctuation/edition differences
+            # (e.g. 'Bonnie "Prince" Billy' vs "Bonnie 'Prince' Billy",
+            # '"Heroes"' vs 'Heroes', or songs from song_finder).
             track_id = localcache.find_track_id_relaxed(artist, title, conn)
+            if track_id is not None:
+                try:
+                    t_row = conn.execute(
+                        "SELECT artist, title FROM tracks WHERE track_id = %s",
+                        (track_id,),
+                    ).fetchone()
+                    if t_row:
+                        artist = t_row["artist"] if isinstance(t_row, dict) else t_row[0]
+                        title = t_row["title"] if isinstance(t_row, dict) else t_row[1]
+                        context.artist = artist
+                        context.title = title
+                except Exception:
+                    pass
         if track_id is None and url:
             found = localcache.find_track_by_url(url, conn)
             if found:
