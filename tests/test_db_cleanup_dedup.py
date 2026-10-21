@@ -191,3 +191,150 @@ def test_fix_doubled_lyrics_collapses_duplicates(monkeypatch):
     assert p_new == "Line 1\nLine 2"
     assert s_new == "[00:10.00] Line 1\n[00:15.00] Line 2"
 
+
+def test_prune_junk_tracks_removes_idle_and_browser_tabs():
+    class FakeCursor:
+        def __init__(self):
+            self.deleted_tracks = []
+            self.gaps_cleaned = False
+
+        def execute(self, sql, params=()):
+            if "SELECT track_id" in sql:
+                return
+            if "DELETE FROM tracks" in sql:
+                self.deleted_tracks.append(params[0])
+            elif "DELETE FROM lyric_gaps" in sql:
+                self.gaps_cleaned = True
+
+        def fetchall(self):
+            return [
+                {"track_id": 10, "artist": "Karaoke", "title": "Idle"},
+                {"track_id": 11, "artist": "", "title": "Zoeken | Het Archief voor Onderwijs"},
+            ]
+
+    class FakeConn:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def cursor(self):
+            return self._cur
+
+    cur = FakeCursor()
+    pruned = db_cleanup.prune_junk_tracks(FakeConn(cur), dry_run=False)
+    assert pruned == 2
+    assert cur.deleted_tracks == [10, 11]
+    assert cur.gaps_cleaned is True
+
+
+def test_audit_and_fix_messed_up_lyrics_detects_overruns_clashes_and_poor_alignments():
+    shared_lrc = "[00:10.00] Line one\n[03:50.00] Last line"
+    overrun_lrc = "[00:05.00] Intro\n[04:30.00] Way past track end"
+    poor_lrc = "\n".join(f"[00:{10 + i:02d}.00] Line {i}" for i in range(10))
+
+    rows = [
+        # Studio edition (235s) with matching LRC (last_t=230s) -> OK
+        {
+            "track_id": 1,
+            "artist": "Jimi Hendrix",
+            "title": "Voodoo Child",
+            "album": "Electric Ladyland",
+            "duration": 235.0,
+            "lyric_id": 101,
+            "source": "lrclib",
+            "synced_lyrics": shared_lrc,
+            "plain_lyrics": "Line one\nLast line",
+            "sup_lines": None,
+            "sup_anchored": None,
+            "longest_gap_s": None,
+            "unanchored_fraction": None,
+        },
+        # Live edition (450s) sharing the 230s studio LRC -> edition_clash
+        {
+            "track_id": 2,
+            "artist": "Jimi Hendrix",
+            "title": "Voodoo Child (Live)",
+            "album": "Live",
+            "duration": 450.0,
+            "lyric_id": 102,
+            "source": "lrclib",
+            "synced_lyrics": shared_lrc,
+            "plain_lyrics": "Line one\nLast line",
+            "sup_lines": None,
+            "sup_anchored": None,
+            "longest_gap_s": None,
+            "unanchored_fraction": None,
+        },
+        # Track (180s) with LRC ending at 270s -> overrun
+        {
+            "track_id": 3,
+            "artist": "Frank Zappa",
+            "title": "Short Edit",
+            "album": "",
+            "duration": 180.0,
+            "lyric_id": 103,
+            "source": "lrclib",
+            "synced_lyrics": overrun_lrc,
+            "plain_lyrics": "",
+            "sup_lines": None,
+            "sup_anchored": None,
+            "longest_gap_s": None,
+            "unanchored_fraction": None,
+        },
+        # Track with poor Whisper alignment (1/10 = 10% anchored) -> poor_alignment
+        {
+            "track_id": 4,
+            "artist": "Someone",
+            "title": "Drifting Song",
+            "album": "",
+            "duration": 200.0,
+            "lyric_id": 104,
+            "source": "whisper",
+            "synced_lyrics": poor_lrc,
+            "plain_lyrics": "Line 0\nLine 1",
+            "sup_lines": 10,
+            "sup_anchored": 1,
+            "longest_gap_s": 40.0,
+            "unanchored_fraction": 0.9,
+        },
+    ]
+
+    class FakeCursor:
+        def __init__(self):
+            self.cleared = []
+
+        def execute(self, sql, params=()):
+            if "UPDATE lyrics SET synced_lyrics = ''" in sql:
+                self.cleared.append(params)
+
+        def fetchall(self):
+            return rows
+
+    class FakeConn:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def cursor(self):
+            return self._cur
+
+        def commit(self):
+            pass
+
+    cur = FakeCursor()
+    report = db_cleanup.audit_and_fix_messed_up_lyrics(
+        FakeConn(cur),
+        dry_run=False,
+        fetch_online=False,
+        enqueue_sync=False,
+    )
+    assert [r["track_id"] for r in report["edition_clash"]] == [2]
+    assert [r["track_id"] for r in report["overrun"]] == [3]
+    assert [r["track_id"] for r in report["poor_alignment"]] == [4]
+    # Track 1 (studio match) is untouched; tracks 2, 3, 4 have synced_lyrics cleared
+    # while preserving plain text (and extracting plain text from LRC on track 3).
+    assert len(cur.cleared) == 3
+    by_lyric_id = {lyric_id: plain for plain, lyric_id in cur.cleared}
+    assert by_lyric_id[102] == "Line one\nLast line"
+    assert by_lyric_id[103] == "Intro\nWay past track end"
+    assert by_lyric_id[104] == "Line 0\nLine 1"
+
+

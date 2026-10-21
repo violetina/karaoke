@@ -25,12 +25,14 @@ from .logger import log
 
 dj_mcp = MCPServer(
     name="karaoke-dj",
-    version="1.0.0",
+    version="1.1.0",
     instructions=(
         "You are the resident AI Karaoke DJ & MC. Use these tools to query the "
-        "local song library (18,000+ tracks), analyze playback vibes, find harmonically "
-        "compatible tracks using the Camelot wheel and BPM, inspect current playing audio, "
-        "and help singers pick their next killer song."
+        "local song library (18,000+ tracks), search by v2 chord progressions (Roman numerals "
+        "like 'ii V I' or chord names like 'Am F C G'), functional harmony styles ('jazz-functional', "
+        "'blues', 'andalusian', 'triadic', 'mixed') and cadences, analyze playback vibes, find "
+        "harmonically compatible tracks using the Camelot wheel and BPM, manage YouTube Music-synced "
+        "DJ playlists (prefer batch `track_ids` when adding multiple songs), and trigger playback."
     ),
 )
 
@@ -63,10 +65,16 @@ def search_songs(
     target_camelot = key.strip().upper() if key else ""
 
     with localcache.connect() as conn:
+        from . import chord_timeline
+        try:
+            chord_timeline.ensure_schema(conn)
+        except Exception:
+            pass
         cur = conn.cursor()
         sql = """
             SELECT t.track_id, t.artist, t.title, t.album, t.duration, t.play_count,
                    a.detected_key, a.bpm, a.energy, a.brightness, g.genre, s.url, s.kind,
+                   tc.harmony,
                    EXISTS(
                        SELECT 1 FROM lyrics l
                        WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
@@ -74,6 +82,7 @@ def search_songs(
             FROM tracks t
             LEFT JOIN track_analysis a ON a.track_id = t.track_id
             LEFT JOIN track_genre g ON g.track_id = t.track_id
+            LEFT JOIN track_chords tc ON tc.track_id = t.track_id
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
                 WHERE s2.track_id = t.track_id
@@ -146,7 +155,8 @@ def search_songs(
                 if not (matches_camelot or matches_name):
                     continue
 
-            results.append({
+            harmony_doc = r.get("harmony") if isinstance(r.get("harmony"), dict) else {}
+            item: dict[str, Any] = {
                 "track_id": r["track_id"],
                 "artist": r["artist"],
                 "title": r["title"],
@@ -160,7 +170,10 @@ def search_songs(
                 "has_synced_lyrics": bool(r["has_synced"]),
                 "play_count": r["play_count"] or 0,
                 "url": r["url"] or "",
-            })
+            }
+            if harmony_doc and harmony_doc.get("style"):
+                item["harmony_style"] = harmony_doc["style"]
+            results.append(item)
 
             if len(results) > window:
                 break
@@ -768,42 +781,54 @@ def add_to_dj_playlist(
     artist: Optional[str] = None,
     title: Optional[str] = None,
     playlist_id: str = "dj-list",
+    track_ids: Optional[list[int]] = None,
+    playlist_name: Optional[str] = None,
 ) -> str:
-    """Add a song to the DJ playlist ('Karaoke: DJ List') by track ID or artist/title, syncing with YouTube Music.
+    """Add one or more songs to a DJ playlist (default 'Karaoke: DJ List' or any custom playlist_id), syncing with YouTube Music.
 
     Args:
         track_id: Specific track ID from the karaoke library.
-        artist: Artist name (used if track_id is omitted).
-        title: Title of song (used if track_id is omitted).
-        playlist_id: Identifier of target saved playlist (default 'dj-list').
+        artist: Artist name (used if track_id and track_ids are omitted).
+        title: Title of song (used if track_id and track_ids are omitted).
+        playlist_id: Identifier of target saved playlist (default 'dj-list', or a custom slug like 'funny-happy').
+        track_ids: Optional list of track IDs to add in a single batch call (much faster than calling once per song).
+        playlist_name: Optional human-readable playlist title when creating a custom playlist (defaults to 'Karaoke: <Title>').
     """
-    if track_id is None and not (artist or title):
-        return json.dumps({"error": "Either track_id or artist/title must be provided."})
+    batch_ids = [int(t) for t in (track_ids or []) if t is not None]
+    if track_id is not None and int(track_id) not in batch_ids:
+        batch_ids.insert(0, int(track_id))
+
+    if not batch_ids and not (artist or title):
+        return json.dumps({"error": "Either track_id, track_ids, or artist/title must be provided."})
 
     with localcache.connect() as conn:
         cur = conn.cursor()
-        if track_id is not None:
-            cur.execute("""
-                SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, s.url, s.kind
-                FROM tracks t
-                LEFT JOIN track_analysis a ON a.track_id = t.track_id
-                LEFT JOIN sources s ON s.source_id = (
-                    SELECT s2.source_id FROM sources s2
-                    WHERE s2.track_id = t.track_id
-                    ORDER BY
-                        CASE
-                            WHEN s2.kind = 'youtube_music' THEN 0
-                            WHEN s2.kind = 'youtube' THEN 1
-                            WHEN s2.url LIKE 'http%%' THEN 2
-                            WHEN s2.kind = 'spotify' THEN 3
-                            ELSE 4
-                        END,
-                        s2.source_id
-                    LIMIT 1
-                )
-                WHERE t.track_id = %s
-            """, (track_id,))
-            row = cur.fetchone()
+        rows = []
+        if batch_ids:
+            for tid in batch_ids:
+                cur.execute("""
+                    SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, s.url, s.kind
+                    FROM tracks t
+                    LEFT JOIN track_analysis a ON a.track_id = t.track_id
+                    LEFT JOIN sources s ON s.source_id = (
+                        SELECT s2.source_id FROM sources s2
+                        WHERE s2.track_id = t.track_id
+                        ORDER BY
+                            CASE
+                                WHEN s2.kind = 'youtube_music' THEN 0
+                                WHEN s2.kind = 'youtube' THEN 1
+                                WHEN s2.url LIKE 'http%%' THEN 2
+                                WHEN s2.kind = 'spotify' THEN 3
+                                ELSE 4
+                            END,
+                            s2.source_id
+                        LIMIT 1
+                    )
+                    WHERE t.track_id = %s
+                """, (tid,))
+                r = cur.fetchone()
+                if r:
+                    rows.append(r)
         else:
             pat_artist = f"%{artist.strip()}%" if artist else "%"
             pat_title = f"%{title.strip()}%" if title else "%"
@@ -829,72 +854,85 @@ def add_to_dj_playlist(
                 ORDER BY t.play_count DESC
                 LIMIT 1
             """, (pat_artist, pat_title))
-            row = cur.fetchone()
+            r = cur.fetchone()
+            if r:
+                rows.append(r)
 
-        if not row:
-            return json.dumps({"error": f"Track not found in library (track_id={track_id}, artist={artist}, title={title})."})
+        if not rows:
+            return json.dumps({"error": f"Track not found in library (track_id={track_id}, track_ids={track_ids}, artist={artist}, title={title})."})
 
-        # Resolve real YouTube Music playlist
+        # Resolve real YouTube Music playlist (for default 'dj-list' AND any custom playlist slug)
+        from . import ytmusic_playlist
+        display_name = ytmusic_playlist.format_playlist_display_name(playlist_id, playlist_name)
         yt_pid = playlist_id
         yt_url = ""
-        if playlist_id in ("dj-list", "Karaoke: DJ List"):
-            try:
-                from . import ytmusic_playlist
+        try:
+            if playlist_id in ("dj-list", "Karaoke: DJ List") and not playlist_name:
                 yt_pid, yt_url = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
-            except Exception:
-                yt_pid = "dj-list"
+            else:
+                yt_pid, yt_url = ytmusic_playlist.resolve_or_create_dj_playlist(
+                    name=display_name,
+                    conn=conn,
+                    playlist_key=playlist_id,
+                )
+        except Exception:
+            yt_pid = playlist_id
 
-        # Ensure playlist exists locally
-        localcache.ensure_dj_playlist(playlist_id=yt_pid, conn=conn)
+        # Ensure playlist exists locally with its proper display name
+        localcache.ensure_dj_playlist(playlist_id=yt_pid, name=display_name, conn=conn)
 
-        # Adding a song twice is a no-op, not an error: a DJ re-queueing a
-        # track should not get a duplicate. Checked before the remote sync so
-        # a repeat add costs no YouTube Music call either.
-        for existing in localcache.get_saved_playlist_tracks(yt_pid, conn=conn):
-            if existing.get("track_id") == row["track_id"]:
-                return json.dumps({
-                    "ok": True,
-                    "already_present": True,
-                    "playlist_id": yt_pid,
-                    "position": existing.get("position"),
-                    "track": {
-                        "track_id": row["track_id"],
-                        "artist": row["artist"],
-                        "title": row["title"],
-                    },
-                    "message": f"{row['artist']} — {row['title']} is already in the playlist.",
-                }, indent=2)
-
-        url = row["url"] or ""
-        vid = localcache.extract_youtube_id(url) if url else ""
-
-        # Sync to remote YouTube Music playlist if authenticated
-        if yt_pid.startswith(("PL", "VL", "RD", "OLAK5")):
-            try:
-                from . import ytmusic_playlist
-                ok, res_vid = ytmusic_playlist.add_track_to_ytmusic_playlist(yt_pid, row["artist"], row["title"], video_id=vid)
-                if ok and res_vid and not vid:
-                    vid = res_vid
-                    url = f"https://music.youtube.com/watch?v={vid}"
-            except Exception as exc:
-                log.warning("Could not sync track to YouTube Music playlist %s: %s", yt_pid, exc)
-
-        track_payload = {
-            "track_id": row["track_id"],
-            "artist": row["artist"],
-            "title": row["title"],
-            "video_id": vid,
-            "url": url,
+        existing_by_tid = {
+            existing.get("track_id"): existing
+            for existing in localcache.get_saved_playlist_tracks(yt_pid, conn=conn)
+            if existing.get("track_id") is not None
         }
-        pos = localcache.append_playlist_track(yt_pid, track_payload, conn=conn)
 
-        key_obj = musictheory.parse_key(row["detected_key"]) if row["detected_key"] else None
-        return json.dumps({
-            "ok": True,
-            "playlist_id": yt_pid,
-            "playlist_url": yt_url or (f"https://music.youtube.com/playlist?list={yt_pid}" if yt_pid.startswith("PL") else ""),
-            "position": pos,
-            "track": {
+        added_tracks = []
+        last_pos = 0
+        already_present_all = True
+
+        for row in rows:
+            if row["track_id"] in existing_by_tid:
+                ex = existing_by_tid[row["track_id"]]
+                last_pos = ex.get("position") or last_pos
+                key_obj = musictheory.parse_key(row["detected_key"]) if row["detected_key"] else None
+                added_tracks.append({
+                    "track_id": row["track_id"],
+                    "artist": row["artist"],
+                    "title": row["title"],
+                    "key": row["detected_key"] or "",
+                    "camelot": key_obj.camelot if key_obj else "?",
+                    "bpm": round(row["bpm"], 1) if row["bpm"] else None,
+                    "position": ex.get("position"),
+                    "already_present": True,
+                })
+                continue
+
+            already_present_all = False
+            url = row["url"] or ""
+            vid = localcache.extract_youtube_id(url) if url else ""
+
+            if yt_pid.startswith(("PL", "VL", "RD", "OLAK5")):
+                try:
+                    ok, res_vid = ytmusic_playlist.add_track_to_ytmusic_playlist(yt_pid, row["artist"], row["title"], video_id=vid)
+                    if ok and res_vid and not vid:
+                        vid = res_vid
+                        url = f"https://music.youtube.com/watch?v={vid}"
+                except Exception as exc:
+                    log.warning("Could not sync track to YouTube Music playlist %s: %s", yt_pid, exc)
+
+            track_payload = {
+                "track_id": row["track_id"],
+                "artist": row["artist"],
+                "title": row["title"],
+                "video_id": vid,
+                "url": url,
+            }
+            pos = localcache.append_playlist_track(yt_pid, track_payload, conn=conn)
+            last_pos = pos
+            existing_by_tid[row["track_id"]] = {"track_id": row["track_id"], "position": pos}
+            key_obj = musictheory.parse_key(row["detected_key"]) if row["detected_key"] else None
+            added_tracks.append({
                 "track_id": row["track_id"],
                 "artist": row["artist"],
                 "title": row["title"],
@@ -902,35 +940,72 @@ def add_to_dj_playlist(
                 "camelot": key_obj.camelot if key_obj else "?",
                 "bpm": round(row["bpm"], 1) if row["bpm"] else None,
                 "url": url,
-            }
-        }, indent=2)
+                "position": pos,
+            })
+
+        resolved_url = yt_url or (f"https://music.youtube.com/playlist?list={yt_pid}" if yt_pid.startswith("PL") else "")
+        if len(rows) == 1 and already_present_all:
+            first = added_tracks[0]
+            return json.dumps({
+                "ok": True,
+                "already_present": True,
+                "playlist_id": yt_pid,
+                "playlist_name": display_name,
+                "playlist_url": resolved_url,
+                "position": first.get("position"),
+                "track": {
+                    "track_id": first["track_id"],
+                    "artist": first["artist"],
+                    "title": first["title"],
+                },
+                "message": f"{first['artist']} — {first['title']} is already in the playlist.",
+            }, indent=2)
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "playlist_id": yt_pid,
+            "playlist_name": display_name,
+            "playlist_url": resolved_url,
+            "position": last_pos,
+            "track": added_tracks[0],
+        }
+        if len(added_tracks) > 1 or track_ids is not None:
+            out["added_count"] = sum(1 for t in added_tracks if not t.get("already_present"))
+            out["tracks"] = added_tracks
+        return json.dumps(out, indent=2)
 
 
 @dj_mcp.tool()
 def get_dj_playlist(playlist_id: str = "dj-list") -> str:
-    """Retrieve all songs in the DJ playlist ('Karaoke: DJ List') with position, metadata, and YouTube Music URL.
+    """Retrieve all songs in a DJ or saved playlist with position, metadata, and YouTube Music URL.
 
     Args:
-        playlist_id: The saved playlist ID (default 'dj-list').
+        playlist_id: The saved playlist ID or slug (default 'dj-list', or e.g. 'funny-happy').
     """
     with localcache.connect() as conn:
+        from . import ytmusic_playlist
         yt_pid = playlist_id
         yt_url = ""
         if playlist_id in ("dj-list", "Karaoke: DJ List"):
             try:
-                from . import ytmusic_playlist
                 yt_pid, yt_url = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
             except Exception:
                 yt_pid = "dj-list"
 
-        pl = localcache.find_saved_playlist_by_id(yt_pid, conn=conn) or localcache.find_saved_playlist_by_id("dj-list", conn=conn)
+        pl = localcache.find_saved_playlist_by_id(yt_pid, conn=conn)
+        if not pl and playlist_id in ("dj-list", "Karaoke: DJ List"):
+            pl = localcache.find_saved_playlist_by_id("dj-list", conn=conn)
+        if pl and pl.get("playlist_id"):
+            yt_pid = pl["playlist_id"]
+
         tracks = localcache.get_saved_playlist_tracks(yt_pid, conn=conn)
-        if not tracks and yt_pid != "dj-list":
+        if not tracks and playlist_id in ("dj-list", "Karaoke: DJ List") and yt_pid != "dj-list":
             tracks = localcache.get_saved_playlist_tracks("dj-list", conn=conn)
 
+    default_name = ytmusic_playlist.format_playlist_display_name(playlist_id)
     return json.dumps({
         "playlist_id": yt_pid,
-        "name": (pl.get("name") if pl else "") or "Karaoke: DJ List",
+        "name": (pl.get("name") if pl else "") or default_name,
         "url": yt_url or (pl.get("url") if pl else "") or (f"https://music.youtube.com/playlist?list={yt_pid}" if yt_pid.startswith("PL") else ""),
         "track_count": len(tracks),
         "tracks": tracks,
@@ -938,8 +1013,28 @@ def get_dj_playlist(playlist_id: str = "dj-list") -> str:
 
 
 @dj_mcp.tool()
+def list_playlists(source_kind: str = "", limit: int = 30) -> str:
+    """List saved playlists in the karaoke library (DJ lists, custom playlists, smart playlists, YouTube Music playlists).
+
+    Args:
+        source_kind: Optional filter by kind ('dj', 'smart', 'youtube_music', 'graph').
+        limit: Max playlists to return (default 30, max 100).
+    """
+    limit = max(1, min(limit, 100))
+    with localcache.connect() as conn:
+        playlists = localcache.get_saved_playlists(limit=limit, conn=conn)
+        if source_kind.strip():
+            sk = source_kind.strip().lower()
+            playlists = [p for p in playlists if (p.get("source_kind") or "").lower() == sk]
+    return json.dumps({
+        "count": len(playlists),
+        "playlists": playlists,
+    }, indent=2)
+
+
+@dj_mcp.tool()
 def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
-    """Empty all tracks from the DJ playlist ('Karaoke: DJ List') locally and on YouTube Music.
+    """Empty all tracks from a DJ playlist locally and on YouTube Music.
 
     Args:
         playlist_id: The saved playlist ID to clear (default 'dj-list').
@@ -952,6 +1047,10 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
                 yt_pid, _ = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
             except Exception:
                 yt_pid = "dj-list"
+        else:
+            pl = localcache.find_saved_playlist_by_id(playlist_id, conn=conn)
+            if pl and pl.get("playlist_id"):
+                yt_pid = pl["playlist_id"]
 
         if yt_pid.startswith(("PL", "VL", "RD", "OLAK5")):
             try:
@@ -961,14 +1060,428 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
                 log.warning("Failed to clear remote YouTube Music playlist %s: %s", yt_pid, exc)
 
         localcache.clear_saved_playlist_tracks(yt_pid, conn=conn)
-        if yt_pid != "dj-list":
-            localcache.clear_saved_playlist_tracks("dj-list", conn=conn)
+        if yt_pid != playlist_id:
+            localcache.clear_saved_playlist_tracks(playlist_id, conn=conn)
 
     return json.dumps({
         "ok": True,
         "playlist_id": yt_pid,
         "message": f"Cleared all tracks from playlist '{yt_pid}'.",
     }, indent=2)
+
+
+def _strip_roman_extension(roman_tok: str) -> str:
+    """Strip extension suffix from a Roman numeral token (e.g. 'ii7' -> 'ii', 'bVIImaj7' -> 'bVII')."""
+    import re
+    m = re.match(r"^(b?[iIvV]+)", roman_tok.strip())
+    return m.group(1) if m else roman_tok.strip()
+
+
+def _strip_chord_extension(chord_tok: str) -> str:
+    """Reduce a chord name to its triad root+quality (e.g. 'Dm7' -> 'Dm', 'Cmaj7' -> 'C', 'G7' -> 'G')."""
+    import re
+    m = re.match(r"^([A-G][#b]?)(m7b5|dim7|dim|maj7|min7|m7|m6|6/9|sus4|m|7|6|9)?$", chord_tok.strip())
+    if not m:
+        return chord_tok.strip()
+    root, qual = m.group(1), m.group(2) or ""
+    if qual in ("m", "min7", "m7", "m6"):
+        return f"{root}m"
+    if qual in ("dim", "dim7", "m7b5"):
+        return f"{root}dim"
+    return root
+
+
+def _match_progression_tokens(
+    chords_list: list[dict[str, Any]],
+    query_tokens: list[str],
+) -> tuple[int, Optional[float], list[str]]:
+    """Count occurrences of a chord/Roman progression in a collapsed chord timeline.
+
+    Returns (match_count, first_match_at_s, first_matched_names).
+    """
+    if not chords_list or not query_tokens:
+        return 0, None, []
+
+    import re
+    is_roman = all(bool(re.match(r"^b?[iIvV]+", tok)) for tok in query_tokens)
+
+    # Collapse consecutive identical chords so held/repeated bars form a clean progression
+    collapsed: list[dict[str, Any]] = []
+    for c in chords_list:
+        name = str(c.get("name") or "")
+        if not name:
+            continue
+        if collapsed and collapsed[-1].get("name") == name:
+            continue
+        collapsed.append(c)
+
+    n = len(query_tokens)
+    if len(collapsed) < n:
+        return 0, None, []
+
+    matches = 0
+    first_at: Optional[float] = None
+    first_excerpt: list[str] = []
+
+    for idx in range(len(collapsed) - n + 1):
+        window = collapsed[idx : idx + n]
+        ok = True
+        for q_tok, item in zip(query_tokens, window):
+            if is_roman:
+                r_val = str(item.get("roman") or "")
+                if not r_val:
+                    ok = False
+                    break
+                # Exact numeral match if query carries an extension (e.g. ii7), else degree+case match (ii matches ii7)
+                has_ext = _strip_roman_extension(q_tok) != q_tok
+                if has_ext:
+                    if r_val != q_tok:
+                        ok = False
+                        break
+                else:
+                    if _strip_roman_extension(r_val) != q_tok:
+                        ok = False
+                        break
+            else:
+                c_val = str(item.get("name") or "")
+                has_ext = _strip_chord_extension(q_tok) != q_tok
+                if has_ext:
+                    if c_val.lower() != q_tok.lower():
+                        ok = False
+                        break
+                else:
+                    if _strip_chord_extension(c_val).lower() != _strip_chord_extension(q_tok).lower():
+                        ok = False
+                        break
+        if ok:
+            matches += 1
+            if first_at is None:
+                first_at = float(window[0].get("at") or 0.0)
+                first_excerpt = [
+                    f"{w.get('name')} ({w.get('roman')})" if w.get("roman") else str(w.get("name"))
+                    for w in window
+                ]
+
+    return matches, first_at, first_excerpt
+
+
+@dj_mcp.tool()
+def search_by_chords(
+    progression: str = "",
+    chords_used: str = "",
+    style: str = "",
+    cadence: str = "",
+    form: str = "",
+    min_blues_score: float = 0.0,
+    key: str = "",
+    only_synced_lyrics: bool = False,
+    limit: int = 15,
+) -> str:
+    """Search tracks using v2 chord detection, functional harmony, and chord progressions.
+
+    Args:
+        progression: Ordered chord sequence in Roman numerals (e.g. 'ii V I', 'I V vi IV', 'i bVII bVI V')
+            or chord names (e.g. 'Am F C G', 'Dm7 G7 C'). Matches both exact extensions and base triads.
+        chords_used: Chords or qualities that must appear anywhere in the song (e.g. 'F#m7 B7', 'm7b5', 'dim7', '6/9').
+        style: Functional harmony style ('jazz-functional', 'blues', 'andalusian', 'triadic', 'mixed').
+        cadence: Filter for songs with specific cadences ('ii_v_i', 'minor_ii_v_i', 'ii_v', 'tritone_subs',
+            'secondary_dominants', 'backdoor', 'andalusian', 'fifth_chains').
+        form: Key-progression form ('static', 'static-with-mixture', 'diatonic-vamp', 'truck-driver',
+            'oscillating', 'modulating', 'restless').
+        min_blues_score: Minimum blues harmony score (0.0 to 1.0, e.g. 0.35 for blues).
+        key: Optional musical key ('Am', 'C') or Camelot code ('8A', '8B').
+        only_synced_lyrics: If true, only return tracks with synced karaoke lyrics.
+        limit: Max results to return (default 15, max 50).
+    """
+    import re
+    from . import chord_timeline
+
+    limit = max(1, min(limit, 50))
+    prog_tokens = [t for t in re.split(r"[\s,\->–—]+", progression.strip()) if t] if progression.strip() else []
+    required_chords = [t for t in re.split(r"[\s,]+", chords_used.strip()) if t] if chords_used.strip() else []
+    target_camelot = key.strip().upper() if key else ""
+
+    form_map: dict[int, dict[str, Any]] = {}
+    if form.strip():
+        try:
+            from .key_progression import PROGRESSION_INDEX
+            from .osclient import client as get_os_client
+            osc = get_os_client()
+            if osc and osc.indices.exists(index=PROGRESSION_INDEX):
+                res = osc.search(
+                    index=PROGRESSION_INDEX,
+                    body={
+                        "size": 500,
+                        "query": {"term": {"form": form.strip().lower()}},
+                        "_source": ["track_id", "form", "fifth_ratio", "distinct_chords", "stability"],
+                    },
+                )
+                for hit in res.get("hits", {}).get("hits", []):
+                    src = hit.get("_source") or {}
+                    if src.get("track_id") is not None:
+                        form_map[int(src["track_id"])] = src
+        except Exception:
+            pass
+
+    with localcache.connect() as conn:
+        chord_timeline.ensure_schema(conn)
+        cur = conn.cursor()
+        sql = """
+            SELECT t.track_id, t.artist, t.title, t.album, t.duration, t.play_count,
+                   a.detected_key, a.bpm, a.energy, g.genre,
+                   tc.chords_version, tc.chords, tc.harmony,
+                   EXISTS(
+                       SELECT 1 FROM lyrics l
+                       WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
+                   ) AS has_synced
+            FROM track_chords tc
+            JOIN tracks t ON t.track_id = tc.track_id
+            LEFT JOIN track_analysis a ON a.track_id = t.track_id
+            LEFT JOIN track_genre g ON g.track_id = t.track_id
+        """
+        where_clauses = []
+        params: list[Any] = []
+
+        if style.strip():
+            where_clauses.append("lower(tc.harmony->>'style') = lower(%s)")
+            params.append(style.strip())
+
+        if min_blues_score > 0:
+            where_clauses.append("COALESCE((tc.harmony->>'blues_score')::float, 0.0) >= %s")
+            params.append(min_blues_score)
+
+        cad = cadence.strip().lower()
+        if cad in ("ii_v_i", "minor_ii_v_i", "ii_v", "tritone_subs", "secondary_dominants", "backdoor", "andalusian"):
+            where_clauses.append(f"COALESCE((tc.harmony->>'{cad}')::int, 0) > 0")
+        elif cad in ("fifth_chains", "fifth_chains_per_minute"):
+            where_clauses.append("COALESCE((tc.harmony->>'fifth_chains_per_minute')::float, 0.0) > 0")
+
+        if only_synced_lyrics:
+            where_clauses.append("EXISTS (SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id AND l.synced_lyrics != '')")
+
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+    matches = []
+    for r in rows:
+        tid = int(r["track_id"])
+        if form.strip() and form_map and tid not in form_map:
+            continue
+
+        detected_key = r["detected_key"] or ""
+        key_obj = musictheory.parse_key(detected_key) if detected_key else None
+        camelot = key_obj.camelot if key_obj else "?"
+        if target_camelot:
+            matches_camelot = camelot.upper() == target_camelot
+            matches_name = key_obj and (
+                key_obj.short.upper() == target_camelot
+                or key_obj.name.upper() == target_camelot
+            )
+            if not (matches_camelot or matches_name):
+                continue
+
+        chords_list = r["chords"] if isinstance(r["chords"], list) else []
+        harmony_doc = r["harmony"] if isinstance(r["harmony"], dict) else {}
+
+        if required_chords:
+            names_lower = {str(c.get("name") or "").lower() for c in chords_list}
+            romans_lower = {str(c.get("roman") or "").lower() for c in chords_list}
+            ok_req = True
+            for req in required_chords:
+                rl = req.lower()
+                if rl in names_lower or rl in romans_lower:
+                    continue
+                if any(n.endswith(rl) for n in names_lower):
+                    continue
+                ok_req = False
+                break
+            if not ok_req:
+                continue
+
+        prog_count = 0
+        first_at = None
+        excerpt: list[str] = []
+        if prog_tokens:
+            prog_count, first_at, excerpt = _match_progression_tokens(chords_list, prog_tokens)
+            if prog_count == 0:
+                continue
+
+        entry: dict[str, Any] = {
+            "track_id": tid,
+            "artist": r["artist"],
+            "title": r["title"],
+            "key": detected_key,
+            "camelot": camelot,
+            "bpm": round(r["bpm"], 1) if r["bpm"] else None,
+            "genre": r["genre"] or "",
+            "has_synced_lyrics": bool(r["has_synced"]),
+            "chords_version": r["chords_version"],
+            "harmony_style": harmony_doc.get("style", "unknown"),
+            "cadences": {
+                "ii_v_i": harmony_doc.get("ii_v_i", 0),
+                "minor_ii_v_i": harmony_doc.get("minor_ii_v_i", 0),
+                "tritone_subs": harmony_doc.get("tritone_subs", 0),
+                "secondary_dominants": harmony_doc.get("secondary_dominants", 0),
+                "backdoor": harmony_doc.get("backdoor", 0),
+                "andalusian": harmony_doc.get("andalusian", 0),
+                "blues_score": harmony_doc.get("blues_score", 0.0),
+                "fifth_chains_per_minute": harmony_doc.get("fifth_chains_per_minute", 0.0),
+            },
+        }
+        if tid in form_map:
+            entry["form"] = form_map[tid].get("form")
+        if prog_tokens:
+            entry["progression_matches"] = prog_count
+            entry["first_match_at_s"] = round(first_at, 1) if first_at is not None else None
+            entry["matched_excerpt"] = " -> ".join(excerpt)
+        matches.append(entry)
+
+    # Sort best matches first: progression count -> requested cadence -> fifth chains -> play_count
+    def _sort_key(item: dict[str, Any]) -> tuple:
+        cads = item.get("cadences") or {}
+        cad_score = cads.get(cad, 0) if cad in cads else (
+            cads.get("ii_v_i", 0) + cads.get("minor_ii_v_i", 0) + cads.get("tritone_subs", 0)
+        )
+        return (
+            item.get("progression_matches", 0),
+            cad_score,
+            cads.get("fifth_chains_per_minute", 0.0),
+            cads.get("blues_score", 0.0),
+        )
+
+    matches.sort(key=_sort_key, reverse=True)
+    sliced = matches[:limit]
+    return json.dumps({
+        "count": len(sliced),
+        "total_matches": len(matches),
+        "tracks": sliced,
+    }, indent=2)
+
+
+@dj_mcp.tool()
+def get_track_chords(
+    track_id: Optional[int] = None,
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    max_chords: int = 60,
+) -> str:
+    """Get the v2 chord timeline, functional harmony summary, cadences, and top recurring chord progressions for a song.
+
+    If the track does not yet have v2 chords stored in `track_chords` and its audio file is cached on disk,
+    detects and stores the chords on demand.
+
+    Args:
+        track_id: Track ID in the library (optional if artist & title provided).
+        artist: Artist name (used if track_id is omitted).
+        title: Song title (used if track_id is omitted).
+        max_chords: Maximum timed chord changes to return in the timeline (default 60, max 300).
+    """
+    from collections import Counter
+    from . import chord_timeline, chords as chords_mod
+
+    max_chords = max(1, min(max_chords, 300))
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        row = None
+        if track_id is not None:
+            cur.execute(
+                "SELECT t.track_id, t.artist, t.title, t.duration, a.detected_key, a.bpm"
+                " FROM tracks t LEFT JOIN track_analysis a ON a.track_id = t.track_id"
+                " WHERE t.track_id = %s",
+                (track_id,),
+            )
+            row = cur.fetchone()
+        elif artist or title:
+            pat_a = f"%{artist.strip()}%" if artist else "%"
+            pat_t = f"%{title.strip()}%" if title else "%"
+            cur.execute(
+                "SELECT t.track_id, t.artist, t.title, t.duration, a.detected_key, a.bpm"
+                " FROM tracks t LEFT JOIN track_analysis a ON a.track_id = t.track_id"
+                " WHERE t.artist ILIKE %s AND t.title ILIKE %s"
+                " ORDER BY t.play_count DESC LIMIT 1",
+                (pat_a, pat_t),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return json.dumps({"error": f"Track not found (track_id={track_id}, artist={artist}, title={title})."})
+
+        tid = int(row["track_id"])
+        tl = chord_timeline.load(tid, conn)
+        if (tl is None or tl.get("chords_version", 0) < chords_mod.CHORDS_VERSION):
+            audio_path = chord_timeline.local_audio(tid, conn)
+            if audio_path is not None:
+                try:
+                    analysis = chords_mod.detect(str(audio_path))
+                    if analysis is not None:
+                        chord_timeline.save(
+                            tid,
+                            analysis,
+                            conn,
+                            source_path=str(audio_path),
+                            key_text=row["detected_key"] or "",
+                        )
+                        tl = chord_timeline.load(tid, conn)
+                except Exception as exc:
+                    log.warning("On-demand chord detection failed for track %s: %s", tid, exc)
+
+        if not tl:
+            return json.dumps({
+                "track_id": tid,
+                "artist": row["artist"],
+                "title": row["title"],
+                "error": "No v2 chord timeline stored yet for this track (and audio is not cached on local disk).",
+            }, indent=2)
+
+        chords_list = tl.get("chords") or []
+        harmony_doc = tl.get("harmony") or {}
+
+        # Collapse consecutive identical chords to extract recurring 3- and 4-chord progressions
+        collapsed = []
+        for c in chords_list:
+            if not collapsed or collapsed[-1].get("name") != c.get("name"):
+                collapsed.append(c)
+
+        name_4grams = Counter(
+            " -> ".join(str(x.get("name")) for x in collapsed[i : i + 4])
+            for i in range(max(0, len(collapsed) - 3))
+        )
+        roman_3grams = Counter(
+            " -> ".join(str(x.get("roman")) for x in collapsed[i : i + 3])
+            for i in range(max(0, len(collapsed) - 2))
+            if all(x.get("roman") for x in collapsed[i : i + 3])
+        )
+        distinct_vocab = [k for k, _ in Counter(str(c.get("name")) for c in chords_list if c.get("name")).most_common(16)]
+
+        detected_key = row["detected_key"] or ""
+        key_obj = musictheory.parse_key(detected_key) if detected_key else None
+
+        return json.dumps({
+            "track_id": tid,
+            "artist": row["artist"],
+            "title": row["title"],
+            "key": detected_key,
+            "camelot": key_obj.camelot if key_obj else "?",
+            "bpm": round(row["bpm"], 1) if row["bpm"] else None,
+            "chords_version": tl.get("chords_version"),
+            "duration_s": tl.get("duration_s"),
+            "total_chord_events": len(chords_list),
+            "distinct_chords": distinct_vocab,
+            "harmony": harmony_doc,
+            "top_chord_progressions": [
+                {"progression": prog, "count": cnt}
+                for prog, cnt in name_4grams.most_common(6)
+            ],
+            "top_roman_progressions": [
+                {"roman": prog, "count": cnt}
+                for prog, cnt in roman_3grams.most_common(6)
+            ],
+            "timeline": chords_list[:max_chords],
+            "timeline_truncated": len(chords_list) > max_chords,
+        }, indent=2)
 
 
 @dj_mcp.tool()

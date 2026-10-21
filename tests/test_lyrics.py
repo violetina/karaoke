@@ -211,3 +211,23 @@ def test_fetch_lrclib_tries_cleaned_artist_and_page_title():
     assert ly.lines == [(5.0, "Nightcall")]
     assert sess.calls[-1][1]["artist_name"] == "Kavinsky"
     assert sess.calls[-1][1]["track_name"] == "Nightcall"
+
+
+def test_fetch_lrclib_rejects_synced_hit_with_mismatched_duration():
+    """When duration is known (e.g. 456s live cut), search must not return a
+    synced hit from a much shorter version (e.g. 373s movie cut), nor a
+    mis-tagged entry whose timestamps end >60s early (<85% of duration)."""
+    short_synced = "\n".join(f"[0{i//60}:{i%60:02d}.00] line {i}" for i in range(10, 110, 10)) + "\n[06:12.00] end"
+    sess = _FakeSession([
+        _FakeResp(404, {}),
+        _FakeResp(200, [
+            {"trackName": "Titties & Beer", "duration": 374.0,
+             "syncedLyrics": short_synced, "plainLyrics": "wrong version"},
+            {"trackName": "Titties & Beer", "duration": 456.0,
+             "syncedLyrics": short_synced, "plainLyrics": "correct plain lyrics"},
+        ]),
+    ])
+    ly = fetch_lrclib("Frank Zappa", "Titties & Beer", duration=455.9, session=sess)
+    assert not ly.has_synced
+    assert ly.plain == "correct plain lyrics"
+

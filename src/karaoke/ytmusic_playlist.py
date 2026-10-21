@@ -563,30 +563,75 @@ def clear_ytmusic_playlist(
         return False
 
 
+def format_playlist_display_name(
+    playlist_id: str,
+    playlist_name: Optional[str] = None,
+) -> str:
+    """Return a clean human-readable title for a DJ/custom playlist."""
+    raw = (playlist_name or "").strip()
+    if not raw:
+        pid = (playlist_id or "").strip()
+        if not pid or pid.lower() in ("dj-list", "karaoke: dj list", "karaoke ai dj list"):
+            return "Karaoke: DJ List"
+        if pid.startswith(("PL", "VL", "RD", "OLAK5")):
+            return "Karaoke: DJ List"
+        words = [w for w in re.split(r"[-_\s]+", pid) if w]
+        titled = " ".join(w.upper() if (w.isupper() and len(w) <= 4) else w.capitalize() for w in words)
+        return f"Karaoke: {titled}" if not titled.lower().startswith("karaoke") else titled
+    if raw.lower() in ("dj-list", "karaoke: dj list", "karaoke ai dj list"):
+        return "Karaoke: DJ List"
+    return raw if raw.lower().startswith("karaoke") else f"Karaoke: {raw}"
+
+
 def resolve_or_create_dj_playlist(
     name: str = "Karaoke: DJ List",
     client: Optional[YTMusicClient] = None,
     conn: Optional[Connection] = None,
+    playlist_key: str = "dj-list",
 ) -> tuple[str, str]:
-    """Find or create the Karaoke DJ playlist in YouTube Music.
+    """Find or create a Karaoke DJ playlist (default or custom slug) in YouTube Music.
 
     Returns:
         (playlist_id, playlist_url)
     """
+    is_default_dj = playlist_key in ("", "dj-list", "Karaoke: DJ List") and name in ("", "Karaoke: DJ List")
+    if not is_default_dj and name == "Karaoke: DJ List":
+        name = format_playlist_display_name(playlist_key)
+
+    if playlist_key.startswith(("PL", "VL", "RD", "OLAK5")):
+        return playlist_key, f"https://music.youtube.com/playlist?list={playlist_key}"
+
     # 1. Check localcache first
     own_conn = conn is None
     c = conn or localcache.connect()
     try:
-        pl = localcache.find_saved_playlist_by_id("dj-list", conn=c)
-        if pl and pl.get("url") and "list=PL" in pl["url"]:
-            pid = pl["url"].split("list=")[-1].split("&")[0]
-            return pid, pl["url"]
+        if is_default_dj:
+            pl = localcache.find_saved_playlist_by_id("dj-list", conn=c)
+            if pl and pl.get("url") and "list=PL" in pl["url"]:
+                pid = pl["url"].split("list=")[-1].split("&")[0]
+                return pid, pl["url"]
+        else:
+            cur = c.cursor()
+            cur.execute(
+                "SELECT playlist_id, url FROM saved_playlists WHERE playlist_id = %s",
+                (playlist_key,),
+            )
+            exact = cur.fetchone()
+            if exact and exact.get("url") and "list=PL" in exact["url"]:
+                pid = exact["url"].split("list=")[-1].split("&")[0]
+                return pid, exact["url"]
 
         cur = c.cursor()
-        cur.execute(
-            "SELECT playlist_id, url FROM saved_playlists WHERE (name ILIKE %s OR playlist_id = 'dj-list') AND url LIKE '%%list=PL%%' LIMIT 1",
-            (f"%{name}%",),
-        )
+        if is_default_dj:
+            cur.execute(
+                "SELECT playlist_id, url FROM saved_playlists WHERE (name ILIKE %s OR playlist_id = 'dj-list') AND url LIKE '%%list=PL%%' LIMIT 1",
+                (f"%{name}%",),
+            )
+        else:
+            cur.execute(
+                "SELECT playlist_id, url FROM saved_playlists WHERE (lower(name) = lower(%s) OR playlist_id = %s) AND url LIKE '%%list=PL%%' LIMIT 1",
+                (name, playlist_key),
+            )
         row = cur.fetchone()
         if row and row["url"]:
             pid = row["playlist_id"] if str(row["playlist_id"]).startswith("PL") else row["url"].split("list=")[-1].split("&")[0]
@@ -601,9 +646,12 @@ def resolve_or_create_dj_playlist(
         yt.require_auth()
         playlists = yt.get_library_playlists(limit=500)
         target_id = None
+        acceptable = {name.lower(), playlist_key.lower()}
+        if is_default_dj:
+            acceptable |= {"karaoke: dj list", "karaoke dj list", "dj-list"}
         for p in playlists:
             title = str(p.get("title") or "").strip().lower()
-            if title in (name.lower(), "karaoke: dj list", "karaoke dj list", "dj-list"):
+            if title in acceptable:
                 target_id = str(p.get("playlistId") or "")
                 break
 
@@ -617,23 +665,38 @@ def resolve_or_create_dj_playlist(
 
         url = f"https://music.youtube.com/playlist?list={target_id}"
 
-        # Persist locally under target_id and remove duplicate legacy 'dj-list' row
-        with (conn or localcache.connect()) as c2:
+        # Persist locally under target_id and migrate any local tracks stored under playlist_key
+        own2 = conn is None
+        c2 = conn or localcache.connect()
+        try:
+            existing_local = localcache.get_saved_playlist_tracks(playlist_key, conn=c2) if playlist_key != target_id else []
             localcache.save_playlist(
                 target_id,
                 name,
                 search_query="",
-                tracks=None,
+                tracks=existing_local if existing_local else None,
                 url=url,
                 source_kind="dj",
                 conn=c2,
             )
-            c2.execute("DELETE FROM saved_playlists WHERE playlist_id = 'dj-list'")
-            c2.execute("DELETE FROM saved_playlist_tracks WHERE playlist_id = 'dj-list'")
+            if existing_local:
+                vids = [str(t.get("video_id") or "") for t in existing_local if t.get("video_id")]
+                if vids:
+                    try:
+                        yt.add_playlist_items(target_id, vids, duplicates=False)
+                    except Exception:
+                        pass
+            if playlist_key != target_id:
+                c2.execute("DELETE FROM saved_playlists WHERE playlist_id = %s", (playlist_key,))
+                c2.execute("DELETE FROM saved_playlist_tracks WHERE playlist_id = %s", (playlist_key,))
+        finally:
+            if own2:
+                c2.close()
         return target_id, url
     except Exception as exc:
-        log.warning("Could not reach YouTube Music API, falling back to local dj-list: %s", exc)
-        return "dj-list", ""
+        fallback_id = "dj-list" if is_default_dj else playlist_key
+        log.warning("Could not reach YouTube Music API, falling back to local %s: %s", fallback_id, exc)
+        return fallback_id, ""
 
 
 def reconcile_playlist_with_remote(

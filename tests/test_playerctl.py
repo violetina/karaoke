@@ -122,6 +122,19 @@ def test_missing_playerctl_is_not_an_error(monkeypatch):
     assert playerctl.playing_player() == ""
 
 
+def test_list_players_excludes_self_mpris_service(monkeypatch):
+    """Our own virtual MPRIS service ('karaoke') must never be detected as an external player."""
+    from karaoke import playerctl
+
+    fake = _patch(monkeypatch, _FakePlayerctl(
+        ["karaoke", "karaoke.instance123", "spotify"],
+        {"karaoke": "Playing", "spotify": "Playing"},
+    ))
+    assert playerctl.list_players() == ["spotify"]
+    assert playerctl.playing_players() == ["spotify"]
+    assert fake.status_calls == []
+
+
 # --- mpris:length -----------------------------------------------------------
 #
 # Duration was never requested from MPRIS at all, so the deduplicator's

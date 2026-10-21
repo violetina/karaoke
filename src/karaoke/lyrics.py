@@ -263,6 +263,51 @@ def _to_lyrics(payload: dict) -> Lyrics:
     )
 
 
+def _duration_matches(candidate_dur: Optional[float], target_dur: Optional[float],
+                      tolerance_s: float = 15.0) -> bool:
+    """Whether an LRCLIB entry's duration is compatible with the requested track.
+
+    When both durations are known, rejects synced lyrics from a different edit
+    or live performance (e.g. a 373s cut when the track is 456s). Also checks
+    the last timestamp in synced lyrics when the entry's duration metadata was
+    mis-tagged by the uploader.
+    """
+    if candidate_dur is None or target_dur is None:
+        return True
+    try:
+        return abs(float(candidate_dur) - float(target_dur)) <= tolerance_s
+    except (TypeError, ValueError):
+        return True
+
+
+def _synced_fits_duration(ly: Lyrics, target_dur: Optional[float],
+                          tolerance_s: float = 45.0) -> bool:
+    """Whether synced lyrics' span is plausible for ``target_dur``.
+
+    Community LRCLIB entries sometimes copy the 6:12 Baby Snakes LRC onto a
+    7:36 Zappa in New York FLAC entry (reporting duration=456 while the last
+    lyric timestamp ends at 372s). Rejects synced lyrics whose duration header
+    disagrees with ``target_dur``, whose timestamps run past the audio length,
+    or whose last timestamp stops more than ``tolerance_s`` before the end of a
+    multi-line track when the entry claims a matching duration.
+    """
+    if not ly.has_synced or target_dur is None or target_dur <= 0:
+        return True
+    if not _duration_matches(ly.duration, target_dur, tolerance_s=15.0):
+        return False
+    last_t = ly.lines[-1][0] if ly.lines else 0.0
+    # Synced timestamps running past the audio length (+5s padding) cannot fit.
+    if last_t > target_dur + 5.0:
+        return False
+    # If the LRC has substantial synced content (>= 10 lines) and claims a
+    # duration matching target_dur, reject it if its last timestamp ends more
+    # than 60s before target_dur AND < 85% of the track length (e.g. a 6:12 LRC
+    # pasted onto a 7:36 track).
+    if len(ly.lines) >= 10 and (target_dur - last_t) > 60.0 and last_t < 0.85 * target_dur:
+        return False
+    return True
+
+
 def fetch_lrclib(
     artist: str,
     title: str,
@@ -307,13 +352,18 @@ def fetch_lrclib(
                 r = http.get(f"{base}/api/get", params=params, timeout=timeout)
                 if r.status_code == 200:
                     ly = _to_lyrics(r.json())
-                    if ly.has_synced:
+                    if ly.has_synced and _synced_fits_duration(ly, duration):
                         return ly
-                    plain_fallback = ly
+                    if ly.plain:
+                        plain_fallback = Lyrics(
+                            plain=ly.plain,
+                            source=ly.source,
+                            duration=ly.duration,
+                        )
             except requests.RequestException:
                 pass
 
-            # Fallback: search and take the best synced hit, else the first hit.
+            # Fallback: search and take the best synced hit whose duration fits, else plain.
             try:
                 r = http.get(
                     f"{base}/api/search",
@@ -323,12 +373,23 @@ def fetch_lrclib(
                 if r.status_code == 200:
                     results = r.json() or []
                     if results:
-                        best = next((x for x in results if x.get("syncedLyrics")), results[0])
-                        ly = _to_lyrics(best)
-                        if ly.has_synced:
-                            return ly
+                        for cand in results:
+                            if not cand.get("syncedLyrics"):
+                                continue
+                            ly = _to_lyrics(cand)
+                            if ly.has_synced and _synced_fits_duration(ly, duration):
+                                return ly
                         if plain_fallback is None:
-                            plain_fallback = ly
+                            best_plain = next(
+                                (x for x in results if _duration_matches(x.get("duration"), duration) and (x.get("plainLyrics") or x.get("syncedLyrics"))),
+                                results[0],
+                            )
+                            ly_plain = _to_lyrics(best_plain)
+                            plain_fallback = Lyrics(
+                                plain=ly_plain.plain,
+                                source=ly_plain.source,
+                                duration=ly_plain.duration,
+                            )
             except requests.RequestException:
                 pass
                 

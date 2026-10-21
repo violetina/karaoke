@@ -174,8 +174,11 @@ def resolve_track_id(self, payload: dict[str, Any]) -> dict[str, Any]:
                 track_id = localcache.add_track_source(artist, title, url=url, kind=kind, conn=conn)
                 log.info("postprocess: created unknown track %s - %s with source %s", artist, title, url)
         if track_id is None:
-            if artist.lower() == "unknown" and title.lower() == "unknown":
-                log.warning("postprocess: refusing to search YouTube for Unknown - Unknown")
+            if (not artist.strip()
+                    or (artist.lower() == "unknown" and title.lower() == "unknown")
+                    or (artist.lower() == "karaoke" and title.lower() == "idle")
+                    or "het archief voor onderwijs" in title.lower()):
+                log.warning("postprocess: refusing to search YouTube for non-song %r - %r", artist, title)
             else:
                 # Let's search YouTube for a source and create the track!
                 try:
