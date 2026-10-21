@@ -628,14 +628,41 @@ def test_search_by_chords_and_get_track_chords(paging_library):
     assert detail["top_roman_progressions"][0]["count"] == 2
 
 
-def test_delete_playlist(paging_library):
-    """Verify delete_playlist removes custom playlists and protects dj-list."""
+def test_delete_playlist(paging_library, monkeypatch):
+    """Verify delete_playlist removes custom playlists and protects dj-list (by slug, name, and resolved PL ID)."""
+    from karaoke import localcache
+
     mcp_server.add_to_dj_playlist(track_ids=paging_library[:2], playlist_id="temp-test-list")
     deleted = json.loads(mcp_server.delete_playlist("temp-test-list"))
     assert deleted["ok"] is True
 
     refused = json.loads(mcp_server.delete_playlist("dj-list"))
     assert "error" in refused
+
+    # Seed the primary DJ list with a real-looking PL ID and ensure deleting by PL ID is also refused
+    with localcache.connect() as conn:
+        localcache.save_playlist(
+            playlist_id="PLde7bFUxcmZI",
+            name="Karaoke: DJ List",
+            search_query="",
+            tracks=[],
+            url="https://music.youtube.com/playlist?list=PLde7bFUxcmZI",
+            source_kind="youtube_music",
+            conn=conn,
+        )
+    monkeypatch.setattr(
+        ytmusic_playlist,
+        "resolve_or_create_dj_playlist",
+        lambda name="Karaoke: DJ List", client=None, conn=None, playlist_key="dj-list": (
+            "PLde7bFUxcmZI",
+            "https://music.youtube.com/playlist?list=PLde7bFUxcmZI",
+        ),
+    )
+    refused_pl = json.loads(mcp_server.delete_playlist("PLde7bFUxcmZI", delete_remote_ytmusic=True))
+    assert "error" in refused_pl
+    with localcache.connect() as conn:
+        assert localcache.find_saved_playlist_by_id("PLde7bFUxcmZI", conn=conn) is not None
+
 
 
 

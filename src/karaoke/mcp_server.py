@@ -1070,6 +1070,9 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
     }, indent=2)
 
 
+_PROTECTED_DJ_NAMES = frozenset({"dj-list", "karaoke: dj list", "karaoke ai dj list"})
+
+
 @dj_mcp.tool()
 def delete_playlist(playlist_id: str, delete_remote_ytmusic: bool = False) -> str:
     """Delete a saved playlist from the local database (and optionally from YouTube Music).
@@ -1081,7 +1084,7 @@ def delete_playlist(playlist_id: str, delete_remote_ytmusic: bool = False) -> st
     pid = (playlist_id or "").strip()
     if not pid:
         return json.dumps({"error": "playlist_id is required."}, indent=2)
-    if pid.lower() in ("dj-list", "karaoke: dj list", "karaoke ai dj list"):
+    if pid.lower() in _PROTECTED_DJ_NAMES:
         return json.dumps({
             "error": "Refusing to delete the primary 'dj-list' playlist. Use clear_dj_playlist to empty it instead.",
         }, indent=2)
@@ -1090,6 +1093,22 @@ def delete_playlist(playlist_id: str, delete_remote_ytmusic: bool = False) -> st
         pl = localcache.find_saved_playlist_by_id(pid, conn=conn)
         target_id = pl["playlist_id"] if pl and pl.get("playlist_id") else pid
         target_name = (pl.get("name") if pl else "") or pid
+
+        resolved_dj_id = ""
+        try:
+            from . import ytmusic_playlist
+            resolved_dj_id, _ = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
+        except Exception:
+            pass
+
+        if (
+            target_id.lower() in _PROTECTED_DJ_NAMES
+            or target_name.strip().lower() in _PROTECTED_DJ_NAMES
+            or (resolved_dj_id and target_id == resolved_dj_id)
+        ):
+            return json.dumps({
+                "error": "Refusing to delete the primary 'dj-list' playlist. Use clear_dj_playlist to empty it instead.",
+            }, indent=2)
 
         remote_deleted = False
         if delete_remote_ytmusic and target_id.startswith(("PL", "VL")):
@@ -1375,7 +1394,9 @@ def search_by_chords(
 
     Args:
         progression: Ordered chord sequence in Roman numerals (e.g. 'ii V I', 'I V vi IV', 'i bVII bVI V')
-            or chord names (e.g. 'Am F C G', 'Dm7 G7 C'). Matches both exact extensions and base triads.
+            or chord names (e.g. 'Am F C G', 'Dm7 G7 C'). Canonical cadences ('ii V I', 'ii° V i', 'ii V')
+            match functional cadences anywhere in the song (including tonicized local ii–V–Is such as
+            'v7 -> I7 -> IVmaj7'), matching harmony.summarise() cadence counts.
         chords_used: Chords or qualities that must appear anywhere in the song (e.g. 'F#m7 B7', 'm7b5', 'dim7', '6/9').
         style: Functional harmony style ('jazz-functional', 'blues', 'andalusian', 'triadic', 'mixed').
         cadence: Filter for songs with specific cadences ('ii_v_i', 'minor_ii_v_i', 'ii_v', 'tritone_subs',

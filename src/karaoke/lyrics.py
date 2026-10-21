@@ -58,14 +58,18 @@ _OUTER_QUOTES = (
 )
 
 
-def _strip_outer_quotes(text: str) -> str:
-    out = text.strip()
+def strip_outer_quotes(text: str) -> str:
+    """Trim whitespace and balanced outer quote wrappers, preserving embedded quotes."""
+    out = (text or "").strip()
     while len(out) >= 2 and (out[0], out[-1]) in _OUTER_QUOTES:
         inner = out[1:-1]
         if out[0] in inner or out[-1] in inner:
             break
         out = inner.strip()
     return out
+
+
+_strip_outer_quotes = strip_outer_quotes
 
 
 def clean_title(title: str) -> str:
@@ -76,11 +80,11 @@ def clean_title(title: str) -> str:
     Returns the input unchanged if nothing matches.
     """
     prev = None
-    out = _strip_outer_quotes(title)
+    out = strip_outer_quotes(title)
     while out and out != prev:
         prev = out
         out = _TITLE_SUFFIX.sub("", out).strip()
-        out = _strip_outer_quotes(out)
+        out = strip_outer_quotes(out)
     return out or title.strip()
 
 

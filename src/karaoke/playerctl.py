@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .identify import SongRef, parse_query
+from .lyrics import strip_outer_quotes
 
 
 @dataclass(frozen=True)
@@ -29,23 +30,9 @@ class PlayerMetadata:
     duration: Optional[float] = None
 
 
-_QUOTE_PAIRS = (
-    ('"', '"'),
-    ("'", "'"),
-    ("\u201c", "\u201d"),
-    ("\u2018", "\u2019"),
-)
-
-
 def _clean_piece(text: str) -> str:
     """Trim whitespace and balanced outer quote wrappers from player metadata."""
-    out = (text or "").strip()
-    while len(out) >= 2 and (out[0], out[-1]) in _QUOTE_PAIRS:
-        inner = out[1:-1]
-        if out[0] in inner or out[-1] in inner:
-            break
-        out = inner.strip()
-    return out
+    return strip_outer_quotes(text)
 
 
 # Site suffixes browsers append to the tab title, e.g. " - YouTube".

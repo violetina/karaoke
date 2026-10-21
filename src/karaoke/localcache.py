@@ -1356,11 +1356,36 @@ def table_exists(conn: Connection, table_name: str) -> bool:
         return False
 
 
+_QUOTE_TRANSLATE = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+})
+
+
+def _quote_variants(text: str) -> list[str]:
+    """Generate narrow quote/apostrophe-normalized variants of a string."""
+    from .lyrics import strip_outer_quotes
+
+    base = (text or "").strip()
+    norm = base.translate(_QUOTE_TRANSLATE)
+    stripped = strip_outer_quotes(norm)
+    single_q = norm.replace('"', "'")
+    double_q = norm.replace("'", '"')
+    out: list[str] = []
+    for cand in (base, norm, stripped, single_q, double_q):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
 def find_track_id(artist: str, title: str, conn: Connection) -> Optional[int]:
     """Find a track by artist and title, returning its ID.
 
-    Player metadata can vary in case, so cache lookup is case-insensitive while
-    preserving the originally-stored display spelling.
+    Player metadata can vary in case or quote/apostrophe style (curly vs ASCII,
+    outer wrapper quotes), so cache lookup checks exact case-insensitive match
+    first and falls back to narrow quote/apostrophe variants when quotes are present.
     """
     cur = conn.cursor()
     cur.execute(
@@ -1373,7 +1398,27 @@ def find_track_id(artist: str, title: str, conn: Connection) -> Optional[int]:
         (artist, title),
     )
     row = cur.fetchone()
-    return row["track_id"] if row else None
+    if row:
+        return row["track_id"]
+
+    if any(q in (artist or "") or q in (title or "") for q in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019")):
+        for a_var in _quote_variants(artist):
+            for t_var in _quote_variants(title):
+                if a_var == artist and t_var == title:
+                    continue
+                cur.execute(
+                    """
+                    SELECT track_id FROM tracks
+                    WHERE lower(artist) = lower(%s) AND lower(title) = lower(%s)
+                    ORDER BY track_id DESC
+                    LIMIT 1
+                    """,
+                    (a_var, t_var),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row["track_id"]
+    return None
 
 
 def _match_key(text: str) -> str:
