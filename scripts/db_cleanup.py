@@ -856,6 +856,49 @@ def audit_and_fix_messed_up_lyrics(
     }
 
 
+def repair_harmony_styles(conn, dry_run: bool = False) -> int:
+    """Recompute track_chords harmony styles under updated _style() rules."""
+    from psycopg.types.json import Jsonb
+    from karaoke import harmony
+
+    cur = conn.cursor()
+    style_updates = 0
+    if localcache.table_exists(conn, "track_chords"):
+        cur.execute("SELECT track_id, harmony FROM track_chords")
+        for r in cur.fetchall():
+            h = dict(r["harmony"] or {})
+            if not h or "key_tonic" not in h:
+                continue
+            summary = harmony.HarmonySummary(
+                key_tonic=int(h.get("key_tonic", 0)),
+                key_minor=bool(h.get("key_minor", False)),
+                ii_v_i=int(h.get("ii_v_i", 0)),
+                minor_ii_v_i=int(h.get("minor_ii_v_i", 0)),
+                ii_v=int(h.get("ii_v", 0)),
+                tritone_subs=int(h.get("tritone_subs", 0)),
+                secondary_dominants=int(h.get("secondary_dominants", 0)),
+                backdoor=int(h.get("backdoor", 0)),
+                andalusian=int(h.get("andalusian", 0)),
+                dominant_share=float(h.get("dominant_share", 0.0)),
+                blues_score=float(h.get("blues_score", 0.0)),
+                cadences_per_minute=float(h.get("cadences_per_minute", 0.0)),
+                fifth_chains_per_minute=float(h.get("fifth_chains_per_minute", 0.0)),
+            )
+            new_style = harmony._style(summary)
+            if new_style != h.get("style"):
+                style_updates += 1
+                if not dry_run:
+                    h["style"] = new_style
+                    cur.execute(
+                        "UPDATE track_chords SET harmony = %s WHERE track_id = %s",
+                        (Jsonb(h), r["track_id"]),
+                    )
+
+    if not dry_run and style_updates:
+        conn.commit()
+    return style_updates
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Karaoke DB cleanup / dedup / self-healing")
     parser.add_argument("--dry-run", action="store_true",

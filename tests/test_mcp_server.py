@@ -590,17 +590,79 @@ def test_search_by_chords_and_get_track_chords(paging_library):
     assert by_roman["tracks"][0]["progression_matches"] == 2
     assert "Dm7 (ii7) -> G7 (V7) -> Cmaj7 (Imaj7)" in by_roman["tracks"][0]["matched_excerpt"]
 
-    # 2. Search by chord names 'Dm G C' (matches Dm7 -> G7 -> Cmaj7)
-    by_names = json.loads(mcp_server.search_by_chords(progression="Dm G C", style="jazz-functional", cadence="ii_v_i"))
+    # 2. Search by chord names 'Dm G7 C' (matches Dm7 -> G7 -> Cmaj7; G7 is dominant, not tonic G)
+    by_names = json.loads(mcp_server.search_by_chords(progression="Dm G7 C", style="jazz-functional", cadence="ii_v_i"))
     assert by_names["count"] == 1
     assert by_names["tracks"][0]["track_id"] == tid
 
-    # 3. Inspect full v2 chord timeline & recurring progressions
+    # 3. Loose/non-functional false positives must NOT match:
+    # - D7 (I7) is a dominant 7th, not a major tonic 'I' or 'D'
+    # - Em6 -> A -> D7 (ii6 -> V -> I7) is NOT a ii-V-I
+    # - Plain triads Gm -> C -> F (ii -> V -> I without dominant 7th) and Gm -> C6 -> F (ii -> V6 -> I) are NOT ii-V-I cadences
+    assert not mcp_server._roman_token_matches("I", "I7")
+    assert not mcp_server._chord_token_matches("D", "D7")
+    assert not mcp_server._roman_token_matches("ii", "ii6")
+    assert not mcp_server._chord_token_matches("Em", "Em6")
+    assert not mcp_server._roman_token_matches("V", "V6")
+
+    false_positive_chords = [
+        {"at": 0.0, "end": 2.0, "name": "Em6", "roman": "ii6"},
+        {"at": 2.0, "end": 4.0, "name": "A", "roman": "V"},
+        {"at": 4.0, "end": 6.0, "name": "D7", "roman": "I7"},
+        {"at": 6.0, "end": 8.0, "name": "Gm", "roman": "ii"},
+        {"at": 8.0, "end": 10.0, "name": "C", "roman": "V"},
+        {"at": 10.0, "end": 12.0, "name": "F", "roman": "I"},
+        {"at": 12.0, "end": 14.0, "name": "Gm", "roman": "ii"},
+        {"at": 14.0, "end": 16.0, "name": "C6", "roman": "V6"},
+        {"at": 16.0, "end": 18.0, "name": "F", "roman": "I"},
+    ]
+    fp_count, _, _ = mcp_server._match_progression_tokens(false_positive_chords, ["ii", "V", "I"])
+    assert fp_count == 0
+
+    # 4. Inspect full v2 chord timeline & recurring progressions
     detail = json.loads(mcp_server.get_track_chords(track_id=tid))
     assert detail["track_id"] == tid
     assert detail["chords_version"] == 2
     assert detail["harmony"]["style"] == "jazz-functional"
     assert detail["top_roman_progressions"][0]["roman"] == "ii7 -> V7 -> Imaj7"
     assert detail["top_roman_progressions"][0]["count"] == 2
+
+
+def test_delete_playlist(paging_library, monkeypatch):
+    """Verify delete_playlist removes custom playlists and protects dj-list (by slug, name, and resolved PL ID)."""
+    from karaoke import localcache
+
+    mcp_server.add_to_dj_playlist(track_ids=paging_library[:2], playlist_id="temp-test-list")
+    deleted = json.loads(mcp_server.delete_playlist("temp-test-list"))
+    assert deleted["ok"] is True
+
+    refused = json.loads(mcp_server.delete_playlist("dj-list"))
+    assert "error" in refused
+
+    # Seed the primary DJ list with a real-looking PL ID and ensure deleting by PL ID is also refused
+    with localcache.connect() as conn:
+        localcache.save_playlist(
+            playlist_id="PLde7bFUxcmZI",
+            name="Karaoke: DJ List",
+            search_query="",
+            tracks=[],
+            url="https://music.youtube.com/playlist?list=PLde7bFUxcmZI",
+            source_kind="youtube_music",
+            conn=conn,
+        )
+    monkeypatch.setattr(
+        ytmusic_playlist,
+        "resolve_or_create_dj_playlist",
+        lambda name="Karaoke: DJ List", client=None, conn=None, playlist_key="dj-list": (
+            "PLde7bFUxcmZI",
+            "https://music.youtube.com/playlist?list=PLde7bFUxcmZI",
+        ),
+    )
+    refused_pl = json.loads(mcp_server.delete_playlist("PLde7bFUxcmZI", delete_remote_ytmusic=True))
+    assert "error" in refused_pl
+    with localcache.connect() as conn:
+        assert localcache.find_saved_playlist_by_id("PLde7bFUxcmZI", conn=conn) is not None
+
+
 
 

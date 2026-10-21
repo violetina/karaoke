@@ -201,3 +201,19 @@ def test_pause_is_not_a_toggle():
     finally:
         pc._run = original
     assert calls and calls[-1][-1] == "pause"
+
+
+def test_clean_piece_preserves_embedded_quotes():
+    """Titles ending with a quoted sub-track must not lose their closing quote."""
+    t1 = 'Epitaph - Including "March for No Reason" and "Tomorrow and Tomorrow"'
+    assert playerctl._clean_piece(t1) == t1
+    ref = playerctl.normalize_player_track("King Crimson", t1)
+    assert ref.title == t1
+
+    t2 = '21st Century Schizoid Man - Including "Mirrors"'
+    assert playerctl._clean_piece(t2) == t2
+
+    # Balanced outer wrapper quotes are still stripped
+    assert playerctl._clean_piece('"Heroes"') == "Heroes"
+    assert playerctl._clean_piece("“Watch Her Disappear”") == "Watch Her Disappear"
+

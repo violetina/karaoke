@@ -1070,48 +1070,212 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
     }, indent=2)
 
 
-def _strip_roman_extension(roman_tok: str) -> str:
-    """Strip extension suffix from a Roman numeral token (e.g. 'ii7' -> 'ii', 'bVIImaj7' -> 'bVII')."""
-    import re
-    m = re.match(r"^(b?[iIvV]+)", roman_tok.strip())
-    return m.group(1) if m else roman_tok.strip()
+_PROTECTED_DJ_NAMES = frozenset({"dj-list", "karaoke: dj list", "karaoke ai dj list"})
 
 
-def _strip_chord_extension(chord_tok: str) -> str:
-    """Reduce a chord name to its triad root+quality (e.g. 'Dm7' -> 'Dm', 'Cmaj7' -> 'C', 'G7' -> 'G')."""
+@dj_mcp.tool()
+def delete_playlist(playlist_id: str, delete_remote_ytmusic: bool = False) -> str:
+    """Delete a saved playlist from the local database (and optionally from YouTube Music).
+
+    Args:
+        playlist_id: The saved playlist ID or name to delete (e.g. 'PL...', 'graph-test', 'funny-happy').
+        delete_remote_ytmusic: If True and playlist_id is a YouTube Music playlist ('PL...'), also delete it on YouTube Music.
+    """
+    pid = (playlist_id or "").strip()
+    if not pid:
+        return json.dumps({"error": "playlist_id is required."}, indent=2)
+    if pid.lower() in _PROTECTED_DJ_NAMES:
+        return json.dumps({
+            "error": "Refusing to delete the primary 'dj-list' playlist. Use clear_dj_playlist to empty it instead.",
+        }, indent=2)
+
+    with localcache.connect() as conn:
+        pl = localcache.find_saved_playlist_by_id(pid, conn=conn)
+        target_id = pl["playlist_id"] if pl and pl.get("playlist_id") else pid
+        target_name = (pl.get("name") if pl else "") or pid
+
+        if (
+            target_id.lower() in _PROTECTED_DJ_NAMES
+            or target_name.strip().lower() in _PROTECTED_DJ_NAMES
+        ):
+            return json.dumps({
+                "error": "Refusing to delete the primary 'dj-list' playlist. Use clear_dj_playlist to empty it instead.",
+            }, indent=2)
+
+        remote_deleted = False
+        if delete_remote_ytmusic and target_id.startswith(("PL", "VL")):
+            try:
+                from . import ytmusic_playlist
+                yt = ytmusic_playlist.YTMusicClient()
+                yt.delete_playlist(target_id)
+                remote_deleted = True
+            except Exception as exc:
+                log.warning("Failed to delete remote YouTube Music playlist %s: %s", target_id, exc)
+
+        deleted = localcache.delete_saved_playlist(target_id, conn=conn)
+        if target_id != pid:
+            deleted = localcache.delete_saved_playlist(pid, conn=conn) or deleted
+
+    return json.dumps({
+        "ok": bool(deleted),
+        "playlist_id": target_id,
+        "name": target_name,
+        "remote_deleted": remote_deleted,
+        "message": (
+            f"Deleted playlist '{target_name}' ({target_id})."
+            if deleted
+            else f"Playlist '{pid}' was not found."
+        ),
+    }, indent=2)
+
+
+_NOTE_TO_PITCH_CLASS: dict[str, int] = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+    "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
+}
+
+_CHORD_SUFFIX_TO_QUALITY: dict[str, str] = {
+    "": "maj",
+    "maj": "maj",
+    "m": "min",
+    "min": "min",
+    "m7": "min7",
+    "min7": "min7",
+    "m6": "m6",
+    "dim": "dim",
+    "dim7": "dim7",
+    "m7b5": "m7b5",
+    "sus4": "sus4",
+    "7": "7",
+    "maj7": "maj7",
+    "6": "6",
+    "6/9": "6/9",
+    "9": "9",
+}
+
+
+def _parse_chord_name(chord_tok: str) -> Optional[tuple[int, str]]:
+    """Parse a chord token into (pitch_class 0..11, canonical quality)."""
     import re
-    m = re.match(r"^([A-G][#b]?)(m7b5|dim7|dim|maj7|min7|m7|m6|6/9|sus4|m|7|6|9)?$", chord_tok.strip())
+    m = re.match(
+        r"^([A-G][#b]?)(m7b5|dim7|dim|maj7|min7|m7|m6|6/9|sus4|maj|min|m|7|6|9)?$",
+        chord_tok.strip(),
+    )
     if not m:
-        return chord_tok.strip()
-    root, qual = m.group(1), m.group(2) or ""
-    if qual in ("m", "min7", "m7", "m6"):
-        return f"{root}m"
-    if qual in ("dim", "dim7", "m7b5"):
-        return f"{root}dim"
-    return root
+        return None
+    root_str, raw_qual = m.group(1), m.group(2) or ""
+    root_pc = _NOTE_TO_PITCH_CLASS.get(root_str)
+    qual = _CHORD_SUFFIX_TO_QUALITY.get(raw_qual)
+    if root_pc is None or qual is None:
+        return None
+    return root_pc, qual
+
+
+def _parse_roman_token(roman_tok: str) -> Optional[tuple[str, str]]:
+    """Parse a Roman numeral token into (base_numeral, suffix), preserving case."""
+    import re
+    m = re.match(r"^(b?[iIvV]+)(maj7|6/9|sus4|ø7|°7|°|7|6|9)?$", roman_tok.strip())
+    if not m:
+        return None
+    return m.group(1), m.group(2) or ""
+
+
+def _roman_token_matches(query_tok: str, actual_roman: str) -> bool:
+    """Strict functional Roman numeral matching.
+
+    - Explicit extensions in query_tok (e.g. 'ii7', 'V7', 'Imaj7', 'I7', 'ii6') require exact match.
+    - Bare uppercase major degrees ('I', 'IV', 'bVII', etc., except 'V') match major-tonic
+      qualities ('', 'maj7', '6', '6/9') — NEVER dominant '7'/'9' (so D7/I7 never counts as I).
+    - Bare 'V' matches triad 'V' or dominant 'V7'/'V9' — NEVER 'V6' or 'Vmaj7'.
+    - Bare 'i' (minor tonic) matches 'i', 'i7', 'i6' — NEVER diminished/half-diminished.
+    - Bare non-tonic minor degrees ('ii', 'iii', 'iv', 'v', 'vi', 'vii') match '', '7'
+      (min, min7) — NEVER '6' (m6) or diminished/half-diminished (so Em6/ii6 never counts as ii).
+    """
+    q_parsed = _parse_roman_token(query_tok)
+    r_parsed = _parse_roman_token(actual_roman)
+    if not q_parsed or not r_parsed:
+        return False
+    q_num, q_suf = q_parsed
+    r_num, r_suf = r_parsed
+    if q_num != r_num:
+        return False
+    if q_suf:
+        return r_suf == q_suf
+
+    # Bare Roman numeral: enforce functional quality family
+    if q_num == "V":
+        return r_suf in ("", "7", "9")
+    is_upper = q_num[1].isupper() if q_num.startswith("b") else q_num[0].isupper()
+    if is_upper:
+        return r_suf in ("", "maj7", "6", "6/9")
+    if q_num == "i":
+        return r_suf in ("", "7", "6")
+    return r_suf in ("", "7")
+
+
+def _chord_token_matches(query_tok: str, actual_name: str) -> bool:
+    """Strict functional chord-name matching.
+
+    - Explicit extensions ('D7', 'Dm7', 'Cmaj7', 'Em6', 'Bm7b5') require exact root+quality match.
+    - Bare major chord ('D', 'C') matches major-tonic qualities ('maj', 'maj7', '6', '6/9')
+      — NEVER dominant '7' or '9' (so 'D7' never matches 'D').
+    - Bare minor chord ('Dm', 'Em') matches 'min' and 'min7' — NEVER 'm6' (so 'Em6' never matches 'Em').
+    - Bare diminished chord ('Bdim') matches 'dim', 'dim7', 'm7b5'.
+    """
+    import re
+    q_parsed = _parse_chord_name(query_tok)
+    c_parsed = _parse_chord_name(actual_name)
+    if not q_parsed or not c_parsed:
+        return query_tok.strip().lower() == actual_name.strip().lower()
+    q_root, q_qual = q_parsed
+    c_root, c_qual = c_parsed
+    if q_root != c_root:
+        return False
+
+    # Check if query specified an explicit extension beyond bare triad ('', 'm', 'dim')
+    m = re.match(r"^[A-G][#b]?(.*)$", query_tok.strip())
+    raw_suf = (m.group(1) if m else "") or ""
+    if raw_suf not in ("", "m", "min", "maj", "dim"):
+        return c_qual == q_qual
+
+    if q_qual == "maj":
+        return c_qual in ("maj", "maj7", "6", "6/9")
+    if q_qual == "min":
+        return c_qual in ("min", "min7")
+    if q_qual == "dim":
+        return c_qual in ("dim", "dim7", "m7b5")
+    return c_qual == q_qual
 
 
 def _match_progression_tokens(
     chords_list: list[dict[str, Any]],
     query_tokens: list[str],
 ) -> tuple[int, Optional[float], list[str]]:
-    """Count occurrences of a chord/Roman progression in a collapsed chord timeline.
+    """Count occurrences of a chord/Roman progression in a chord timeline.
+
+    Uses the exact same functional rules as :mod:`karaoke.harmony` for canonical
+    cadences (`ii-V-I`, `minor ii-V-i`, `ii-V`, `Andalusian`), and strict functional
+    quality families for general Roman or chord-name progressions.
 
     Returns (match_count, first_match_at_s, first_matched_names).
     """
     if not chords_list or not query_tokens:
         return 0, None, []
 
-    import re
-    is_roman = all(bool(re.match(r"^b?[iIvV]+", tok)) for tok in query_tokens)
+    from . import harmony
+
+    is_roman = all(_parse_roman_token(tok) is not None for tok in query_tokens)
 
     # Collapse consecutive identical chords so held/repeated bars form a clean progression
     collapsed: list[dict[str, Any]] = []
     for c in chords_list:
         name = str(c.get("name") or "")
-        if not name:
+        roman_str = str(c.get("roman") or "")
+        if not name and not roman_str:
             continue
-        if collapsed and collapsed[-1].get("name") == name:
+        key_id = name or roman_str
+        if collapsed and (collapsed[-1].get("name") or collapsed[-1].get("roman")) == key_id:
             continue
         collapsed.append(c)
 
@@ -1119,40 +1283,81 @@ def _match_progression_tokens(
     if len(collapsed) < n:
         return 0, None, []
 
+    # Detect canonical functional cadences so search_by_chords(progression="ii V I")
+    # uses the exact same cadence rules as harmony.summarise().
+    q_tuple = tuple(query_tokens)
+    is_major_ii_v_i = q_tuple in (
+        ("ii", "V", "I"), ("ii7", "V7", "I"), ("ii", "V7", "I"),
+        ("ii7", "V", "I"), ("ii7", "V7", "Imaj7"), ("ii", "V", "Imaj7"),
+    )
+    is_minor_ii_v_i = q_tuple in (
+        ("ii°", "V", "i"), ("iiø7", "V7", "i"), ("iiø7", "V", "i"), ("ii°", "V7", "i"),
+    )
+    is_ii_v = q_tuple in (
+        ("ii", "V"), ("ii7", "V7"), ("ii", "V7"), ("ii7", "V"),
+    )
+
     matches = 0
     first_at: Optional[float] = None
     first_excerpt: list[str] = []
 
     for idx in range(len(collapsed) - n + 1):
         window = collapsed[idx : idx + n]
-        ok = True
-        for q_tok, item in zip(query_tokens, window):
-            if is_roman:
-                r_val = str(item.get("roman") or "")
-                if not r_val:
-                    ok = False
-                    break
-                # Exact numeral match if query carries an extension (e.g. ii7), else degree+case match (ii matches ii7)
-                has_ext = _strip_roman_extension(q_tok) != q_tok
-                if has_ext:
-                    if r_val != q_tok:
+        ok = False
+
+        if is_major_ii_v_i and all(w.get("name") for w in window):
+            p0 = _parse_chord_name(str(window[0]["name"]))
+            p1 = _parse_chord_name(str(window[1]["name"]))
+            p2 = _parse_chord_name(str(window[2]["name"]))
+            if p0 and p1 and p2:
+                down_1 = (p1[0] - p0[0]) % 12 == 5
+                down_2 = (p2[0] - p1[0]) % 12 == 5
+                q0_ok = (p0[1] == "min7") if query_tokens[0] == "ii7" else (p0[1] in harmony.MINOR_TWO)
+                q1_ok = p1[1] in harmony.DOMINANT
+                q2_ok = (p2[1] == "maj7") if query_tokens[2] == "Imaj7" else (p2[1] in harmony.MAJOR_TONIC)
+                ok = down_1 and down_2 and q0_ok and q1_ok and q2_ok
+        elif is_minor_ii_v_i and all(w.get("name") for w in window):
+            p0 = _parse_chord_name(str(window[0]["name"]))
+            p1 = _parse_chord_name(str(window[1]["name"]))
+            p2 = _parse_chord_name(str(window[2]["name"]))
+            if p0 and p1 and p2:
+                down_1 = (p1[0] - p0[0]) % 12 == 5
+                down_2 = (p2[0] - p1[0]) % 12 == 5
+                ok = (
+                    down_1 and down_2
+                    and p0[1] in harmony.HALF_DIM_TWO
+                    and p1[1] in harmony.DOMINANT
+                    and p2[1] in harmony.MINOR_TONIC
+                )
+        elif is_ii_v and all(w.get("name") for w in window):
+            p0 = _parse_chord_name(str(window[0]["name"]))
+            p1 = _parse_chord_name(str(window[1]["name"]))
+            if p0 and p1:
+                down_1 = (p1[0] - p0[0]) % 12 == 5
+                q0_ok = (p0[1] == "min7") if query_tokens[0] == "ii7" else (
+                    p0[1] in (harmony.MINOR_TWO | harmony.HALF_DIM_TWO)
+                )
+                ok = down_1 and q0_ok and (p1[1] in harmony.DOMINANT)
+        else:
+            ok = True
+            for pos_i, (q_tok, item) in enumerate(zip(query_tokens, window)):
+                if is_roman:
+                    r_val = str(item.get("roman") or "")
+                    if not r_val or not _roman_token_matches(q_tok, r_val):
                         ok = False
                         break
+                    # When roman-only items are passed for ii-V-I without chord names,
+                    # require V to be V7/V9 so plain triad V does not count as a ii-V-I cadence.
+                    if (is_major_ii_v_i or is_minor_ii_v_i or is_ii_v) and pos_i == 1 and q_tok == "V":
+                        if r_val not in ("V7", "V9"):
+                            ok = False
+                            break
                 else:
-                    if _strip_roman_extension(r_val) != q_tok:
+                    c_val = str(item.get("name") or "")
+                    if not c_val or not _chord_token_matches(q_tok, c_val):
                         ok = False
                         break
-            else:
-                c_val = str(item.get("name") or "")
-                has_ext = _strip_chord_extension(q_tok) != q_tok
-                if has_ext:
-                    if c_val.lower() != q_tok.lower():
-                        ok = False
-                        break
-                else:
-                    if _strip_chord_extension(c_val).lower() != _strip_chord_extension(q_tok).lower():
-                        ok = False
-                        break
+
         if ok:
             matches += 1
             if first_at is None:
@@ -1181,7 +1386,9 @@ def search_by_chords(
 
     Args:
         progression: Ordered chord sequence in Roman numerals (e.g. 'ii V I', 'I V vi IV', 'i bVII bVI V')
-            or chord names (e.g. 'Am F C G', 'Dm7 G7 C'). Matches both exact extensions and base triads.
+            or chord names (e.g. 'Am F C G', 'Dm7 G7 C'). Canonical cadences ('ii V I', 'ii° V i', 'ii V')
+            match functional cadences anywhere in the song (including tonicized local ii–V–Is such as
+            'v7 -> I7 -> IVmaj7'), matching harmony.summarise() cadence counts.
         chords_used: Chords or qualities that must appear anywhere in the song (e.g. 'F#m7 B7', 'm7b5', 'dim7', '6/9').
         style: Functional harmony style ('jazz-functional', 'blues', 'andalusian', 'triadic', 'mixed').
         cadence: Filter for songs with specific cadences ('ii_v_i', 'minor_ii_v_i', 'ii_v', 'tritone_subs',
@@ -1287,15 +1494,31 @@ def search_by_chords(
         harmony_doc = r["harmony"] if isinstance(r["harmony"], dict) else {}
 
         if required_chords:
-            names_lower = {str(c.get("name") or "").lower() for c in chords_list}
-            romans_lower = {str(c.get("roman") or "").lower() for c in chords_list}
             ok_req = True
             for req in required_chords:
-                rl = req.lower()
-                if rl in names_lower or rl in romans_lower:
+                req_s = req.strip()
+                if not req_s:
                     continue
-                if any(n.endswith(rl) for n in names_lower):
-                    continue
+                if req_s in _CHORD_SUFFIX_TO_QUALITY and req_s != "":
+                    target_qual = _CHORD_SUFFIX_TO_QUALITY[req_s]
+                    if any(
+                        (_parse_chord_name(str(c.get("name") or "")) or (None, None))[1] == target_qual
+                        for c in chords_list
+                    ):
+                        continue
+                elif _parse_roman_token(req_s) is not None:
+                    if any(_roman_token_matches(req_s, str(c.get("roman") or "")) for c in chords_list):
+                        continue
+                elif _parse_chord_name(req_s) is not None:
+                    if any(_chord_token_matches(req_s, str(c.get("name") or "")) for c in chords_list):
+                        continue
+                else:
+                    rl = req_s.lower()
+                    if any(
+                        str(c.get("name") or "").lower() == rl or str(c.get("roman") or "") == req_s
+                        for c in chords_list
+                    ):
+                        continue
                 ok_req = False
                 break
             if not ok_req:

@@ -223,7 +223,8 @@ def summarise(analysis: ChordAnalysis, key: Optional[Key] = None) -> Optional[Ha
 
 def _style(s: HarmonySummary) -> str:
     """A coarse label from the counts, in order of how distinctive each is."""
-    if (s.cadences_per_minute >= 1.0 or s.fifth_chains_per_minute >= 1.0
+    if (s.cadences_per_minute >= 1.0
+            or (s.fifth_chains_per_minute >= 1.0 and s.dominant_share >= 0.05)
             or (s.ii_v_i + s.minor_ii_v_i + s.tritone_subs) >= 4):
         return "jazz-functional"
     if s.blues_score >= BLUES_THRESHOLD:
