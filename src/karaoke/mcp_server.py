@@ -1810,6 +1810,34 @@ def get_track_chords(
         }, indent=2)
 
 
+def _scan_result(
+    tid: int,
+    artist_name: str,
+    title_name: str,
+    missing_before: list[str],
+    source_info: Optional[dict[str, Any]],
+    mode_used: str,
+    status: str,
+    steps_done: Optional[list[str]] = None,
+    steps_failed: Optional[list[str]] = None,
+    note: str = "",
+    dry_run: bool = False,
+) -> str:
+    return json.dumps({
+        "track_id": tid,
+        "artist": artist_name,
+        "title": title_name,
+        "missing_before": missing_before,
+        "source": source_info,
+        "mode_used": mode_used,
+        "dry_run": dry_run,
+        "status": status,
+        "steps_done": list(steps_done or []),
+        "steps_failed": list(steps_failed or []),
+        "note": note,
+    }, indent=2)
+
+
 @dj_mcp.tool()
 def scan_track(
     track_id: Optional[int] = None,
@@ -1818,6 +1846,7 @@ def scan_track(
     mode: str = "auto",
     find_source: bool = True,
     sample_seconds: float = 45.0,
+    include_suspect: bool = False,
     dry_run: bool = False,
 ) -> str:
     """Analyse a track that is missing key/BPM, chords, CLAP or lyric sync.
@@ -1838,7 +1867,9 @@ def scan_track(
             - 'sample': record currently playing desktop audio for key/BPM/CLAP (only if this track is playing).
         find_source: If true and the track has no downloadable source, search and save a YouTube source first.
         sample_seconds: Capture duration in seconds for sample mode (default 45.0).
-        dry_run: If true, inspect missing steps and candidate sources without saving or queuing anything.
+        include_suspect: If true, inline mode also processes files flagged as 'suspect' by the audio audit (e.g. length mismatch).
+        dry_run: If true, inspect missing steps and candidate sources without saving, queuing or sampling anything.
+            Anticipated statuses: 'would_queue', 'would_sample', 'would_analyse', 'complete', or 'no_source'.
     """
     if mode not in ("auto", "queue", "inline", "sample"):
         return json.dumps({"error": f"Invalid mode '{mode}'. Expected 'auto', 'queue', 'inline', or 'sample'."})
@@ -1860,16 +1891,6 @@ def scan_track(
                     "SELECT t.track_id, t.artist, t.title, t.duration, t.album"
                     " FROM tracks t WHERE t.track_id = %s",
                     (tid,),
-                )
-                row = cur.fetchone()
-            else:
-                pat_a = f"%{artist.strip()}%" if artist else "%"
-                pat_t = f"%{title.strip()}%" if title else "%"
-                cur.execute(
-                    "SELECT t.track_id, t.artist, t.title, t.duration, t.album"
-                    " FROM tracks t WHERE t.artist ILIKE %s AND t.title ILIKE %s"
-                    " ORDER BY t.play_count DESC NULLS LAST, t.track_id ASC LIMIT 1",
-                    (pat_a, pat_t),
                 )
                 row = cur.fetchone()
 
@@ -1901,19 +1922,17 @@ def scan_track(
         if src_row and src_row["url"]:
             source_info = {"url": src_row["url"], "found_now": False}
 
-        if not missing_before:
-            return json.dumps({
-                "track_id": tid,
-                "artist": artist_name,
-                "title": title_name,
-                "missing_before": [],
-                "source": source_info,
-                "mode_used": mode,
-                "status": "complete",
-                "steps_done": [],
-                "steps_failed": [],
-                "note": "Track is already complete (no missing analysis or vectors).",
-            }, indent=2)
+        # Timings are opt-in; treat empty or timings-only as complete
+        if not missing_before or missing_before == ["timings"]:
+            note = (
+                "Track is complete (word timings are opt-in; no other analysis pending)."
+                if missing_before == ["timings"]
+                else "Track is already complete (no missing analysis or vectors)."
+            )
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used=mode, status="complete", note=note, dry_run=dry_run,
+            )
 
         # Step 2. Source resolution
         has_source = postprocess_queue.has_downloadable_source(tid, conn)
@@ -1963,78 +1982,48 @@ def scan_track(
                 if is_playing:
                     effective_mode = "sample"
                 else:
-                    return json.dumps({
-                        "track_id": tid,
-                        "artist": artist_name,
-                        "title": title_name,
-                        "missing_before": missing_before,
-                        "source": source_info,
-                        "mode_used": "auto",
-                        "status": "no_source",
-                        "steps_done": [],
-                        "steps_failed": [],
-                        "note": "No downloadable source found, and track is not currently playing.",
-                    }, indent=2)
+                    return _scan_result(
+                        tid, artist_name, title_name, missing_before, source_info,
+                        mode_used="auto", status="no_source",
+                        note="No downloadable source found, and track is not currently playing.",
+                        dry_run=dry_run,
+                    )
 
         # Execute by effective mode
         if effective_mode == "queue":
             has_dl = postprocess_queue.has_downloadable_source(tid, conn) or (source_info and bool(source_info.get("url")))
             if not has_dl:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": None,
-                    "mode_used": "queue",
-                    "status": "no_source",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Cannot queue track: no downloadable source found.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, None,
+                    mode_used="queue", status="no_source",
+                    note="Cannot queue track: no downloadable source found.",
+                    dry_run=dry_run,
+                )
 
             if dry_run:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "queue",
-                    "status": "queued",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Dry run: task would be published to RabbitMQ post-processing queue with full=True.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="would_queue",
+                    note="Dry run: task would be published to RabbitMQ post-processing queue with full=True.",
+                    dry_run=True,
+                )
 
             target_url = source_info.get("url", "") if source_info else ""
             ok = postprocess_queue.publish_postprocess_task(artist_name, title_name, url=target_url, full=True)
             if ok:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "queue",
-                    "status": "queued",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Call scan_track again (dry_run=true) to see what is still missing.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="queued",
+                    note="Call scan_track again (dry_run=true) to see what is still missing.",
+                    dry_run=False,
+                )
             else:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "queue",
-                    "status": "error",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Failed to publish postprocess task to RabbitMQ broker.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="error",
+                    note="Failed to publish postprocess task to RabbitMQ broker.",
+                    dry_run=False,
+                )
 
         elif effective_mode == "sample":
             is_playing = False
@@ -2051,79 +2040,75 @@ def scan_track(
                 log.debug("Error checking now playing for sample: %s", exc)
 
             if not is_playing:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "sample",
-                    "status": "error",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": f"Sample mode requires this track to be playing now (currently playing: track_id={now_playing_tid}).",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    note=f"Sample mode requires this track to be playing now (currently playing: track_id={now_playing_tid}).",
+                    dry_run=dry_run,
+                )
 
             if dry_run:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "sample",
-                    "status": "sampled",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": f"Dry run: would record {sample_seconds:.0f}s from desktop audio monitor and analyse key/BPM/CLAP.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="would_sample",
+                    note=f"Dry run: would record {sample_seconds:.0f}s from desktop audio monitor and analyse key/BPM/CLAP.",
+                    dry_run=True,
+                )
 
-            from . import sample_audio, clap_vector
-            sample_audio.sample_and_analyse(artist_name, title_name, seconds=sample_seconds, conn=conn)
-            done = ["analysis"]
-            if clap_vector.available():
-                done.append("clap")
-            return json.dumps({
-                "track_id": tid,
-                "artist": artist_name,
-                "title": title_name,
-                "missing_before": missing_before,
-                "source": source_info,
-                "mode_used": "sample",
-                "status": "sampled",
-                "steps_done": done,
-                "steps_failed": [],
-                "note": f"Sampled {sample_seconds:.0f}s from desktop audio; updated key/BPM/CLAP (chords not available from sample).",
-            }, indent=2)
+            from . import sample_audio
+            done: list[str] = []
+            failed: list[str] = []
+            try:
+                result = sample_audio.sample_and_analyse(
+                    artist_name, title_name, seconds=sample_seconds, conn=conn
+                )
+                if getattr(result, "key", None) is not None or getattr(result, "bpm", None) is not None:
+                    done.append("analysis")
+                else:
+                    failed.append("analysis")
+                if search.clap_vector_for(tid) is not None:
+                    done.append("clap")
+            except (sample_audio.AnalysisUnavailable, sample_audio.CaptureError, sample_audio.CaptureAborted) as exc:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    steps_failed=["sample"],
+                    note=f"Sample audio capture/analysis failed: {exc}",
+                    dry_run=False,
+                )
+            except Exception as exc:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    steps_failed=["sample"],
+                    note=f"Sample audio failed unexpectedly: {exc}",
+                    dry_run=False,
+                )
+
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used="sample", status="sampled",
+                steps_done=done, steps_failed=failed,
+                note=f"Sampled {sample_seconds:.0f}s from desktop audio; updated key/BPM/CLAP (chords not available from sample).",
+                dry_run=False,
+            )
 
         elif effective_mode == "inline":
             if dry_run:
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "inline",
-                    "status": "analysed",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Dry run: would audit audio and run inline processing pipeline.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="inline", status="would_analyse",
+                    note="Dry run: would audit audio and run inline processing pipeline.",
+                    dry_run=True,
+                )
 
             if not postprocess_queue.claim(artist_name, title_name, conn):
-                return json.dumps({
-                    "track_id": tid,
-                    "artist": artist_name,
-                    "title": title_name,
-                    "missing_before": missing_before,
-                    "source": source_info,
-                    "mode_used": "inline",
-                    "status": "error",
-                    "steps_done": [],
-                    "steps_failed": [],
-                    "note": "Track is already claimed by another post-processing worker.",
-                }, indent=2)
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="inline", status="error",
+                    note="Track is already claimed by another post-processing worker.",
+                    dry_run=False,
+                )
 
             from . import reprocess
             import tempfile
@@ -2132,10 +2117,11 @@ def scan_track(
             failed: list[str] = []
             status = "analysed"
             note = ""
+            allowed_statuses = ("ok", "suspect") if include_suspect else ("ok",)
             try:
                 with tempfile.TemporaryDirectory(prefix="scan-track-") as tmp:
                     audit = reprocess.audit_track(tid, row["duration"], conn, Path(tmp), download=True)
-                    if audit.status in ("ok", "suspect") and audit.wav is not None:
+                    if audit.status in allowed_statuses and audit.wav is not None:
                         track_dict = {
                             "artist": artist_name,
                             "title": title_name,
@@ -2146,24 +2132,21 @@ def scan_track(
                         status = "analysed"
                         note = f"Inline audit {audit.status}; processed {len(done)} steps."
                     else:
-                        status = "error" if audit.status == "broken" else "no_source"
+                        status = "error" if audit.status in ("broken", "suspect") else "no_source"
                         failed = [f"audit_{audit.status}"] + audit.issues
-                        note = f"Audio audit failed: {audit.status} ({'; '.join(audit.issues)})."
+                        if audit.status == "suspect" and not include_suspect:
+                            note = f"Audio audit flagged file as suspect ({'; '.join(audit.issues)}). Pass include_suspect=True to process anyway."
+                        else:
+                            note = f"Audio audit failed: {audit.status} ({'; '.join(audit.issues)})."
             finally:
                 postprocess_queue.release(artist_name, title_name, conn)
 
-            return json.dumps({
-                "track_id": tid,
-                "artist": artist_name,
-                "title": title_name,
-                "missing_before": missing_before,
-                "source": source_info,
-                "mode_used": "inline",
-                "status": status,
-                "steps_done": done,
-                "steps_failed": failed,
-                "note": note,
-            }, indent=2)
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used="inline", status=status,
+                steps_done=done, steps_failed=failed, note=note,
+                dry_run=False,
+            )
 
 
 @dj_mcp.tool()

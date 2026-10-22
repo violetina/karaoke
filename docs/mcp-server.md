@@ -70,7 +70,7 @@ text/event-stream"`, or just hit `/health`.
 | `clear_dj_playlist` | Empty all tracks from a DJ playlist locally and on YouTube Music | `playlist_id` (default `dj-list`) |
 | `search_by_chords` | Search tracks by v2 chord progressions (Roman numerals like `'ii V I'` or chord names like `'Am F C G'`), functional harmony style (`jazz-functional`, `blues`, `andalusian`, `triadic`, `mixed`), and cadences | `progression`, `chords_used`, `style`, `cadence`, `form`, `min_blues_score`, `key`, `only_synced_lyrics` |
 | `get_track_chords` | Inspect a track's v2 chord timeline, functional harmony summary, cadences, and top recurring chord/Roman progressions | `track_id`, `artist`, `title`, `max_chords` |
-| `scan_track` | Find a playable source for an unanalysed track and run or queue the post-processing pipeline (key/BPM, chords, CLAP, sync, vectors) | `track_id`, `artist`, `title`, `mode` (`auto`, `queue`, `inline`, `sample`), `find_source`, `sample_seconds`, `dry_run` |
+| `scan_track` | Find a playable source for an unanalysed track and run or queue the post-processing pipeline (key/BPM, chords, CLAP, sync, vectors). Returns status (`queued`, `sampled`, `analysed`, `complete`, `no_source`, or dry-run `would_*`) and missing steps. | `track_id`, `artist`, `title`, `mode` (`auto`, `queue`, `inline`, `sample`), `find_source`, `sample_seconds`, `include_suspect`, `dry_run` |
 | `get_similarity_graph` | Generate node-link graph data across chord motion, semantic lyrics, emotional mood, CLAP timbre, or Camelot keys | `track_id`, `playlist_id`, `strategy` (`structural`, `context`, `mood`, `acoustic`, `harmonic`), `hops`, `limit_per_node` |
 
 ### Interactive Similarity Constellation (`/graph`)
