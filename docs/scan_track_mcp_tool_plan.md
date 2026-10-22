@@ -1,7 +1,6 @@
 # `scan_track` MCP tool — plan
 
-**Status: spec only, not implemented.** Written 2026-10-22. Implementation is
-handed to Gemini on the `feat/mcp-scan-track` PR.
+**Status: done.** Implemented 2026-10-22 on PR #124 (`feat/mcp-scan-track`).
 
 The short version: add one MCP tool that takes a track with no analysis, finds
 it a playable source when it has none, and runs the existing post-processing

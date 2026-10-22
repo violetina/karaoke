@@ -46,6 +46,7 @@ def test_mcp_server_definition():
     assert "list_playlists" in tool_names
     assert "search_by_chords" in tool_names
     assert "get_track_chords" in tool_names
+    assert "scan_track" in tool_names
 
 
 def test_search_songs():
@@ -721,3 +722,151 @@ def test_play_playlist_rejects_bad_position(launcher, dj_and_custom_playlists):
     res = json.loads(mcp_server.play_playlist(playlist_id="PLdjlist0001", start_position=3))
     assert "error" in res
     assert calls == []
+
+
+def test_scan_track_complete_track(playable_track, monkeypatch):
+    """A fully analysed track returns status 'complete' without doing any work."""
+    from karaoke import postprocess_queue, search
+    monkeypatch.setattr(postprocess_queue, "needs_postprocessing", lambda tid, conn: [])
+    monkeypatch.setattr(search, "clap_vector_for", lambda tid: [0.1] * 512)
+
+    res = json.loads(mcp_server.scan_track(track_id=playable_track))
+    assert res["status"] == "complete"
+    assert res["missing_before"] == []
+    assert res["track_id"] == playable_track
+    assert res["source"] is not None
+    assert res["steps_done"] == []
+
+
+def test_scan_track_finds_source_and_queues(monkeypatch):
+    """When a track has no source, scan_track finds one and queues postprocessing."""
+    from karaoke import find_sources, localcache, postprocess_queue, search
+
+    tid = 8801
+    with localcache.connect() as conn:
+        conn.execute(
+            "INSERT INTO tracks (track_id, artist, title, album, duration, play_count) VALUES (%s, %s, %s, %s, %s, %s)",
+            (tid, "Artist X", "Song Y", "Album Z", 180.0, 0),
+        )
+
+    monkeypatch.setattr(postprocess_queue, "needs_postprocessing", lambda t, c: ["analysis", "chords"])
+    monkeypatch.setattr(search, "clap_vector_for", lambda t: None)
+    monkeypatch.setattr(find_sources, "resolve_and_save_source", lambda t, c: "https://www.youtube.com/watch?v=mockFound123")
+
+    published_tasks = []
+
+    def mock_publish(artist, title, url="", full=False, **kw):
+        published_tasks.append({"artist": artist, "title": title, "url": url, "full": full})
+        return True
+
+    monkeypatch.setattr(postprocess_queue, "publish_postprocess_task", mock_publish)
+
+    res = json.loads(mcp_server.scan_track(track_id=tid, mode="auto"))
+    assert res["status"] == "queued"
+    assert res["mode_used"] == "queue"
+    assert "analysis" in res["missing_before"]
+    assert "clap" in res["missing_before"]
+    assert res["source"]["url"] == "https://www.youtube.com/watch?v=mockFound123"
+    assert res["source"]["found_now"] is True
+    assert len(published_tasks) == 1
+    assert published_tasks[0]["full"] is True
+    assert published_tasks[0]["url"] == "https://www.youtube.com/watch?v=mockFound123"
+
+
+def test_scan_track_dry_run_never_writes(monkeypatch):
+    """dry_run=True must report candidate source and missing steps without writing to DB or broker."""
+    from karaoke import find_sources, localcache, postprocess_queue, search
+
+    tid = 8802
+    with localcache.connect() as conn:
+        conn.execute(
+            "INSERT INTO tracks (track_id, artist, title, album, duration, play_count) VALUES (%s, %s, %s, %s, %s, %s)",
+            (tid, "Artist Dry", "Song Run", "Album", 200.0, 0),
+        )
+
+    monkeypatch.setattr(postprocess_queue, "needs_postprocessing", lambda t, c: ["analysis"])
+    monkeypatch.setattr(search, "clap_vector_for", lambda t: None)
+    monkeypatch.setattr(find_sources, "find_for", lambda cand: {"url": "https://www.youtube.com/watch?v=mockCandidate999"})
+
+    add_source_calls = []
+    publish_calls = []
+    monkeypatch.setattr(localcache, "add_track_source", lambda *a, **k: add_source_calls.append((a, k)))
+    monkeypatch.setattr(postprocess_queue, "publish_postprocess_task", lambda *a, **k: publish_calls.append((a, k)))
+
+    res = json.loads(mcp_server.scan_track(track_id=tid, mode="queue", dry_run=True))
+    assert res["status"] == "queued"
+    assert res["source"]["url"] == "https://www.youtube.com/watch?v=mockCandidate999"
+    assert res["source"]["found_now"] is True
+    assert "analysis" in res["missing_before"]
+    assert len(add_source_calls) == 0
+    assert len(publish_calls) == 0
+
+
+def test_scan_track_sample_mode_rejects_different_playing_track(monkeypatch):
+    """mode='sample' refuses to record if the track is not the one currently playing."""
+    from karaoke import localcache, postprocess_queue, sample_audio, search
+
+    tid = 8803
+    with localcache.connect() as conn:
+        conn.execute(
+            "INSERT INTO tracks (track_id, artist, title, album, duration, play_count) VALUES (%s, %s, %s, %s, %s, %s)",
+            (tid, "Some Band", "Different Song", "Album", 220.0, 0),
+        )
+
+    monkeypatch.setattr(postprocess_queue, "needs_postprocessing", lambda t, c: ["analysis"])
+    monkeypatch.setattr(search, "clap_vector_for", lambda t: None)
+    monkeypatch.setattr(mcp_server, "get_now_playing", lambda: json.dumps({"status": "playing", "track_id": 9999}))
+
+    sample_calls = []
+    monkeypatch.setattr(sample_audio, "sample_and_analyse", lambda *a, **k: sample_calls.append((a, k)))
+
+    res = json.loads(mcp_server.scan_track(track_id=tid, mode="sample"))
+    assert res["status"] == "error"
+    assert "currently playing" in res["note"]
+    assert len(sample_calls) == 0
+
+
+def test_scan_track_no_source_found_and_not_playing(monkeypatch):
+    """When no source is found and track is not playing, status is 'no_source'."""
+    from karaoke import find_sources, localcache, postprocess_queue, search
+
+    tid = 8804
+    with localcache.connect() as conn:
+        conn.execute(
+            "INSERT INTO tracks (track_id, artist, title, album, duration, play_count) VALUES (%s, %s, %s, %s, %s, %s)",
+            (tid, "Obscure Artist", "Rare Song", "Album", 150.0, 0),
+        )
+
+    monkeypatch.setattr(postprocess_queue, "needs_postprocessing", lambda t, c: ["analysis", "chords"])
+    monkeypatch.setattr(search, "clap_vector_for", lambda t: None)
+    monkeypatch.setattr(find_sources, "resolve_and_save_source", lambda t, c: None)
+    monkeypatch.setattr(mcp_server, "get_now_playing", lambda: json.dumps({"status": "idle"}))
+
+    res = json.loads(mcp_server.scan_track(track_id=tid, mode="auto"))
+    assert res["status"] == "no_source"
+    assert res["source"] is None
+
+
+def test_suggest_next_tracks_missing_clap_returns_note(playable_track, monkeypatch):
+    """When the seed has no CLAP vector, acoustic suggestion returns a note pointing to scan_track."""
+    from karaoke import dj_suggest, queue_suggest
+    monkeypatch.setattr(dj_suggest, "suggest", lambda *a, **k: [])
+    monkeypatch.setattr(queue_suggest, "suggest_for_track", lambda *a, **k: [])
+
+    res = json.loads(mcp_server.suggest_next_tracks(track_id=playable_track, strategy="acoustic"))
+    assert res["strategy"] == "acoustic_vector"
+    assert res["suggestions"] == []
+    assert "note" in res
+    assert "scan_track" in res["note"]
+
+
+def test_suggest_next_tracks_flow_fallback_returns_note(playable_track, monkeypatch):
+    """When 'flow' cannot find ranked suggestions, it falls back to harmonic and adds a note."""
+    from karaoke import dj_suggest
+    monkeypatch.setattr(dj_suggest, "suggest", lambda *a, **k: [])
+
+    res = json.loads(mcp_server.suggest_next_tracks(track_id=playable_track, strategy="flow"))
+    assert res["strategy"] == "harmonic"
+    assert "note" in res
+    assert "scan_track" in res["note"]
+
