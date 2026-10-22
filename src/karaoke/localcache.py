@@ -1442,6 +1442,26 @@ def _artist_key(artist: str) -> str:
     return _match_key(re.sub(r"^\s*the\s+", "", artist or "", flags=re.I))
 
 
+def _artist_words(artist: str) -> list[str]:
+    """The artist as match-key words, ignoring a leading "The"."""
+    stripped = re.sub(r"^\s*the\s+", "", artist or "", flags=re.I)
+    return [w for w in (_match_key(p) for p in stripped.split()) if w]
+
+
+def _artist_surname_match(a: str, b: str) -> bool:
+    """True when one credit is the other's trailing words.
+
+    A browser reports "Carlos Santana" where the library stores "Santana" —
+    the band named after him — and the prefix rule cannot see it. Whole
+    words only, so "Air" never matches "Hair".
+    """
+    wa, wb = _artist_words(a), _artist_words(b)
+    if not wa or not wb or len(wa) == len(wb):
+        return False
+    short, long_ = (wa, wb) if len(wa) < len(wb) else (wb, wa)
+    return long_[-len(short):] == short
+
+
 def _title_keys(title: str) -> set[str]:
     """Match keys for a title, with and without trailing bracketed suffixes or page decorations.
 
@@ -1554,6 +1574,8 @@ def find_track_id_relaxed(artist: str, title: str,
             return int(row["track_id"])
         # "James Brown" should match "James Brown & The Famous Flames".
         if got_artist.startswith(want_artist) or want_artist.startswith(got_artist):
+            return int(row["track_id"])
+        if _artist_surname_match(c_artist or artist, row["artist"]):
             return int(row["track_id"])
     return None
 
