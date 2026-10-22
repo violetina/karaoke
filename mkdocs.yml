@@ -109,6 +109,7 @@ nav:
       - Doc workflow plan: design/documentation-agent-workflow-plan.md
       - Events & Postgres migration plan: events_and_postgres_plan.md
       - Saved playlists Postgres migration plan: saved_playlists_postgres_migration_plan.md
+      - scan_track MCP tool plan: scan_track_mcp_tool_plan.md
       - TUI first concept: design/karaoke-tui-first-concept.md
   - Releases:
       - Version 1.2.0: releases/1.2.0.md

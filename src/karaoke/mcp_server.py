@@ -32,7 +32,9 @@ dj_mcp = MCPServer(
         "like 'ii V I' or chord names like 'Am F C G'), functional harmony styles ('jazz-functional', "
         "'blues', 'andalusian', 'triadic', 'mixed') and cadences, analyze playback vibes, find "
         "harmonically compatible tracks using the Camelot wheel and BPM, manage YouTube Music-synced "
-        "DJ playlists (prefer batch `track_ids` when adding multiple songs), and trigger playback."
+        "DJ playlists (prefer batch `track_ids` when adding multiple songs), and trigger playback. "
+        "If a track lacks key/BPM, chords, CLAP vectors or lyric sync, call `scan_track` to find a source "
+        "and run the analysis pipeline."
     ),
 )
 
@@ -410,6 +412,7 @@ def suggest_next_tracks(
         # below when it finds nothing (e.g. a seed without analysis).
         new_strategy = {"chords": "structural", "chord_progression": "structural",
                         "feeling": "mood", "sentiment": "mood"}.get(strategy, strategy)
+        fell_back_from_flow = False
         if new_strategy in ("flow", "harmonic", "energy_up", "cool_down", "mood", "structural"):
             from . import dj_suggest
             try:
@@ -433,12 +436,13 @@ def suggest_next_tracks(
                 }, indent=2)
             if strategy == "flow":
                 strategy = "harmonic"
+                fell_back_from_flow = True
 
         if strategy in ("structural", "chords", "chord_progression"):
             from . import search
             raw = search.similar_chords_for_track(seed_id, k=limit + len(excluded))
             suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
-            return json.dumps({
+            payload = {
                 "seed": {
                     "track_id": seed_id,
                     "artist": seed_track["artist"],
@@ -449,13 +453,19 @@ def suggest_next_tracks(
                 },
                 "strategy": "structural_chord_motion",
                 "suggestions": suggestions,
-            }, indent=2)
+            }
+            if not suggestions:
+                payload["note"] = (
+                    f"No structural chord suggestions found. The seed track '{seed_track['artist']} - {seed_track['title']}' "
+                    f"may lack chord analysis. Run scan_track(track_id={seed_id}) to analyse chords."
+                )
+            return json.dumps(payload, indent=2)
 
         if strategy in ("context", "lyrics", "meaning"):
             from . import search
             raw = search.similar_lyrics_for_track(seed_id, k=limit + len(excluded))
             suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
-            return json.dumps({
+            payload = {
                 "seed": {
                     "track_id": seed_id,
                     "artist": seed_track["artist"],
@@ -466,13 +476,19 @@ def suggest_next_tracks(
                 },
                 "strategy": "context_lyrics_semantic",
                 "suggestions": suggestions,
-            }, indent=2)
+            }
+            if not suggestions:
+                payload["note"] = (
+                    f"No semantic lyric suggestions found. The seed track '{seed_track['artist']} - {seed_track['title']}' "
+                    f"may lack synced lyrics or text embeddings. Run scan_track(track_id={seed_id}) to resolve."
+                )
+            return json.dumps(payload, indent=2)
 
         if strategy in ("mood", "feeling", "sentiment"):
             from . import search
             raw = search.similar_mood_for_track(seed_id, k=limit + len(excluded))
             suggestions = [s for s in raw if s["track_id"] not in excluded][:limit]
-            return json.dumps({
+            payload = {
                 "seed": {
                     "track_id": seed_id,
                     "artist": seed_track["artist"],
@@ -483,14 +499,20 @@ def suggest_next_tracks(
                 },
                 "strategy": "mood_emotion_sentiment",
                 "suggestions": suggestions,
-            }, indent=2)
+            }
+            if not suggestions:
+                payload["note"] = (
+                    f"No mood suggestions found. The seed track '{seed_track['artist']} - {seed_track['title']}' "
+                    f"may lack a mood timeline or sentiment scores. Run scan_track(track_id={seed_id}) to analyse mood."
+                )
+            return json.dumps(payload, indent=2)
 
         if strategy == "acoustic":
             from . import queue_suggest
             # Over-fetch so filtering cannot leave us short of `limit`.
             raw = queue_suggest.suggest_for_track(seed_id, limit=limit + len(excluded))
             suggestions = [s for s in raw if s.track_id not in excluded][:limit]
-            return json.dumps({
+            payload = {
                 "seed": {
                     "track_id": seed_id,
                     "artist": seed_track["artist"],
@@ -510,7 +532,13 @@ def suggest_next_tracks(
                     }
                     for s in suggestions
                 ],
-            }, indent=2)
+            }
+            if not suggestions:
+                payload["note"] = (
+                    f"No acoustic suggestions found. The seed track '{seed_track['artist']} - {seed_track['title']}' "
+                    f"may lack a CLAP audio embedding. Run scan_track(track_id={seed_id}) to compute timbre vectors."
+                )
+            return json.dumps(payload, indent=2)
 
         # Harmonic or Energy transition
         # Determine compatible Camelot keys if seed_camelot is known
@@ -598,7 +626,7 @@ def suggest_next_tracks(
             if len(candidates) >= limit:
                 break
 
-        return json.dumps({
+        out = {
             "seed": {
                 "track_id": seed_id,
                 "artist": seed_track["artist"],
@@ -609,7 +637,18 @@ def suggest_next_tracks(
             },
             "strategy": strategy,
             "suggestions": candidates,
-        }, indent=2)
+        }
+        if fell_back_from_flow:
+            out["note"] = (
+                f"Seed track '{seed_track['artist']} - {seed_track['title']}' lacks CLAP timbre embedding or mood timeline "
+                f"required for 'flow'; fell back to harmonic BPM/key matching. Run scan_track(track_id={seed_id}) to fully analyse."
+            )
+        elif not seed_key_str or seed_track["bpm"] is None:
+            out["note"] = (
+                f"Seed track '{seed_track['artist']} - {seed_track['title']}' lacks detected key/BPM analysis. "
+                f"Run scan_track(track_id={seed_id}) to analyse audio."
+            )
+        return json.dumps(out, indent=2)
 
 
 @dj_mcp.tool()
@@ -1769,6 +1808,345 @@ def get_track_chords(
             "timeline": chords_list[:max_chords],
             "timeline_truncated": len(chords_list) > max_chords,
         }, indent=2)
+
+
+def _scan_result(
+    tid: int,
+    artist_name: str,
+    title_name: str,
+    missing_before: list[str],
+    source_info: Optional[dict[str, Any]],
+    mode_used: str,
+    status: str,
+    steps_done: Optional[list[str]] = None,
+    steps_failed: Optional[list[str]] = None,
+    note: str = "",
+    dry_run: bool = False,
+) -> str:
+    return json.dumps({
+        "track_id": tid,
+        "artist": artist_name,
+        "title": title_name,
+        "missing_before": missing_before,
+        "source": source_info,
+        "mode_used": mode_used,
+        "dry_run": dry_run,
+        "status": status,
+        "steps_done": list(steps_done or []),
+        "steps_failed": list(steps_failed or []),
+        "note": note,
+    }, indent=2)
+
+
+@dj_mcp.tool()
+def scan_track(
+    track_id: Optional[int] = None,
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    mode: str = "auto",
+    find_source: bool = True,
+    sample_seconds: float = 45.0,
+    include_suspect: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Analyse a track that is missing key/BPM, chords, CLAP or lyric sync.
+
+    Finds a playable source if the track has none, then runs or queues the
+    post-processing pipeline (key/BPM analysis, chords, CLAP audio vectors,
+    sync, and search documents).
+
+    Args:
+        track_id: Track ID in the library (optional if artist & title provided).
+        artist: Artist name (used if track_id is omitted).
+        title: Song title (used if track_id is omitted).
+        mode: Processing mode:
+            - 'auto' (default): queue if a downloadable source exists or is found;
+              else sample desktop audio if the track is playing now; else 'no_source'.
+            - 'queue': publish a task to the background Celery/RabbitMQ worker with full=True.
+            - 'inline': run audio audit and pipeline synchronously in this process.
+            - 'sample': record currently playing desktop audio for key/BPM/CLAP (only if this track is playing).
+        find_source: If true and the track has no downloadable source, search and save a YouTube source first.
+        sample_seconds: Capture duration in seconds for sample mode (default 45.0).
+        include_suspect: If true, inline mode also processes files flagged as 'suspect' by the audio audit (e.g. length mismatch).
+        dry_run: If true, inspect missing steps and candidate sources without saving, queuing or sampling anything.
+            Anticipated statuses: 'would_queue', 'would_sample', 'would_analyse', 'complete', or 'no_source'.
+    """
+    if mode not in ("auto", "queue", "inline", "sample"):
+        return json.dumps({"error": f"Invalid mode '{mode}'. Expected 'auto', 'queue', 'inline', or 'sample'."})
+
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        row = None
+        if track_id is not None:
+            cur.execute(
+                "SELECT t.track_id, t.artist, t.title, t.duration, t.album"
+                " FROM tracks t WHERE t.track_id = %s",
+                (track_id,),
+            )
+            row = cur.fetchone()
+        elif artist or title:
+            tid = localcache.find_track_id(artist or "", title or "", conn)
+            if tid is not None:
+                cur.execute(
+                    "SELECT t.track_id, t.artist, t.title, t.duration, t.album"
+                    " FROM tracks t WHERE t.track_id = %s",
+                    (tid,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return json.dumps({"error": f"Track not found (track_id={track_id}, artist={artist}, title={title})."})
+
+        tid = int(row["track_id"])
+        artist_name = row["artist"] or ""
+        title_name = row["title"] or ""
+
+        # Step 1. What is missing
+        from . import postprocess_queue, search
+        missing_before = list(postprocess_queue.needs_postprocessing(tid, conn))
+        if search.clap_vector_for(tid) is None and "clap" not in missing_before:
+            missing_before.append("clap")
+
+        # Check existing source
+        src_row = conn.execute(
+            """
+            SELECT url, kind FROM sources
+            WHERE track_id = %s AND (kind = 'local' OR kind IN ('youtube', 'youtube_music'))
+            ORDER BY CASE WHEN kind = 'local' THEN 0 WHEN kind = 'youtube_music' THEN 1 ELSE 2 END
+            LIMIT 1
+            """,
+            (tid,),
+        ).fetchone()
+
+        source_info: Optional[dict[str, Any]] = None
+        if src_row and src_row["url"]:
+            source_info = {"url": src_row["url"], "found_now": False}
+
+        # Timings are opt-in; treat empty or timings-only as complete
+        if not missing_before or missing_before == ["timings"]:
+            note = (
+                "Track is complete (word timings are opt-in; no other analysis pending)."
+                if missing_before == ["timings"]
+                else "Track is already complete (no missing analysis or vectors)."
+            )
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used=mode, status="complete", note=note, dry_run=dry_run,
+            )
+
+        # Step 2. Source resolution
+        has_source = postprocess_queue.has_downloadable_source(tid, conn)
+        if not has_source and find_source:
+            if dry_run:
+                from . import find_sources
+                from .lyrics import parse_lrc
+                lyr_row = conn.execute(
+                    "SELECT synced_lyrics FROM lyrics WHERE track_id = %s AND kind = 'approved' LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                lines = parse_lrc(lyr_row["synced_lyrics"] if lyr_row else "")
+                cand = find_sources.Candidate(
+                    track_id=tid,
+                    artist=artist_name,
+                    title=title_name,
+                    duration=float(row["duration"]) if row["duration"] else None,
+                    lyric_end=lines[-1][0] if lines else None,
+                )
+                best = find_sources.find_for(cand)
+                if best and best.get("url"):
+                    source_info = {"url": best["url"], "found_now": True}
+            else:
+                from . import find_sources
+                found_url = find_sources.resolve_and_save_source(tid, conn)
+                if found_url:
+                    source_info = {"url": found_url, "found_now": True}
+
+        # Step 3. Determine effective mode
+        effective_mode = mode
+        if effective_mode == "auto":
+            has_dl = postprocess_queue.has_downloadable_source(tid, conn) or (source_info and bool(source_info.get("url")))
+            if has_dl:
+                effective_mode = "queue"
+            else:
+                is_playing = False
+                try:
+                    now_data = json.loads(get_now_playing())
+                    if now_data.get("status") == "playing":
+                        now_tid = now_data.get("track_id")
+                        if not now_tid and now_data.get("artist") and now_data.get("title"):
+                            now_tid = localcache.find_track_id(now_data["artist"], now_data["title"], conn)
+                        if now_tid == tid:
+                            is_playing = True
+                except Exception as exc:
+                    log.debug("Error checking now playing for scan_track: %s", exc)
+                if is_playing:
+                    effective_mode = "sample"
+                else:
+                    return _scan_result(
+                        tid, artist_name, title_name, missing_before, source_info,
+                        mode_used="auto", status="no_source",
+                        note="No downloadable source found, and track is not currently playing.",
+                        dry_run=dry_run,
+                    )
+
+        # Execute by effective mode
+        if effective_mode == "queue":
+            has_dl = postprocess_queue.has_downloadable_source(tid, conn) or (source_info and bool(source_info.get("url")))
+            if not has_dl:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, None,
+                    mode_used="queue", status="no_source",
+                    note="Cannot queue track: no downloadable source found.",
+                    dry_run=dry_run,
+                )
+
+            if dry_run:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="would_queue",
+                    note="Dry run: task would be published to RabbitMQ post-processing queue with full=True.",
+                    dry_run=True,
+                )
+
+            target_url = source_info.get("url", "") if source_info else ""
+            ok = postprocess_queue.publish_postprocess_task(artist_name, title_name, url=target_url, full=True)
+            if ok:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="queued",
+                    note="Call scan_track again (dry_run=true) to see what is still missing.",
+                    dry_run=False,
+                )
+            else:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="queue", status="error",
+                    note="Failed to publish postprocess task to RabbitMQ broker.",
+                    dry_run=False,
+                )
+
+        elif effective_mode == "sample":
+            is_playing = False
+            now_playing_tid = None
+            try:
+                now_data = json.loads(get_now_playing())
+                if now_data.get("status") == "playing":
+                    now_playing_tid = now_data.get("track_id")
+                    if not now_playing_tid and now_data.get("artist") and now_data.get("title"):
+                        now_playing_tid = localcache.find_track_id(now_data["artist"], now_data["title"], conn)
+                    if now_playing_tid == tid:
+                        is_playing = True
+            except Exception as exc:
+                log.debug("Error checking now playing for sample: %s", exc)
+
+            if not is_playing:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    note=f"Sample mode requires this track to be playing now (currently playing: track_id={now_playing_tid}).",
+                    dry_run=dry_run,
+                )
+
+            if dry_run:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="would_sample",
+                    note=f"Dry run: would record {sample_seconds:.0f}s from desktop audio monitor and analyse key/BPM/CLAP.",
+                    dry_run=True,
+                )
+
+            from . import sample_audio
+            done: list[str] = []
+            failed: list[str] = []
+            try:
+                result = sample_audio.sample_and_analyse(
+                    artist_name, title_name, seconds=sample_seconds, conn=conn
+                )
+                if getattr(result, "key", None) is not None or getattr(result, "bpm", None) is not None:
+                    done.append("analysis")
+                else:
+                    failed.append("analysis")
+                if search.clap_vector_for(tid) is not None:
+                    done.append("clap")
+            except (sample_audio.AnalysisUnavailable, sample_audio.CaptureError, sample_audio.CaptureAborted) as exc:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    steps_failed=["sample"],
+                    note=f"Sample audio capture/analysis failed: {exc}",
+                    dry_run=False,
+                )
+            except Exception as exc:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="sample", status="error",
+                    steps_failed=["sample"],
+                    note=f"Sample audio failed unexpectedly: {exc}",
+                    dry_run=False,
+                )
+
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used="sample", status="sampled",
+                steps_done=done, steps_failed=failed,
+                note=f"Sampled {sample_seconds:.0f}s from desktop audio; updated key/BPM/CLAP (chords not available from sample).",
+                dry_run=False,
+            )
+
+        elif effective_mode == "inline":
+            if dry_run:
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="inline", status="would_analyse",
+                    note="Dry run: would audit audio and run inline processing pipeline.",
+                    dry_run=True,
+                )
+
+            if not postprocess_queue.claim(artist_name, title_name, conn):
+                return _scan_result(
+                    tid, artist_name, title_name, missing_before, source_info,
+                    mode_used="inline", status="error",
+                    note="Track is already claimed by another post-processing worker.",
+                    dry_run=False,
+                )
+
+            from . import reprocess
+            import tempfile
+            from pathlib import Path
+            done: list[str] = []
+            failed: list[str] = []
+            status = "analysed"
+            note = ""
+            allowed_statuses = ("ok", "suspect") if include_suspect else ("ok",)
+            try:
+                with tempfile.TemporaryDirectory(prefix="scan-track-") as tmp:
+                    audit = reprocess.audit_track(tid, row["duration"], conn, Path(tmp), download=True)
+                    if audit.status in allowed_statuses and audit.wav is not None:
+                        track_dict = {
+                            "artist": artist_name,
+                            "title": title_name,
+                            "album": row["album"] or "",
+                            "duration": row["duration"],
+                        }
+                        done, failed = reprocess.process(tid, track_dict, audit.wav, conn, skip_sync=False)
+                        status = "analysed"
+                        note = f"Inline audit {audit.status}; processed {len(done)} steps."
+                    else:
+                        status = "error" if audit.status in ("broken", "suspect") else "no_source"
+                        failed = [f"audit_{audit.status}"] + audit.issues
+                        if audit.status == "suspect" and not include_suspect:
+                            note = f"Audio audit flagged file as suspect ({'; '.join(audit.issues)}). Pass include_suspect=True to process anyway."
+                        else:
+                            note = f"Audio audit failed: {audit.status} ({'; '.join(audit.issues)})."
+            finally:
+                postprocess_queue.release(artist_name, title_name, conn)
+
+            return _scan_result(
+                tid, artist_name, title_name, missing_before, source_info,
+                mode_used="inline", status=status,
+                steps_done=done, steps_failed=failed, note=note,
+                dry_run=False,
+            )
 
 
 @dj_mcp.tool()
