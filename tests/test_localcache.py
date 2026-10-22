@@ -245,3 +245,31 @@ def test_find_track_id_relaxed_youtube_decorations_and_artist_prefix(c):
     # Should match even if artist is empty when title starts with artist prefix
     relaxed_id2 = localcache.find_track_id_relaxed("", "Madness - Going To The Top (Official Audio)", c)
     assert relaxed_id2 == tid
+
+
+def test_find_track_id_relaxed_artist_trailing_words(c):
+    # The player reports "Carlos Santana"; the library stores the band.
+    localcache.add_track_and_lyrics(
+        "Santana", "Dance Sister Dance (Baila Mi Hermana) [Live]",
+        Lyrics(plain="lyrics", source="manual"), conn=c)
+    tid = localcache.find_track_id("Santana", "Dance Sister Dance (Baila Mi Hermana) [Live]", c)
+    assert tid is not None
+
+    assert localcache.find_track_id_relaxed(
+        "Carlos Santana", "Dance Sister Dance (Baila Mi Hermana)", c) == tid
+
+
+def test_find_track_id_relaxed_artist_whole_words_only(c):
+    localcache.add_track_and_lyrics("Hair", "Aquarius", Lyrics(plain="lyrics", source="manual"), conn=c)
+    assert localcache.find_track_id_relaxed("Air", "Aquarius", c) is None
+
+
+def test_artist_surname_match():
+    m = localcache._artist_surname_match
+    assert m("Carlos Santana", "Santana")
+    assert m("Santana", "Carlos Santana")
+    assert m("Amy Winehouse", "Tony Bennett & Amy Winehouse")
+    assert not m("Air", "Hair")
+    assert not m("Santana", "Santana")          # equal: the exact rules own that
+    assert not m("Carlos Santana", "Santana Brothers")
+    assert not m("", "Santana")
