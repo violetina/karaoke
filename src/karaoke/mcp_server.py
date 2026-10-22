@@ -54,7 +54,9 @@ def search_songs(
 
     Args:
         query: Artist, title, or album substring match.
-        genre: Genre filter (e.g. 'Rock', 'Metal', 'Pop', 'Indie').
+        genre: Genre filter, matched like the TUI's H filter: the artist's broad genre
+            (blues, jazz, rock, metal, punk, folk, country, electronic, hip hop, soul,
+            reggae, classical, pop, ambient, latin, world) or a specific one (e.g. 'funk').
         key: Musical key (e.g. 'A minor', 'Am') or Camelot wheel code (e.g. '8A', '8B').
         min_bpm: Minimum tempo in beats per minute.
         max_bpm: Maximum tempo in beats per minute.
@@ -109,8 +111,23 @@ def search_songs(
             params.extend([pat, pat, pat, pat])
 
         if genre.strip():
-            where_clauses.append("g.genre ILIKE %s")
-            params.append(f"%{genre.strip()}%")
+            # Same match as the TUI's H genre filter: an artist's genres (broad
+            # or specific) when the artist is classified, the track's own CLAP
+            # genre only otherwise. CLAP alone tags Django Reinhardt "blues"
+            # and Hendrix "punk rock".
+            if localcache.table_exists(conn, "artist_genres"):
+                where_clauses.append("""(
+                    EXISTS (SELECT 1 FROM artist_genres ag
+                            WHERE (lower(trim(ag.broad_genre)) = lower(trim(%s))
+                                   OR lower(trim(ag.genre)) = lower(trim(%s)))
+                              AND ag.artist_normalized = lower(trim(t.artist)))
+                    OR (NOT EXISTS (SELECT 1 FROM artist_genres ag
+                                    WHERE ag.artist_normalized = lower(trim(t.artist)))
+                        AND lower(trim(COALESCE(g.genre, ''))) = lower(trim(%s))))""")
+                params.extend([genre.strip()] * 3)
+            else:
+                where_clauses.append("lower(trim(COALESCE(g.genre, ''))) = lower(trim(%s))")
+                params.append(genre.strip())
 
         if min_bpm > 0:
             where_clauses.append("a.bpm >= %s")
