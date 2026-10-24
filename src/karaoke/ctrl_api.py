@@ -1040,6 +1040,29 @@ def get_mood_pixels(mood: str = "neutral", energy: float = 0.5, bpm: float = 120
     return {"pixels": pixels}
 
 
+FEELING_FALLBACKS: dict[str, str] = {
+    "frustrated": "angry",
+    "intense": "angry",
+    "dramatic": "angry",
+    "tense": "angry",
+    "defiant": "angry",
+    "cheerful": "happy",
+    "energetic": "happy",
+    "festive": "happy",
+    "uplifting": "happy",
+    "romantic": "tender",
+    "dreamy": "tender",
+    "calm": "tender",
+    "hopeful": "tender",
+    "melancholic": "sad",
+    "blue": "sad",
+    "wistful": "sad",
+    "longing": "tender",
+    "ironic": "cynical",
+    "bittersweet": "sad",
+}
+
+
 @app.get("/api/mood-art")
 def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0):
     import io, random, os
@@ -1051,7 +1074,12 @@ def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0)
     use_custom = random.choice([True, False])
     if use_custom:
         base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
-        mood_dir = os.path.join(base_dir, mood)
+        mood_clean = (mood or "neutral").lower().strip()
+        mood_dir = os.path.join(base_dir, mood_clean)
+        if not os.path.isdir(mood_dir):
+            fallback_mood = FEELING_FALLBACKS.get(mood_clean)
+            if fallback_mood:
+                mood_dir = os.path.join(base_dir, fallback_mood)
         if os.path.isdir(mood_dir):
             files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
             if files:
@@ -1093,7 +1121,7 @@ def get_mood_art(mood: str = "neutral", energy: float = 0.5, bpm: float = 120.0)
 @app.get("/api/mood-feeling-image")
 def get_mood_feeling_image(mood: str = "neutral"):
     """Return the generated pixel-art feeling image for the given mood."""
-    import os
+    import os, random
     from fastapi.responses import FileResponse
     base_dir = os.path.join(os.path.dirname(__file__), "static", "images", "moods")
     mood_clean = (mood or "neutral").lower().strip()
@@ -1101,7 +1129,14 @@ def get_mood_feeling_image(mood: str = "neutral"):
     if os.path.isdir(mood_dir):
         files = [f for f in os.listdir(mood_dir) if f.endswith(".png")]
         if files:
-            return FileResponse(os.path.join(mood_dir, sorted(files)[0]))
+            return FileResponse(os.path.join(mood_dir, random.choice(files)))
+    parent = FEELING_FALLBACKS.get(mood_clean)
+    if parent:
+        parent_dir = os.path.join(base_dir, parent)
+        if os.path.isdir(parent_dir):
+            files = [f for f in os.listdir(parent_dir) if f.endswith(".png")]
+            if files:
+                return FileResponse(os.path.join(parent_dir, random.choice(files)))
     fallback = os.path.join(base_dir, "neutral", "1.png")
     if os.path.isfile(fallback):
         return FileResponse(fallback)
