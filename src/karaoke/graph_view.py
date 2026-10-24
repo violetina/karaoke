@@ -96,6 +96,13 @@ STRATEGY_FACT = {
 
 FACTS = ("chords", "sound", "lyrics", "mood", "key", "tempo", "genre")
 
+# The search that finds songs sharing a fact. Requiring a fact adds its
+# search: links from chords alone rarely also share sound, so "must share
+# sound" there left a quarter of the graph. Tempo and genre have no search of
+# their own and stay filters.
+FACT_STRATEGY = {"chords": "structural", "sound": "acoustic", "lyrics": "context",
+                 "mood": "mood", "key": "harmonic"}
+
 # A vector fact holds when two songs are closer than 90% of random library
 # pairs. Measured 2026-10-24 on 1,500 random tracks (4,000 pairs per space);
 # each space's own top-8 neighbours sit well above these (p10: chords 0.967,
@@ -450,9 +457,14 @@ def build_similarity_graph(
     keeps growing through songs that pass instead of ending up empty.
     """
     strategies = parse_strategies(strategy)
-    strategy_label = ",".join(strategies)
     primary = strategies[0]
     required = parse_facts(require)
+    added: list[str] = []
+    for fact in required:
+        if fact in FACT_STRATEGY and fact not in {STRATEGY_FACT[s] for s in strategies}:
+            strategies.append(FACT_STRATEGY[fact])
+            added.append(FACT_STRATEGY[fact])
+    strategy_label = ",".join(strategies)
     min_facts = max(0, min(int(min_facts or 0), len(FACTS)))
     hops = max(1, min(hops, 3))
     limit_per_node = max(1, min(limit_per_node, 8))
@@ -663,6 +675,7 @@ def build_similarity_graph(
             "camelot_filter": camelot_filter,
             "mood_filter": mood_filter,
             "require": required,
+            "added_strategies": added,
             "min_facts": min_facts,
             "fact_thresholds": FACT_THRESHOLDS,
         },
@@ -1617,11 +1630,20 @@ GRAPH_HTML = """<!DOCTYPE html>
       return picked.length ? picked : ['structural'];
     }
 
+    // The search behind each fact (graph_view.FACT_STRATEGY): requiring a
+    // fact switches its search on, or the walk rarely finds songs that pass.
+    const FACT_STRATEGY = __FACT_STRATEGY__;
+
     function bindChips() {
       document.querySelectorAll('#strategy-chips .chip, #require-chips .chip').forEach(chip => {
         chip.addEventListener('click', () => {
           const on = chip.getAttribute('aria-pressed') !== 'true';
           chip.setAttribute('aria-pressed', String(on));
+          const search = on && FACT_STRATEGY[chip.dataset.fact];
+          if (search) {
+            document.querySelector(`#strategy-chips .chip[data-strategy="${search}"]`)
+              .setAttribute('aria-pressed', 'true');
+          }
           // Links need at least one search behind them.
           if (!on && chip.dataset.strategy && !pressed('#strategy-chips', 'strategy').length) {
             chip.setAttribute('aria-pressed', 'true');
@@ -1702,6 +1724,10 @@ GRAPH_HTML = """<!DOCTYPE html>
 
     function renderCytoscape(data) {
       factThresholds = (data.stats && data.stats.fact_thresholds) || {};
+      ((data.stats && data.stats.added_strategies) || []).forEach(s => {
+        const chip = document.querySelector(`#strategy-chips .chip[data-strategy="${s}"]`);
+        if (chip) chip.setAttribute('aria-pressed', 'true');
+      });
       document.getElementById('why-card').style.display = 'none';
       const elements = [];
       data.nodes.forEach(n => {
@@ -1928,6 +1954,7 @@ GRAPH_HTML = """<!DOCTYPE html>
 # The page's mood colours come from MOOD_COLORS, so the strip, the Mood
 # strategy and /mood cannot drift apart.
 GRAPH_HTML = GRAPH_HTML.replace("__MOOD_COLORS__", json.dumps(MOOD_COLORS))
+GRAPH_HTML = GRAPH_HTML.replace("__FACT_STRATEGY__", json.dumps(FACT_STRATEGY))
 
 
 async def serve_graph_ui(request: Request) -> HTMLResponse:

@@ -188,3 +188,25 @@ def test_without_a_seed_the_graph_starts_from_the_last_played_song(monkeypatch):
         conn.commit()
     data = graph_view.build_similarity_graph(strategy="acoustic")
     assert data["stats"]["seed_ids"] == [7102]
+
+
+def test_requiring_a_fact_adds_its_search(monkeypatch):
+    nodes = {1: _node(1, bpm=120.0), 2: _node(2, bpm=120.0), 3: _node(3, bpm=121.0)}
+    hit = lambda tid: {"track_id": tid, "score": 0.9}
+    # Chords finds 2, which does not sound alike; only the sound search finds 3.
+    neighbours = {("structural", 1): [hit(2)], ("acoustic", 1): [hit(3)]}
+    _fake_library(monkeypatch, nodes, neighbours, {("sound", 1, 3): 0.95, ("sound", 1, 2): 0.2})
+    data = graph_view.build_similarity_graph(track_id=1, strategy="structural", hops=1,
+                                             require="sound,tempo")
+    assert data["stats"]["strategy"] == "structural,acoustic"
+    assert data["stats"]["added_strategies"] == ["acoustic"]     # tempo has no search
+    assert {n["track_id"] for n in data["nodes"]} == {1, 3}
+    # Already searched under an alias: nothing added.
+    data = graph_view.build_similarity_graph(track_id=1, strategy="chords", hops=1, require="chords")
+    assert data["stats"]["added_strategies"] == []
+
+
+def test_the_page_knows_which_search_each_fact_needs():
+    page = graph_view.GRAPH_HTML
+    assert "__FACT_STRATEGY__" not in page
+    assert '"sound": "acoustic"' in page
