@@ -105,6 +105,11 @@ FACT_THRESHOLDS = {"chords": 0.915, "sound": 0.845, "lyrics": 0.356}
 # Two tempos agree within 6%, counting half and double time as the same pulse.
 TEMPO_TOLERANCE = 0.06
 
+# Per song and space, at most this many links to one act. Sound neighbours
+# are mostly the same artist (Sinatra's are Sinatra, Iron Maiden's its live
+# versions), so without a cap a hop shows nothing new.
+LINKS_PER_ACT = 1
+
 
 def parse_strategies(strategy: str) -> list[str]:
     """Split 'structural,acoustic' into known strategies, keeping order."""
@@ -140,7 +145,8 @@ def _neighbours(curr_id: int, strategy: str, k: int) -> list[dict[str, Any]]:
             {"track_id": h.track_id, "score": round(h.similarity, 3), "space": space}
             for h in raw_hits
         ]
-    # harmonic: Camelot adjacent tracks
+    # harmonic: songs in a key that mixes, closest tempo first. Ranking by
+    # play count put the most-played song next to a sixth of the library.
     neighbors: list[dict[str, Any]] = []
     try:
         with localcache.connect() as conn:
@@ -154,29 +160,39 @@ def _neighbours(curr_id: int, strategy: str, k: int) -> list[dict[str, Any]]:
                 k_obj = musictheory.parse_key(arow["detected_key"])
                 if k_obj and k_obj.camelot and k_obj.camelot != "?":
                     compat = _camelot_compatible(k_obj.camelot)
-                    cur.execute("""
-                        SELECT t.track_id, a.detected_key, a.bpm
+                    # Key names are stored as text ("E minor"); only a few
+                    # dozen distinct ones exist, so match them in Python.
+                    names = [r["detected_key"] for r in cur.execute(
+                        "SELECT DISTINCT detected_key FROM track_analysis"
+                        " WHERE COALESCE(detected_key, '') <> ''").fetchall()
+                             if (pk := musictheory.parse_key(r["detected_key"])) and pk.camelot in compat]
+                    bpm = float(arow["bpm"]) if arow["bpm"] else None
+                    # Distance to the nearest of the tempo, its half and its double.
+                    # Detected tempos snap to a few values (117.5, 107.7...), so
+                    # many songs tie; break ties per seed, not by track id, or
+                    # every 117.5 BPM song gets the same neighbours.
+                    shuffle = "md5(t.track_id::text || %(seed)s::text)"
+                    order = ("LEAST(abs(a.bpm - %(bpm)s), abs(a.bpm * 2 - %(bpm)s), abs(a.bpm / 2 - %(bpm)s)), "
+                             + shuffle if bpm else shuffle)
+                    cur.execute(f"""
+                        SELECT t.track_id, a.bpm
                         FROM tracks t
                         JOIN track_analysis a ON a.track_id = t.track_id
-                        WHERE t.track_id != %s AND a.detected_key IS NOT NULL
-                        ORDER BY t.play_count DESC, t.track_id ASC
-                        LIMIT 60
-                    """, (curr_id,))
+                        WHERE t.track_id != %(seed)s AND a.detected_key = ANY(%(names)s)
+                          AND a.bpm IS NOT NULL
+                        ORDER BY {order}
+                        LIMIT %(k)s
+                    """, {"seed": curr_id, "names": names, "bpm": bpm, "k": k})
                     for r in cur.fetchall():
-                        cand_key = r.get("detected_key")
-                        if not cand_key:
-                            continue
-                        rk = musictheory.parse_key(cand_key)
-                        if rk and rk.camelot in compat:
-                            neighbors.append({
-                                "track_id": r["track_id"],
-                                "score": 0.9,
-                                "space": "camelot",
-                            })
-                            if len(neighbors) >= k:
-                                break
-    except Exception:
-        pass
+                        drift = (min(abs(r["bpm"] * f / bpm - 1.0) for f in (1.0, 0.5, 2.0))
+                                 if bpm else 0.1)
+                        neighbors.append({
+                            "track_id": r["track_id"],
+                            "score": round(max(0.0, 1.0 - drift), 3),
+                            "space": "camelot",
+                        })
+    except Exception as exc:
+        log.debug("graph: harmonic neighbours of %s failed: %s", curr_id, exc)
     return neighbors
 
 
@@ -482,6 +498,8 @@ def build_similarity_graph(
                 log.debug("No active player seed found: %s", exc)
 
         if not seed_ids:
+            # Nothing playing: start from the song played last. The most
+            # played one was a single song inflated by development replays.
             cur = conn.cursor()
             params: list[Any] = []
             where_clauses = ["a.bpm IS NOT NULL"]
@@ -493,8 +511,13 @@ def build_similarity_graph(
                 SELECT t.track_id FROM tracks t
                 JOIN track_analysis a ON a.track_id = t.track_id
                 LEFT JOIN track_genre g ON g.track_id = t.track_id
+                LEFT JOIN LATERAL (
+                    SELECT max(p.ts) AS ts FROM play_events p
+                    WHERE p.event IN ('play', 'discover')
+                      AND lower(p.artist) = lower(t.artist) AND lower(p.title) = lower(t.title)
+                ) last ON true
                 WHERE {where_sql}
-                ORDER BY t.play_count DESC, t.track_id ASC
+                ORDER BY last.ts DESC NULLS LAST, t.play_count DESC, t.track_id ASC
                 LIMIT 1
             """, tuple(params))
             row = cur.fetchone()
@@ -520,7 +543,9 @@ def build_similarity_graph(
                      or genre_filter or camelot_filter or mood_filter)
     # Over-fetch when links may be refused, so a filtered song still gets
     # `limit_per_node` links per space where they exist.
-    fetch_k = 40 if filtering else limit_per_node
+    # Over-fetch for variety too: same-act links and other versions of the
+    # same song are skipped.
+    fetch_k = 60 if filtering else min(limit_per_node * 8, 60)
 
     MAX_TOTAL_GRAPH_NODES = 80
     visited: set[int] = set()
@@ -548,7 +573,15 @@ def build_similarity_graph(
         nodes.update(_load_nodes(new_ids, seed_ids, primary))
         vectors.load([curr_id] + new_ids)
 
+        from .dj_suggest import artist_key
+        from .smart_playlists import song_key
+
         taken: dict[str, int] = {}
+        curr = nodes[curr_id]
+        # Per space: acts linked so far, and songs already linked (the
+        # current one included, so its other versions are skipped too).
+        acts: dict[str, dict[str, int]] = {}
+        songs: dict[str, set[str]] = {}
         for strat, nbr in found:
             tid = int(nbr.get("track_id") or 0)
             if not tid or tid == curr_id or tid not in nodes or taken.get(strat, 0) >= limit_per_node:
@@ -559,6 +592,13 @@ def build_similarity_graph(
             if min_score is not None and score < min_score:
                 continue
             target = nodes[tid]
+            act, song = artist_key(target.get("artist") or ""), song_key(target.get("title") or "")
+            strat_acts = acts.setdefault(strat, {})
+            strat_songs = songs.setdefault(strat, {song_key(curr.get("title") or "")})
+            if song and song in strat_songs:
+                continue
+            if act and strat_acts.get(act, 0) >= LINKS_PER_ACT:
+                continue
             if tid not in seed_ids and not _node_passes(
                     target, bpm_min, bpm_max, genre_filter, camelot_filter, mood_filter):
                 continue
@@ -567,6 +607,8 @@ def build_similarity_graph(
             if any(f not in agree for f in required) or len(agree) < min_facts:
                 continue
             taken[strat] = taken.get(strat, 0) + 1
+            strat_acts[act] = strat_acts.get(act, 0) + 1
+            strat_songs.add(song)
             linked.add(tid)
             edge_key = (min(curr_id, tid), max(curr_id, tid))
             edge = edges.get(edge_key)

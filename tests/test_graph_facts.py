@@ -135,3 +135,56 @@ def test_the_page_offers_combined_facts():
     assert 'id="min-facts-select"' in page and 'id="color-select"' in page
     assert "function showWhyLinked" in page and 'id="why-card"' in page
     assert "strategy-select" not in page
+
+
+def test_links_skip_other_versions_and_cap_each_act(monkeypatch):
+    nodes = {
+        1: _node(1, artist="Frank Sinatra", title="Nice 'n' Easy"),
+        2: _node(2, artist="Frank Sinatra", title="Nice 'n' Easy (Live)"),     # same song
+        3: _node(3, artist="Frank Sinatra", title="September In The Rain"),
+        4: _node(4, artist="Frank Sinatra & Count Basie", title="The Good Life"),  # same act
+        5: _node(5, artist="Ella Fitzgerald", title="Sing My Heart"),
+    }
+    hit = lambda tid: {"track_id": tid, "score": 0.9}
+    _fake_library(monkeypatch, nodes, {("acoustic", 1): [hit(2), hit(3), hit(4), hit(5)]}, {})
+    data = graph_view.build_similarity_graph(track_id=1, strategy="acoustic", hops=1)
+    assert {n["track_id"] for n in data["nodes"]} == {1, 3, 5}
+
+
+def _track(cur, tid, artist, title, key, bpm, plays=0):
+    cur.execute("INSERT INTO tracks (track_id, artist, title, album, duration, play_count)"
+                " VALUES (%s, %s, %s, '', 200.0, %s)", (tid, artist, title, plays))
+    cur.execute("INSERT INTO track_analysis (track_id, detected_key, bpm, energy, updated_at)"
+                " VALUES (%s, %s, %s, 0.5, 0)", (tid, key, bpm))
+
+
+def test_key_links_rank_by_tempo_not_popularity():
+    from karaoke import localcache
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        _track(cur, 7001, "Seed", "Seed Song", "E minor", 120.0)               # 9A
+        _track(cur, 7002, "The Slits", "Grapevine", "E minor", 90.0, plays=388)
+        _track(cur, 7003, "Near", "Same Tempo", "G major", 121.0)              # 9B, relative
+        _track(cur, 7004, "Half", "Half Time", "B minor", 61.0)                # 10A, adjacent
+        _track(cur, 7005, "Clash", "Wrong Key", "F minor", 120.0)              # 4A, does not mix
+        conn.commit()
+    hits = graph_view._neighbours(7001, "harmonic", 3)
+    assert [h["track_id"] for h in hits] == [7003, 7004, 7002]
+    assert hits[0]["score"] > hits[2]["score"]
+
+
+def test_without_a_seed_the_graph_starts_from_the_last_played_song(monkeypatch):
+    from karaoke import localcache, playerctl
+    monkeypatch.setattr(playerctl, "playing_player", lambda: None)
+    monkeypatch.setattr(playerctl, "current_metadata", lambda *a: None)
+    monkeypatch.setattr(graph_view, "_neighbours", lambda tid, strategy, k: [])
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        _track(cur, 7101, "The Slits", "Grapevine", "E minor", 129.0, plays=388)
+        _track(cur, 7102, "Hozier", "Too Sweet", "A# major", 117.5, plays=8)
+        for ts, artist, title in ((100.0, "The Slits", "Grapevine"), (200.0, "Hozier", "Too Sweet")):
+            cur.execute("INSERT INTO play_events (ts, mode, artist, title, event, source, has_synced)"
+                        " VALUES (%s, 'player', %s, %s, 'play', '', 0)", (ts, artist, title))
+        conn.commit()
+    data = graph_view.build_similarity_graph(strategy="acoustic")
+    assert data["stats"]["seed_ids"] == [7102]
