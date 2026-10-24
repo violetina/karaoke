@@ -195,3 +195,21 @@ def test_player_queue_post(ctrl):
         assert res2["status"] == "ok"
         mock_add.assert_called_once_with("dQw4w9WgXcQ")
 
+
+# -- mood images & feeling images -----------------------------------------
+
+def test_mood_feeling_image_serves_extended_feelings(ctrl):
+    for mood in ["festive", "dreamy", "romantic", "melancholic", "frustrated", "uplifting", "intense"]:
+        res = ctrl.get(f"/api/mood-feeling-image?mood={mood}")
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "image/png"
+        assert len(res.content) > 0
+
+
+def test_mood_art_serves_extended_feelings(ctrl):
+    res = ctrl.get("/api/mood-art?mood=festive")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert len(res.content) > 0
+
+

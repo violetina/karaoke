@@ -52,6 +52,28 @@ MOOD_TARGETS: dict[str, MoodTarget] = {
     # Soft pink, gentle, low contrast.
     "tender": MoodTarget(hue=0.90, saturation=0.40, value=0.75, contrast=0.15),
     "neutral": MoodTarget(hue=0.55, saturation=0.20, value=0.55, contrast=0.30),
+    "cynical": MoodTarget(hue=0.33, saturation=0.70, value=0.45, contrast=0.40),
+
+    # Extended feelings
+    "cheerful": MoodTarget(hue=0.14, saturation=0.85, value=0.90, contrast=0.30),
+    "energetic": MoodTarget(hue=0.08, saturation=0.90, value=0.85, contrast=0.50),
+    "festive": MoodTarget(hue=0.92, saturation=0.80, value=0.85, contrast=0.45),
+    "uplifting": MoodTarget(hue=0.55, saturation=0.60, value=0.85, contrast=0.35),
+    "romantic": MoodTarget(hue=0.95, saturation=0.65, value=0.80, contrast=0.25),
+    "dreamy": MoodTarget(hue=0.75, saturation=0.45, value=0.70, contrast=0.25),
+    "calm": MoodTarget(hue=0.45, saturation=0.35, value=0.65, contrast=0.20),
+    "hopeful": MoodTarget(hue=0.12, saturation=0.55, value=0.80, contrast=0.30),
+    "melancholic": MoodTarget(hue=0.62, saturation=0.45, value=0.35, contrast=0.25),
+    "blue": MoodTarget(hue=0.65, saturation=0.70, value=0.40, contrast=0.35),
+    "wistful": MoodTarget(hue=0.80, saturation=0.35, value=0.55, contrast=0.25),
+    "longing": MoodTarget(hue=0.85, saturation=0.50, value=0.55, contrast=0.30),
+    "frustrated": MoodTarget(hue=0.04, saturation=0.75, value=0.45, contrast=0.55),
+    "intense": MoodTarget(hue=0.98, saturation=0.90, value=0.45, contrast=0.65),
+    "dramatic": MoodTarget(hue=0.97, saturation=0.85, value=0.60, contrast=0.60),
+    "tense": MoodTarget(hue=0.15, saturation=0.55, value=0.30, contrast=0.50),
+    "defiant": MoodTarget(hue=0.02, saturation=0.95, value=0.70, contrast=0.60),
+    "ironic": MoodTarget(hue=0.28, saturation=0.80, value=0.60, contrast=0.45),
+    "bittersweet": MoodTarget(hue=0.10, saturation=0.55, value=0.60, contrast=0.35),
 }
 
 # How much each term counts. Hue leads, but not so far that it drags a
