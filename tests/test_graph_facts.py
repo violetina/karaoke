@@ -1,0 +1,212 @@
+"""Combined facts on the similarity graph: links scored on every fact, filters during the walk."""
+from karaoke import graph_view
+
+
+def _node(tid, **kw):
+    base = {"track_id": tid, "id": str(tid), "camelot": "?", "bpm": None, "genre": "",
+            "artist_genres": [], "dominant_mood": None, "is_seed": False}
+    base.update(kw)
+    return base
+
+
+class _FakeVectors:
+    def __init__(self, cosines):
+        self.cosines = cosines  # {(fact, a, b): cosine}
+
+    def load(self, ids):
+        pass
+
+    def cosine(self, fact, a, b):
+        return self.cosines.get((fact, min(a, b), max(a, b)))
+
+
+def test_parse_strategies_keeps_known_ones_in_order():
+    assert graph_view.parse_strategies("acoustic, structural,bogus,acoustic") == ["acoustic", "structural"]
+    assert graph_view.parse_strategies("") == ["structural"]
+    assert graph_view.parse_facts("key, tempo,nonsense") == ["key", "tempo"]
+
+
+def test_edge_facts_scores_every_fact():
+    a = _node(1, camelot="8A", bpm=120.0, dominant_mood="sad", artist_genres=["blues", "blues rock"])
+    b = _node(2, camelot="8B", bpm=61.0, dominant_mood="sad", artist_genres=["blues"])
+    vec = _FakeVectors({("chords", 1, 2): 0.97, ("sound", 1, 2): 0.60})
+    facts = graph_view.edge_facts(a, b, vec)
+    assert facts["chords"] == 0.97 and facts["sound"] == 0.60 and facts["lyrics"] is None
+    assert facts["key"] == "relative key"
+    assert facts["tempo"] is True           # 61 is half time of 120, within 6%
+    assert facts["mood"] is True
+    assert facts["genre"] == "blues"
+    # Sound is below its threshold; lyrics unknown does not count.
+    assert graph_view.agreeing(facts) == ["chords", "mood", "key", "tempo", "genre"]
+
+
+def test_unknowns_are_not_disagreements_and_neutral_mood_is_no_match():
+    a = _node(1, dominant_mood="neutral", genre="rock")
+    b = _node(2, dominant_mood="neutral", camelot="3A")
+    facts = graph_view.edge_facts(a, b, None)
+    assert facts["mood"] is False
+    assert facts["key"] is None and facts["tempo"] is None and facts["genre"] is None
+    assert graph_view.agreeing(facts) == []
+
+
+def test_genre_uses_artist_genres_before_the_clap_guess():
+    # Classified as jazz; CLAP hears blues. Same rule as the TUI's H filter.
+    django = _node(1, genre="blues", artist_genres=["gypsy jazz", "jazz"])
+    assert not graph_view._node_passes(django, None, None, "blues", None, None)
+    assert graph_view._node_passes(django, None, None, "jazz", None, None)
+    unclassified = _node(2, genre="blues rock")
+    assert not graph_view._node_passes(unclassified, None, None, "blues", None, None)
+    assert graph_view._node_passes(unclassified, None, None, "blues rock", None, None)
+
+
+def _fake_library(monkeypatch, nodes, neighbours, cosines):
+    """Serve nodes/neighbours from dicts instead of Postgres and OpenSearch."""
+    monkeypatch.setattr(graph_view, "_load_nodes",
+                        lambda ids, seeds, strategy: {i: dict(nodes[i], is_seed=i in seeds)
+                                                      for i in ids if i in nodes})
+    monkeypatch.setattr(graph_view, "_neighbours",
+                        lambda tid, strategy, k: neighbours.get((strategy, tid), [])[:k])
+    monkeypatch.setattr(graph_view, "_Vectors", lambda: _FakeVectors(cosines))
+
+
+def test_several_strategies_merge_links_and_require_filters_the_walk(monkeypatch):
+    nodes = {
+        1: _node(1, camelot="8A", bpm=120.0),
+        2: _node(2, camelot="8A", bpm=121.0),   # mixes with 1 on key and tempo
+        3: _node(3, camelot="2B", bpm=90.0),    # mixes on neither
+        4: _node(4, camelot="9A", bpm=119.0),   # reached only through 2
+    }
+    hit = lambda tid, score=0.9: {"track_id": tid, "score": score}
+    neighbours = {
+        ("structural", 1): [hit(2), hit(3)],
+        ("acoustic", 1): [hit(2)],
+        ("structural", 2): [hit(4)],
+    }
+    cosines = {("chords", 1, 2): 0.98, ("sound", 1, 2): 0.9}
+    _fake_library(monkeypatch, nodes, neighbours, cosines)
+
+    data = graph_view.build_similarity_graph(track_id=1, strategy="structural,acoustic", hops=2)
+    by_pair = {(e["source"], e["target"]): e for e in data["edges"]}
+    assert set(by_pair) == {("1", "2"), ("1", "3"), ("2", "4")}
+    both = by_pair[("1", "2")]
+    assert both["found_by"] == ["chords", "sound"]       # one link, found by two searches
+    assert both["agree"] == ["chords", "sound", "key", "tempo"] and both["strength"] == 4
+    assert data["stats"]["strategy"] == "structural,acoustic"
+
+    data = graph_view.build_similarity_graph(track_id=1, strategy="structural", hops=2,
+                                             require="key,tempo")
+    # 3 is refused; 4 is still reached through 2, which passed.
+    assert {n["track_id"] for n in data["nodes"]} == {1, 2, 4}
+    assert all({"key", "tempo"} <= set(e["agree"]) for e in data["edges"])
+
+
+def test_node_filters_apply_during_the_walk(monkeypatch):
+    nodes = {
+        1: _node(1, dominant_mood="sad"),
+        2: _node(2, dominant_mood="sad"),
+        3: _node(3, dominant_mood="happy"),
+        4: _node(4, dominant_mood="sad"),
+    }
+    hit = lambda tid: {"track_id": tid, "score": 0.9}
+    neighbours = {("structural", 1): [hit(2), hit(3)], ("structural", 3): [hit(4)],
+                  ("structural", 2): [hit(4)]}
+    _fake_library(monkeypatch, nodes, neighbours, {})
+    data = graph_view.build_similarity_graph(track_id=1, hops=3, mood_filter="happy")
+    # The seed stays whatever its mood; only happy songs join and grow the graph.
+    assert {n["track_id"] for n in data["nodes"]} == {1, 3}
+
+
+def test_the_drawn_graph_stays_under_the_node_cap(monkeypatch):
+    nodes = {i: _node(i) for i in range(1, 400)}
+    neighbours = {}
+    for n, strat in enumerate(("structural", "acoustic", "context")):
+        for i in range(1, 400):
+            neighbours[(strat, i)] = [{"track_id": (i * 7 + j * 13 + n * 101) % 399 + 1,
+                                       "score": 0.9} for j in range(8)]
+    _fake_library(monkeypatch, nodes, neighbours, {})
+    data = graph_view.build_similarity_graph(track_id=1, strategy="structural,acoustic,context",
+                                             hops=3, limit_per_node=8)
+    assert data["stats"]["node_count"] <= 80
+
+
+def test_the_page_offers_combined_facts():
+    page = graph_view.GRAPH_HTML
+    assert 'id="strategy-chips"' in page and 'id="require-chips"' in page
+    assert 'id="min-facts-select"' in page and 'id="color-select"' in page
+    assert "function showWhyLinked" in page and 'id="why-card"' in page
+    assert "strategy-select" not in page
+
+
+def test_links_skip_other_versions_and_cap_each_act(monkeypatch):
+    nodes = {
+        1: _node(1, artist="Frank Sinatra", title="Nice 'n' Easy"),
+        2: _node(2, artist="Frank Sinatra", title="Nice 'n' Easy (Live)"),     # same song
+        3: _node(3, artist="Frank Sinatra", title="September In The Rain"),
+        4: _node(4, artist="Frank Sinatra & Count Basie", title="The Good Life"),  # same act
+        5: _node(5, artist="Ella Fitzgerald", title="Sing My Heart"),
+    }
+    hit = lambda tid: {"track_id": tid, "score": 0.9}
+    _fake_library(monkeypatch, nodes, {("acoustic", 1): [hit(2), hit(3), hit(4), hit(5)]}, {})
+    data = graph_view.build_similarity_graph(track_id=1, strategy="acoustic", hops=1)
+    assert {n["track_id"] for n in data["nodes"]} == {1, 3, 5}
+
+
+def _track(cur, tid, artist, title, key, bpm, plays=0):
+    cur.execute("INSERT INTO tracks (track_id, artist, title, album, duration, play_count)"
+                " VALUES (%s, %s, %s, '', 200.0, %s)", (tid, artist, title, plays))
+    cur.execute("INSERT INTO track_analysis (track_id, detected_key, bpm, energy, updated_at)"
+                " VALUES (%s, %s, %s, 0.5, 0)", (tid, key, bpm))
+
+
+def test_key_links_rank_by_tempo_not_popularity():
+    from karaoke import localcache
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        _track(cur, 7001, "Seed", "Seed Song", "E minor", 120.0)               # 9A
+        _track(cur, 7002, "The Slits", "Grapevine", "E minor", 90.0, plays=388)
+        _track(cur, 7003, "Near", "Same Tempo", "G major", 121.0)              # 9B, relative
+        _track(cur, 7004, "Half", "Half Time", "B minor", 61.0)                # 10A, adjacent
+        _track(cur, 7005, "Clash", "Wrong Key", "F minor", 120.0)              # 4A, does not mix
+        conn.commit()
+    hits = graph_view._neighbours(7001, "harmonic", 3)
+    assert [h["track_id"] for h in hits] == [7003, 7004, 7002]
+    assert hits[0]["score"] > hits[2]["score"]
+
+
+def test_without_a_seed_the_graph_starts_from_the_last_played_song(monkeypatch):
+    from karaoke import localcache, playerctl
+    monkeypatch.setattr(playerctl, "playing_player", lambda: None)
+    monkeypatch.setattr(playerctl, "current_metadata", lambda *a: None)
+    monkeypatch.setattr(graph_view, "_neighbours", lambda tid, strategy, k: [])
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        _track(cur, 7101, "The Slits", "Grapevine", "E minor", 129.0, plays=388)
+        _track(cur, 7102, "Hozier", "Too Sweet", "A# major", 117.5, plays=8)
+        for ts, artist, title in ((100.0, "The Slits", "Grapevine"), (200.0, "Hozier", "Too Sweet")):
+            cur.execute("INSERT INTO play_events (ts, mode, artist, title, event, source, has_synced)"
+                        " VALUES (%s, 'player', %s, %s, 'play', '', 0)", (ts, artist, title))
+        conn.commit()
+    data = graph_view.build_similarity_graph(strategy="acoustic")
+    assert data["stats"]["seed_ids"] == [7102]
+
+
+def test_requiring_a_fact_adds_its_search(monkeypatch):
+    nodes = {1: _node(1, bpm=120.0), 2: _node(2, bpm=120.0), 3: _node(3, bpm=121.0)}
+    hit = lambda tid: {"track_id": tid, "score": 0.9}
+    # Chords finds 2, which does not sound alike; only the sound search finds 3.
+    neighbours = {("structural", 1): [hit(2)], ("acoustic", 1): [hit(3)]}
+    _fake_library(monkeypatch, nodes, neighbours, {("sound", 1, 3): 0.95, ("sound", 1, 2): 0.2})
+    data = graph_view.build_similarity_graph(track_id=1, strategy="structural", hops=1,
+                                             require="sound,tempo")
+    assert data["stats"]["strategy"] == "structural,acoustic"
+    assert data["stats"]["added_strategies"] == ["acoustic"]     # tempo has no search
+    assert {n["track_id"] for n in data["nodes"]} == {1, 3}
+    # Already searched under an alias: nothing added.
+    data = graph_view.build_similarity_graph(track_id=1, strategy="chords", hops=1, require="chords")
+    assert data["stats"]["added_strategies"] == []
+
+
+def test_the_page_knows_which_search_each_fact_needs():
+    page = graph_view.GRAPH_HTML
+    assert "__FACT_STRATEGY__" not in page
+    assert '"sound": "acoustic"' in page

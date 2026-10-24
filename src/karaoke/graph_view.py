@@ -84,6 +84,355 @@ def _add_mood_timelines(nodes: dict[int, dict[str, Any]], strategy: str) -> None
             node["color"] = MOOD_COLORS.get(summary["dominant"], "#94a3b8")
 
 
+# Which fact each strategy's neighbour search stands for. "Links from" on the
+# page can pick several; each link then still gets every fact scored.
+STRATEGY_FACT = {
+    "structural": "chords", "chords": "chords", "chord_progression": "chords",
+    "acoustic": "sound",
+    "context": "lyrics", "lyrics": "lyrics", "meaning": "lyrics",
+    "mood": "mood", "feeling": "mood", "sentiment": "mood",
+    "harmonic": "key",
+}
+
+FACTS = ("chords", "sound", "lyrics", "mood", "key", "tempo", "genre")
+
+# The search that finds songs sharing a fact. Requiring a fact adds its
+# search: links from chords alone rarely also share sound, so "must share
+# sound" there left a quarter of the graph. Tempo and genre have no search of
+# their own and stay filters.
+FACT_STRATEGY = {"chords": "structural", "sound": "acoustic", "lyrics": "context",
+                 "mood": "mood", "key": "harmonic"}
+
+# A vector fact holds when two songs are closer than 90% of random library
+# pairs. Measured 2026-10-24 on 1,500 random tracks (4,000 pairs per space);
+# each space's own top-8 neighbours sit well above these (p10: chords 0.967,
+# sound 0.900, lyrics 0.471).
+FACT_THRESHOLDS = {"chords": 0.915, "sound": 0.845, "lyrics": 0.356}
+
+# Two tempos agree within 6%, counting half and double time as the same pulse.
+TEMPO_TOLERANCE = 0.06
+
+# Per song and space, at most this many links to one act. Sound neighbours
+# are mostly the same artist (Sinatra's are Sinatra, Iron Maiden's its live
+# versions), so without a cap a hop shows nothing new.
+LINKS_PER_ACT = 1
+
+
+def parse_strategies(strategy: str) -> list[str]:
+    """Split 'structural,acoustic' into known strategies, keeping order."""
+    out: list[str] = []
+    for part in (strategy or "").split(","):
+        part = part.strip().lower()
+        if part in STRATEGY_FACT and part not in out:
+            out.append(part)
+    return out or ["structural"]
+
+
+def parse_facts(raw: Any) -> list[str]:
+    """Facts named in a comma list (or list), unknown names dropped."""
+    parts = raw.split(",") if isinstance(raw, str) else list(raw or [])
+    return [p.strip().lower() for p in parts if p and p.strip().lower() in FACTS]
+
+
+def _neighbours(curr_id: int, strategy: str, k: int) -> list[dict[str, Any]]:
+    """Nearest neighbours of one track in one strategy's space."""
+    if strategy in ("structural", "chords", "chord_progression"):
+        from . import search
+        return search.similar_chords_for_track(curr_id, k=k)
+    if strategy in ("context", "lyrics", "meaning"):
+        from . import search
+        return search.similar_lyrics_for_track(curr_id, k=k)
+    if strategy in ("mood", "feeling", "sentiment"):
+        from . import search
+        return search.similar_mood_for_track(curr_id, k=k)
+    if strategy == "acoustic":
+        from . import queue_suggest
+        raw_hits, space = queue_suggest._seed_neighbours(curr_id, k=k)
+        return [
+            {"track_id": h.track_id, "score": round(h.similarity, 3), "space": space}
+            for h in raw_hits
+        ]
+    # harmonic: songs in a key that mixes, closest tempo first. Ranking by
+    # play count put the most-played song next to a sixth of the library.
+    neighbors: list[dict[str, Any]] = []
+    try:
+        with localcache.connect() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT a.detected_key, a.bpm FROM track_analysis a
+                WHERE a.track_id = %s
+            """, (curr_id,))
+            arow = cur.fetchone()
+            if arow and arow["detected_key"]:
+                k_obj = musictheory.parse_key(arow["detected_key"])
+                if k_obj and k_obj.camelot and k_obj.camelot != "?":
+                    compat = _camelot_compatible(k_obj.camelot)
+                    # Key names are stored as text ("E minor"); only a few
+                    # dozen distinct ones exist, so match them in Python.
+                    names = [r["detected_key"] for r in cur.execute(
+                        "SELECT DISTINCT detected_key FROM track_analysis"
+                        " WHERE COALESCE(detected_key, '') <> ''").fetchall()
+                             if (pk := musictheory.parse_key(r["detected_key"])) and pk.camelot in compat]
+                    bpm = float(arow["bpm"]) if arow["bpm"] else None
+                    # Distance to the nearest of the tempo, its half and its double.
+                    # Detected tempos snap to a few values (117.5, 107.7...), so
+                    # many songs tie; break ties per seed, not by track id, or
+                    # every 117.5 BPM song gets the same neighbours.
+                    shuffle = "md5(t.track_id::text || %(seed)s::text)"
+                    order = ("LEAST(abs(a.bpm - %(bpm)s), abs(a.bpm * 2 - %(bpm)s), abs(a.bpm / 2 - %(bpm)s)), "
+                             + shuffle if bpm else shuffle)
+                    cur.execute(f"""
+                        SELECT t.track_id, a.bpm
+                        FROM tracks t
+                        JOIN track_analysis a ON a.track_id = t.track_id
+                        WHERE t.track_id != %(seed)s AND a.detected_key = ANY(%(names)s)
+                          AND a.bpm IS NOT NULL
+                        ORDER BY {order}
+                        LIMIT %(k)s
+                    """, {"seed": curr_id, "names": names, "bpm": bpm, "k": k})
+                    for r in cur.fetchall():
+                        drift = (min(abs(r["bpm"] * f / bpm - 1.0) for f in (1.0, 0.5, 2.0))
+                                 if bpm else 0.1)
+                        neighbors.append({
+                            "track_id": r["track_id"],
+                            "score": round(max(0.0, 1.0 - drift), 3),
+                            "space": "camelot",
+                        })
+    except Exception as exc:
+        log.debug("graph: harmonic neighbours of %s failed: %s", curr_id, exc)
+    return neighbors
+
+
+def _camelot_compatible(cam: str) -> dict[str, str]:
+    """Camelot codes that mix with `cam`, mapped to how they relate."""
+    num, let = int(cam[:-1]), cam[-1]
+    other = "B" if let == "A" else "A"
+    return {
+        cam: "same key",
+        f"{num}{other}": "relative key",
+        f"{(num % 12) + 1}{let}": "adjacent key",
+        f"{((num - 2) % 12) + 1}{let}": "adjacent key",
+    }
+
+
+def _load_nodes(ids: list[int], seed_ids: list[int], strategy: str) -> dict[int, dict[str, Any]]:
+    """Node records for `ids`: key, tempo, genres, mood and chord form."""
+    nodes: dict[int, dict[str, Any]] = {}
+    if not ids:
+        return nodes
+    with localcache.connect() as conn:
+        has_artist_genres = localcache.table_exists(conn, "artist_genres")
+        # The artist's genres, as the TUI's H filter and search_songs use them.
+        artist_genres_sql = """
+            , (SELECT array_agg(DISTINCT lower(trim(x))) FROM artist_genres ag,
+                      LATERAL (VALUES (ag.genre), (ag.broad_genre)) v(x)
+               WHERE ag.artist_normalized = lower(trim(t.artist))
+                 AND COALESCE(trim(x), '') <> '') AS artist_genres
+        """ if has_artist_genres else ""
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, a.energy, g.genre,
+                   t.play_count {artist_genres_sql}
+            FROM tracks t
+            LEFT JOIN track_analysis a ON a.track_id = t.track_id
+            LEFT JOIN track_genre g ON g.track_id = t.track_id
+            WHERE t.track_id = ANY(%s)
+        """, (ids,))
+        rows = cur.fetchall()
+
+    for r in rows:
+        tid = r["track_id"]
+        k_str = r["detected_key"] or ""
+        k_obj = musictheory.parse_key(k_str) if k_str else None
+        cam = k_obj.camelot if k_obj else "?"
+        color = CAMELOT_COLORS.get(cam.upper(), "#6c757d")
+        nodes[tid] = {
+            "id": str(tid),
+            "track_id": tid,
+            "label": f"{r['artist']} — {r['title']}",
+            "artist": r["artist"],
+            "title": r["title"],
+            "key": k_str,
+            "camelot": cam,
+            "color": color,
+            "key_color": color,
+            "bpm": round(r["bpm"], 1) if r["bpm"] else None,
+            "energy": round(r["energy"], 2) if r["energy"] is not None else None,
+            "genre": r["genre"] or "",
+            "artist_genres": sorted(r.get("artist_genres") or []),
+            "play_count": r["play_count"] or 0,
+            "is_seed": tid in seed_ids,
+        }
+
+    # Batch enrich with OpenSearch progression, chord, and mood data
+    try:
+        from .key_progression import PROGRESSION_INDEX, doc_id
+        from .osclient import client as get_os_client
+        osc = get_os_client()
+        if osc:
+            if osc.indices.exists(index=PROGRESSION_INDEX):
+                prog_ids = [doc_id(tid) for tid in ids if tid in nodes]
+                if prog_ids:
+                    try:
+                        m_res = osc.mget(index=PROGRESSION_INDEX, body={"ids": prog_ids})
+                        for doc in m_res.get("docs", []):
+                            if doc.get("found"):
+                                src = doc["_source"]
+                                tid = src.get("track_id")
+                                if tid and tid in nodes:
+                                    nodes[tid]["form"] = src.get("form", "unknown")
+                                    nodes[tid]["fifth_ratio"] = round(src["fifth_ratio"], 3) if src.get("fifth_ratio") is not None else None
+                                    nodes[tid]["distinct_chords"] = src.get("distinct_chords")
+                    except Exception as exc:
+                        log.debug("Batch mget progression error: %s", exc)
+
+            if osc.indices.exists(index="tracks"):
+                track_doc_ids = [f"sqlite:{tid}" for tid in ids]
+                if track_doc_ids:
+                    try:
+                        m_res = osc.mget(index="tracks", body={"ids": track_doc_ids})
+                        for doc in m_res.get("docs", []):
+                            if doc.get("found"):
+                                tsrc = doc["_source"]
+                                tid = tsrc.get("track_id")
+                                if tid and tid in nodes:
+                                    dm = tsrc.get("dominant_mood") or "neutral"
+                                    nodes[tid]["dominant_mood"] = dm
+                                    nodes[tid]["sentiment_hits"] = tsrc.get("sentiment_hits", 0)
+                                    if strategy in ("mood", "feeling", "sentiment"):
+                                        nodes[tid]["color"] = MOOD_COLORS.get(dm.lower(), "#94a3b8")
+                    except Exception as exc:
+                        log.debug("Batch mget tracks error: %s", exc)
+    except Exception as exc:
+        log.warning("OpenSearch node enrichment error: %s", exc)
+
+    _add_mood_timelines(nodes, strategy)
+    return nodes
+
+
+class _Vectors:
+    """Per-request cache of the chord, CLAP and lyric vectors of graph nodes."""
+
+    def __init__(self) -> None:
+        self._have: dict[str, dict[int, Any]] = {f: {} for f in FACT_THRESHOLDS}
+        self._asked: set[int] = set()
+        self._osc: Any = None  # opensearch client, or False once found unavailable
+        self._spaces: Optional[dict[str, tuple[str, str, Any]]] = None
+
+    def _client(self) -> Any:
+        if self._osc is None:
+            try:
+                from . import clap_vector, key_progression
+                from .osclient import client as get_os_client
+                self._osc = get_os_client() or False
+                self._spaces = {
+                    "chords": (key_progression.PROGRESSION_INDEX, "chord_motion",
+                               key_progression.doc_id),
+                    "sound": (clap_vector.CLAP_INDEX, "clap_vector", clap_vector.doc_id),
+                    "lyrics": ("tracks", "lyrics_vector", lambda tid: f"sqlite:{tid}"),
+                }
+            except Exception as exc:
+                log.debug("graph: no vector client: %s", exc)
+                self._osc = False
+        return self._osc
+
+    def load(self, ids: list[int]) -> None:
+        todo = [tid for tid in ids if tid not in self._asked]
+        if not todo or not self._client():
+            return
+        self._asked.update(todo)
+        import numpy as np
+        for fact, (index, field, make_id) in (self._spaces or {}).items():
+            try:
+                res = self._osc.mget(index=index, body={"ids": [make_id(t) for t in todo]},
+                                     _source=["track_id", field])
+            except Exception as exc:
+                log.debug("graph: %s vectors unavailable: %s", fact, exc)
+                continue
+            for doc in res.get("docs", []):
+                src = doc.get("_source") or {}
+                vec = src.get(field)
+                if doc.get("found") and vec and src.get("track_id") is not None:
+                    arr = np.asarray(vec, dtype=float)
+                    norm = float(np.linalg.norm(arr))
+                    if norm > 0:
+                        self._have[fact][int(src["track_id"])] = arr / norm
+
+    def cosine(self, fact: str, a: int, b: int) -> Optional[float]:
+        va, vb = self._have[fact].get(a), self._have[fact].get(b)
+        if va is None or vb is None:
+            return None
+        return round(float(va @ vb), 3)
+
+
+def _genre_set(node: dict[str, Any]) -> set[str]:
+    """The artist's genres when classified, the track's CLAP genre otherwise."""
+    if node.get("artist_genres"):
+        return set(node["artist_genres"])
+    g = (node.get("genre") or "").strip().lower()
+    return {g} if g else set()
+
+
+def edge_facts(a: dict[str, Any], b: dict[str, Any], vectors: Optional[_Vectors]) -> dict[str, Any]:
+    """Every fact two songs share or not; None where either side lacks the data.
+
+    Vector facts carry their cosine, the rest a bool or a short description.
+    """
+    facts: dict[str, Any] = {}
+    for fact in FACT_THRESHOLDS:
+        facts[fact] = vectors.cosine(fact, a["track_id"], b["track_id"]) if vectors else None
+
+    ma, mb = a.get("dominant_mood"), b.get("dominant_mood")
+    facts["mood"] = (ma == mb and ma != "neutral") if ma and mb else None
+
+    ca, cb = a.get("camelot") or "?", b.get("camelot") or "?"
+    if ca == "?" or cb == "?":
+        facts["key"] = None
+    else:
+        facts["key"] = _camelot_compatible(ca).get(cb, False)
+
+    ba, bb = a.get("bpm"), b.get("bpm")
+    if ba and bb:
+        facts["tempo"] = any(abs(bb * f / ba - 1.0) <= TEMPO_TOLERANCE for f in (1.0, 0.5, 2.0))
+    else:
+        facts["tempo"] = None
+
+    ga, gb = _genre_set(a), _genre_set(b)
+    shared = sorted(ga & gb)
+    facts["genre"] = (shared[0] if shared else False) if ga and gb else None
+    return facts
+
+
+def agreeing(facts: dict[str, Any]) -> list[str]:
+    """The facts that hold, in FACTS order."""
+    out = []
+    for fact in FACTS:
+        val = facts.get(fact)
+        if fact in FACT_THRESHOLDS:
+            if val is not None and val >= FACT_THRESHOLDS[fact]:
+                out.append(fact)
+        elif val:
+            out.append(fact)
+    return out
+
+
+def _node_passes(node: dict[str, Any], bpm_min: Optional[float], bpm_max: Optional[float],
+                 genre_filter: Optional[str], camelot_filter: Optional[str],
+                 mood_filter: Optional[str]) -> bool:
+    bpm = node.get("bpm")
+    if bpm_min is not None and bpm is not None and bpm < bpm_min:
+        return False
+    if bpm_max is not None and bpm is not None and bpm > bpm_max:
+        return False
+    if genre_filter and genre_filter.strip().lower() not in _genre_set(node):
+        return False
+    if camelot_filter and camelot_filter.upper() != (node.get("camelot") or "").upper():
+        return False
+    if mood_filter and mood_filter.lower() != (node.get("dominant_mood") or "").lower():
+        return False
+    return True
+
+
 def build_similarity_graph(
     track_id: Optional[int] = None,
     playlist_id: Optional[str] = None,
@@ -96,8 +445,27 @@ def build_similarity_graph(
     genre_filter: Optional[str] = None,
     camelot_filter: Optional[str] = None,
     mood_filter: Optional[str] = None,
+    require: Any = None,
+    min_facts: int = 0,
 ) -> dict[str, Any]:
-    """Build a node-link similarity graph centered on a track or playlist."""
+    """Build a node-link similarity graph centered on a track or playlist.
+
+    `strategy` may name several spaces ('structural,acoustic'); links come
+    from each. Every link is scored on all FACTS, and `require` (facts that
+    must hold) and `min_facts` (how many must) decide which links the walk
+    follows. Node filters apply during the walk too, so a filtered graph
+    keeps growing through songs that pass instead of ending up empty.
+    """
+    strategies = parse_strategies(strategy)
+    primary = strategies[0]
+    required = parse_facts(require)
+    added: list[str] = []
+    for fact in required:
+        if fact in FACT_STRATEGY and fact not in {STRATEGY_FACT[s] for s in strategies}:
+            strategies.append(FACT_STRATEGY[fact])
+            added.append(FACT_STRATEGY[fact])
+    strategy_label = ",".join(strategies)
+    min_facts = max(0, min(int(min_facts or 0), len(FACTS)))
     hops = max(1, min(hops, 3))
     limit_per_node = max(1, min(limit_per_node, 8))
     seed_ids: list[int] = []
@@ -142,19 +510,26 @@ def build_similarity_graph(
                 log.debug("No active player seed found: %s", exc)
 
         if not seed_ids:
+            # Nothing playing: start from the song played last. The most
+            # played one was a single song inflated by development replays.
             cur = conn.cursor()
             params: list[Any] = []
             where_clauses = ["a.bpm IS NOT NULL"]
             if genre_filter:
-                where_clauses.append("g.genre ILIKE %s")
-                params.append(f"%{genre_filter}%")
+                where_clauses.append("lower(trim(COALESCE(g.genre, ''))) = lower(trim(%s))")
+                params.append(genre_filter)
             where_sql = " AND ".join(where_clauses)
             cur.execute(f"""
                 SELECT t.track_id FROM tracks t
                 JOIN track_analysis a ON a.track_id = t.track_id
                 LEFT JOIN track_genre g ON g.track_id = t.track_id
+                LEFT JOIN LATERAL (
+                    SELECT max(p.ts) AS ts FROM play_events p
+                    WHERE p.event IN ('play', 'discover')
+                      AND lower(p.artist) = lower(t.artist) AND lower(p.title) = lower(t.title)
+                ) last ON true
                 WHERE {where_sql}
-                ORDER BY t.play_count DESC, t.track_id ASC
+                ORDER BY last.ts DESC NULLS LAST, t.play_count DESC, t.track_id ASC
                 LIMIT 1
             """, tuple(params))
             row = cur.fetchone()
@@ -165,214 +540,109 @@ def build_similarity_graph(
 
     # For large playlists (e.g. 600+ sync-list), clamp seeds and hops to prevent UI freeze
     MAX_SEEDS = 35
-    total_playlist_tracks = len(seed_ids)
     if len(seed_ids) > MAX_SEEDS:
         seed_ids = seed_ids[:MAX_SEEDS]
 
     if len(seed_ids) > 10 and hops > 1:
         hops = 1
 
+    # Scoring every fact needs the vectors; without filters on them a plain
+    # one-space graph still gets them, for the "why linked" panel.
+    vectors = _Vectors()
+    nodes: dict[int, dict[str, Any]] = _load_nodes(list(seed_ids), seed_ids, primary)
+    vectors.load(list(seed_ids))
+    filtering = bool(required or min_facts or bpm_min is not None or bpm_max is not None
+                     or genre_filter or camelot_filter or mood_filter)
+    # Over-fetch when links may be refused, so a filtered song still gets
+    # `limit_per_node` links per space where they exist.
+    # Over-fetch for variety too: same-act links and other versions of the
+    # same song are skipped.
+    fetch_k = 60 if filtering else min(limit_per_node * 8, 60)
+
     MAX_TOTAL_GRAPH_NODES = 80
     visited: set[int] = set()
     queue: list[tuple[int, int]] = [(sid, 0) for sid in seed_ids]
-    edges: list[dict[str, Any]] = []
-    seen_edges: set[tuple[int, int]] = set()
+    edges: dict[tuple[int, int], dict[str, Any]] = {}
+    # Songs on the graph so far: several spaces each add `limit_per_node`
+    # links per song, so the cap must hold on what is drawn, not only on
+    # what is expanded.
+    linked: set[int] = set(seed_ids)
 
     while queue and len(visited) < MAX_TOTAL_GRAPH_NODES:
         curr_id, depth = queue.pop(0)
-        if curr_id in visited or depth >= hops:
+        if curr_id in visited or depth >= hops or curr_id not in nodes:
             continue
         visited.add(curr_id)
 
-        neighbors: list[dict[str, Any]] = []
-        if strategy in ("structural", "chords", "chord_progression"):
-            from . import search
-            neighbors = search.similar_chords_for_track(curr_id, k=limit_per_node)
-        elif strategy in ("context", "lyrics", "meaning"):
-            from . import search
-            neighbors = search.similar_lyrics_for_track(curr_id, k=limit_per_node)
-        elif strategy in ("mood", "feeling", "sentiment"):
-            from . import search
-            neighbors = search.similar_mood_for_track(curr_id, k=limit_per_node)
-        elif strategy == "acoustic":
-            from . import queue_suggest
-            raw_hits, space = queue_suggest._seed_neighbours(curr_id, k=limit_per_node)
-            neighbors = [
-                {"track_id": h.track_id, "score": round(h.similarity, 3), "space": space}
-                for h in raw_hits
-            ]
-        else:  # harmonic
-            # Harmonic Camelot adjacent tracks
+        found: list[tuple[str, dict[str, Any]]] = []
+        for strat in strategies:
             try:
-                with localcache.connect() as conn:
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT a.detected_key, a.bpm FROM track_analysis a
-                        WHERE a.track_id = %s
-                    """, (curr_id,))
-                    arow = cur.fetchone()
-                    if arow and arow["detected_key"]:
-                        k_obj = musictheory.parse_key(arow["detected_key"])
-                        if k_obj and k_obj.camelot and k_obj.camelot != "?":
-                            cam = k_obj.camelot
-                            num = int(cam[:-1])
-                            let = cam[-1]
-                            other = "B" if let == "A" else "A"
-                            compat = [
-                                cam,
-                                f"{num}{other}",
-                                f"{(num % 12) + 1}{let}",
-                                f"{((num - 2) % 12) + 1}{let}",
-                            ]
-                            cur.execute("""
-                                SELECT t.track_id, a.detected_key, a.bpm
-                                FROM tracks t
-                                JOIN track_analysis a ON a.track_id = t.track_id
-                                WHERE t.track_id != %s AND a.detected_key IS NOT NULL
-                                ORDER BY t.play_count DESC, t.track_id ASC
-                                LIMIT 60
-                            """, (curr_id,))
-                            for r in cur.fetchall():
-                                cand_key = r.get("detected_key")
-                                if not cand_key:
-                                    continue
-                                rk = musictheory.parse_key(cand_key)
-                                if rk and rk.camelot in compat:
-                                    neighbors.append({
-                                        "track_id": r["track_id"],
-                                        "score": 0.9,
-                                        "space": "camelot",
-                                    })
-                                    if len(neighbors) >= limit_per_node:
-                                        break
-            except Exception:
-                pass
+                found += [(strat, n) for n in _neighbours(curr_id, strat, fetch_k)]
+            except Exception as exc:
+                log.debug("graph: %s neighbours of %s failed: %s", strat, curr_id, exc)
+        new_ids = list({int(n["track_id"]) for _, n in found
+                        if n.get("track_id") and int(n["track_id"]) not in nodes})
+        nodes.update(_load_nodes(new_ids, seed_ids, primary))
+        vectors.load([curr_id] + new_ids)
 
-        for nbr in neighbors:
-            tid = nbr.get("track_id")
-            if not tid:
+        from .dj_suggest import artist_key
+        from .smart_playlists import song_key
+
+        taken: dict[str, int] = {}
+        curr = nodes[curr_id]
+        # Per space: acts linked so far, and songs already linked (the
+        # current one included, so its other versions are skipped too).
+        acts: dict[str, dict[str, int]] = {}
+        songs: dict[str, set[str]] = {}
+        for strat, nbr in found:
+            tid = int(nbr.get("track_id") or 0)
+            if not tid or tid == curr_id or tid not in nodes or taken.get(strat, 0) >= limit_per_node:
+                continue
+            if tid not in linked and len(linked) >= MAX_TOTAL_GRAPH_NODES:
                 continue
             score = float(nbr.get("score", 0.8))
             if min_score is not None and score < min_score:
                 continue
-            edge_key = tuple(sorted([curr_id, tid]))
-            if edge_key not in seen_edges:
-                seen_edges.add(edge_key)
-                edges.append({
+            target = nodes[tid]
+            act, song = artist_key(target.get("artist") or ""), song_key(target.get("title") or "")
+            strat_acts = acts.setdefault(strat, {})
+            strat_songs = songs.setdefault(strat, {song_key(curr.get("title") or "")})
+            if song and song in strat_songs:
+                continue
+            if act and strat_acts.get(act, 0) >= LINKS_PER_ACT:
+                continue
+            if tid not in seed_ids and not _node_passes(
+                    target, bpm_min, bpm_max, genre_filter, camelot_filter, mood_filter):
+                continue
+            facts = edge_facts(nodes[curr_id], target, vectors)
+            agree = agreeing(facts)
+            if any(f not in agree for f in required) or len(agree) < min_facts:
+                continue
+            taken[strat] = taken.get(strat, 0) + 1
+            strat_acts[act] = strat_acts.get(act, 0) + 1
+            strat_songs.add(song)
+            linked.add(tid)
+            edge_key = (min(curr_id, tid), max(curr_id, tid))
+            edge = edges.get(edge_key)
+            if edge is None:
+                edges[edge_key] = {
                     "source": curr_id,
                     "target": tid,
                     "weight": score,
-                    "relation": nbr.get("space", strategy),
-                })
+                    "relation": nbr.get("space", strat),
+                    "found_by": [STRATEGY_FACT[strat]],
+                    "facts": facts,
+                    "agree": agree,
+                }
+            elif STRATEGY_FACT[strat] not in edge["found_by"]:
+                edge["found_by"].append(STRATEGY_FACT[strat])
+                edge["weight"] = max(edge["weight"], score)
             if tid not in visited and depth + 1 < hops and len(visited) + len(queue) < MAX_TOTAL_GRAPH_NODES:
                 queue.append((tid, depth + 1))
 
-    all_ids = list(set(seed_ids + [e["source"] for e in edges] + [e["target"] for e in edges]))
-    nodes: dict[int, dict[str, Any]] = {}
-
-    with localcache.connect() as conn:
-        cur = conn.cursor()
-        try:
-            cur.execute("""
-                SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, a.energy, g.genre, t.play_count
-                FROM tracks t
-                LEFT JOIN track_analysis a ON a.track_id = t.track_id
-                LEFT JOIN track_genre g ON g.track_id = t.track_id
-                WHERE t.track_id = ANY(%s)
-            """, (all_ids,))
-            rows = cur.fetchall()
-        except Exception:
-            cur.execute(f"""
-                SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, a.energy, g.genre, t.play_count
-                FROM tracks t
-                LEFT JOIN track_analysis a ON a.track_id = t.track_id
-                LEFT JOIN track_genre g ON g.track_id = t.track_id
-                WHERE t.track_id IN ({','.join(['%s'] * len(all_ids))})
-            """, tuple(all_ids))
-            rows = cur.fetchall()
-
-        for r in rows:
-            tid = r["track_id"]
-            k_str = r["detected_key"] or ""
-            k_obj = musictheory.parse_key(k_str) if k_str else None
-            cam = k_obj.camelot if k_obj else "?"
-            color = CAMELOT_COLORS.get(cam.upper(), "#6c757d")
-            nodes[tid] = {
-                "id": str(tid),
-                "track_id": tid,
-                "label": f"{r['artist']} — {r['title']}",
-                "artist": r["artist"],
-                "title": r["title"],
-                "key": k_str,
-                "camelot": cam,
-                "color": color,
-                "bpm": round(r["bpm"], 1) if r["bpm"] else None,
-                "energy": round(r["energy"], 2) if r["energy"] is not None else None,
-                "genre": r["genre"] or "",
-                "play_count": r["play_count"] or 0,
-                "is_seed": tid in seed_ids,
-            }
-
-    # Batch enrich with OpenSearch progression, chord, and mood data
-    try:
-        from .key_progression import PROGRESSION_INDEX, doc_id
-        from .osclient import client as get_os_client
-        osc = get_os_client()
-        if osc:
-            if osc.indices.exists(index=PROGRESSION_INDEX):
-                prog_ids = [doc_id(tid) for tid in all_ids if tid in nodes]
-                if prog_ids:
-                    try:
-                        m_res = osc.mget(index=PROGRESSION_INDEX, body={"ids": prog_ids})
-                        for doc in m_res.get("docs", []):
-                            if doc.get("found"):
-                                src = doc["_source"]
-                                tid = src.get("track_id")
-                                if tid and tid in nodes:
-                                    nodes[tid]["form"] = src.get("form", "unknown")
-                                    nodes[tid]["fifth_ratio"] = round(src["fifth_ratio"], 3) if src.get("fifth_ratio") is not None else None
-                                    nodes[tid]["distinct_chords"] = src.get("distinct_chords")
-                    except Exception as exc:
-                        log.debug("Batch mget progression error: %s", exc)
-
-            if osc.indices.exists(index="tracks"):
-                track_doc_ids = [f"sqlite:{tid}" for tid in all_ids]
-                if track_doc_ids:
-                    try:
-                        m_res = osc.mget(index="tracks", body={"ids": track_doc_ids})
-                        for doc in m_res.get("docs", []):
-                            if doc.get("found"):
-                                tsrc = doc["_source"]
-                                tid = tsrc.get("track_id")
-                                if tid and tid in nodes:
-                                    dm = tsrc.get("dominant_mood") or "neutral"
-                                    nodes[tid]["dominant_mood"] = dm
-                                    nodes[tid]["sentiment_hits"] = tsrc.get("sentiment_hits", 0)
-                                    if strategy in ("mood", "feeling", "sentiment"):
-                                        nodes[tid]["color"] = MOOD_COLORS.get(dm.lower(), "#94a3b8")
-                    except Exception as exc:
-                        log.debug("Batch mget tracks error: %s", exc)
-    except Exception as exc:
-        log.warning("OpenSearch node enrichment error: %s", exc)
-
-    _add_mood_timelines(nodes, strategy)
-
-    # Filter nodes based on user sliders and criteria (seed nodes always retained)
-    filtered_nodes: dict[int, dict[str, Any]] = {}
-    for tid, node in nodes.items():
-        if tid not in seed_ids:
-            bpm = node.get("bpm")
-            if bpm_min is not None and bpm is not None and bpm < bpm_min:
-                continue
-            if bpm_max is not None and bpm is not None and bpm > bpm_max:
-                continue
-            if genre_filter and genre_filter.lower() not in (node.get("genre") or "").lower():
-                continue
-            if camelot_filter and camelot_filter.upper() != (node.get("camelot") or "").upper():
-                continue
-            if mood_filter and mood_filter.lower() != (node.get("dominant_mood") or "").lower():
-                continue
-        filtered_nodes[tid] = node
+    graph_nodes = {tid: n for tid, n in nodes.items() if tid in linked}
+    for tid, node in graph_nodes.items():
+        node["degree"] = sum(1 for e in edges.values() if tid in (e["source"], e["target"]))
 
     formatted_edges = [
         {
@@ -381,18 +651,21 @@ def build_similarity_graph(
             "target": str(e["target"]),
             "weight": e["weight"],
             "relation": e["relation"],
+            "found_by": e["found_by"],
+            "facts": e["facts"],
+            "agree": e["agree"],
+            "strength": len(e["agree"]),
         }
-        for e in edges
-        if e["source"] in filtered_nodes and e["target"] in filtered_nodes
+        for e in edges.values()
     ]
 
     return {
-        "nodes": list(filtered_nodes.values()),
+        "nodes": list(graph_nodes.values()),
         "edges": formatted_edges,
         "stats": {
-            "node_count": len(filtered_nodes),
+            "node_count": len(graph_nodes),
             "edge_count": len(formatted_edges),
-            "strategy": strategy,
+            "strategy": strategy_label,
             "seed_ids": seed_ids,
             "hops": hops,
             "min_score": min_score,
@@ -401,8 +674,12 @@ def build_similarity_graph(
             "genre_filter": genre_filter,
             "camelot_filter": camelot_filter,
             "mood_filter": mood_filter,
+            "require": required,
+            "added_strategies": added,
+            "min_facts": min_facts,
+            "fact_thresholds": FACT_THRESHOLDS,
         },
-        "graph_url": f"http://localhost:8888/graph?{'playlist_id=' + playlist_id if playlist_id else 'track_id=' + str(seed_ids[0])}&strategy={strategy}",
+        "graph_url": f"http://localhost:8888/graph?{'playlist_id=' + playlist_id if playlist_id else 'track_id=' + str(seed_ids[0])}&strategy={strategy_label}",
     }
 
 
@@ -609,6 +886,20 @@ GRAPH_HTML = """<!DOCTYPE html>
     }
     .collector-status { font-size: 0.75rem; color: #94a3b8; margin-top: 6px; min-height: 1em; }
     .mood-arc { margin-top: 10px; }
+    .chips { display: flex; gap: 4px; flex-wrap: wrap; }
+    .chip {
+      background: #23283b; color: #94a3b8; border: 1px solid #3b4261;
+      padding: 3px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 500;
+    }
+    .chip:hover { background: #2d3450; }
+    .chip[aria-pressed="true"] { background: #0e7490; color: #f8fafc; border-color: #38bdf8; }
+    .why-list { list-style: none; margin-top: 8px; font-size: 0.8rem; }
+    .why-list li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0;
+                   border-bottom: 1px solid #1e293b; color: #64748b; }
+    .why-list li.yes { color: #e2e8f0; }
+    .why-list li.yes .why-name::before { content: "✓ "; color: #34d399; }
+    .why-list li.no .why-name::before { content: "· "; }
+    .why-val { font-family: monospace; }
     .mood-strip {
       display: flex;
       height: 14px;
@@ -681,13 +972,14 @@ GRAPH_HTML = """<!DOCTYPE html>
       </div>
       <div class="controls">
         <input type="text" id="seed-input" placeholder="Track ID or Artist / Title..." style="width: 200px;">
-        <select id="strategy-select">
-          <option value="structural">Structural (Chord Motion)</option>
-          <option value="acoustic">Acoustic (CLAP Timbre)</option>
-          <option value="harmonic">Harmonic (Camelot Key)</option>
-          <option value="context">Context (Lyrics & Meaning)</option>
-          <option value="mood">Mood (Emotion & Sentiment)</option>
-        </select>
+        <span class="filter-label" title="Which similarity searches draw the links. Pick several to combine them.">Links from:</span>
+        <div class="chips" id="strategy-chips">
+          <button type="button" class="chip" data-strategy="structural" aria-pressed="true" title="Chord motion">Chords</button>
+          <button type="button" class="chip" data-strategy="acoustic" aria-pressed="false" title="CLAP timbre">Sound</button>
+          <button type="button" class="chip" data-strategy="harmonic" aria-pressed="false" title="Camelot key">Key</button>
+          <button type="button" class="chip" data-strategy="context" aria-pressed="false" title="Lyrics and meaning">Lyrics</button>
+          <button type="button" class="chip" data-strategy="mood" aria-pressed="false" title="Emotion and sentiment">Mood</button>
+        </div>
         <select id="playlist-select" onchange="onPlaylistSelected()">
           <option value="">Load Playlist...</option>
         </select>
@@ -733,15 +1025,23 @@ GRAPH_HTML = """<!DOCTYPE html>
         <span class="filter-label">Genre:</span>
         <select id="genre-select">
           <option value="">All Genres</option>
-          <option value="jazz">Jazz</option>
           <option value="blues">Blues</option>
+          <option value="jazz">Jazz</option>
           <option value="rock">Rock</option>
-          <option value="pop">Pop</option>
-          <option value="punk">Punk</option>
-          <option value="stoner rock">Stoner Rock</option>
-          <option value="funk">Funk</option>
-          <option value="folk">Folk</option>
           <option value="metal">Metal</option>
+          <option value="punk">Punk</option>
+          <option value="folk">Folk</option>
+          <option value="country">Country</option>
+          <option value="soul">Soul</option>
+          <option value="funk">Funk</option>
+          <option value="hip hop">Hip Hop</option>
+          <option value="reggae">Reggae</option>
+          <option value="electronic">Electronic</option>
+          <option value="ambient">Ambient</option>
+          <option value="pop">Pop</option>
+          <option value="latin">Latin</option>
+          <option value="world">World</option>
+          <option value="classical">Classical</option>
         </select>
       </div>
       <div class="filter-item">
@@ -770,6 +1070,36 @@ GRAPH_HTML = """<!DOCTYPE html>
           <option value="4" selected>4</option>
           <option value="6">6</option>
           <option value="8">8</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label" title="Only follow links where these facts hold between the two songs">Must share:</span>
+        <div class="chips" id="require-chips">
+          <button type="button" class="chip" data-fact="chords" aria-pressed="false">Chords</button>
+          <button type="button" class="chip" data-fact="sound" aria-pressed="false">Sound</button>
+          <button type="button" class="chip" data-fact="lyrics" aria-pressed="false">Lyrics</button>
+          <button type="button" class="chip" data-fact="mood" aria-pressed="false">Mood</button>
+          <button type="button" class="chip" data-fact="key" aria-pressed="false">Key</button>
+          <button type="button" class="chip" data-fact="tempo" aria-pressed="false">Tempo</button>
+          <button type="button" class="chip" data-fact="genre" aria-pressed="false">Genre</button>
+        </div>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label" title="Only follow links where at least this many facts hold">Min facts:</span>
+        <select id="min-facts-select">
+          <option value="0" selected>any</option>
+          <option value="2">2+</option>
+          <option value="3">3+</option>
+          <option value="4">4+</option>
+        </select>
+      </div>
+      <div class="filter-item">
+        <span class="filter-label">Color:</span>
+        <select id="color-select" onchange="recolor()">
+          <option value="key">Key</option>
+          <option value="mood">Mood</option>
+          <option value="genre">Genre</option>
+          <option value="energy">Energy</option>
         </select>
       </div>
       <button onclick="loadGraph()" class="btn-apply">Filter</button>
@@ -830,6 +1160,11 @@ GRAPH_HTML = """<!DOCTYPE html>
           <button class="btn-secondary" onclick="collectSelected()">🧺 + Collect</button>
         </div>
       </div>
+      <div class="card" id="why-card" style="display: none;">
+        <strong>Why linked</strong>
+        <div class="artist" id="why-pair"></div>
+        <ul class="why-list" id="why-list"></ul>
+      </div>
       <div class="card" id="collector-card">
         <strong>🧺 Collector <span id="collector-count">(0)</span></strong>
         <div class="collector-drop" id="collector-drop">
@@ -847,12 +1182,13 @@ GRAPH_HTML = """<!DOCTYPE html>
       <div class="card">
         <div class="legend">
           <strong>Constellation Insights</strong><br>
-          • <strong>Node Color:</strong> Camelot harmonic code (or Mood emotion when in Mood strategy).<br>
-          • <strong>Node Size:</strong> Degree (number of similarity links).<br>
-          • <strong>Edge Thickness:</strong> Cosine chord-motion, semantic lyric, or timbre match.<br>
+          • <strong>Node Color:</strong> pick Key, Mood, Genre or Energy under Color.<br>
+          • <strong>Links from:</strong> several searches at once; every link is then scored on all seven facts (chords, sound, lyrics, mood, key, tempo, genre).<br>
+          • <strong>Edge Thickness &amp; Brightness:</strong> how many facts the two songs share. Click a link to see which.<br>
+          • <strong>Must share / Min facts:</strong> the graph only grows through links that pass, so filtering reshapes it instead of emptying it.<br>
           • <strong>Seed Nodes:</strong> Highlighted with bright blue border.<br>
           • <strong>Dashed Ring:</strong> the song's mood swings (two or more changes); the inspector strip shows its mood over time, striped where borderline.<br>
-          • <strong>Sliders & Filters:</strong> Real-time filtering by similarity score, tempo, key, and mood.
+          • <strong>Node filters:</strong> tempo, key, genre and mood apply while the graph grows.
         </div>
       </div>
     </div>
@@ -905,6 +1241,8 @@ GRAPH_HTML = """<!DOCTYPE html>
       document.getElementById('mood-select').value = '';
       document.getElementById('hops-select').value = '2';
       document.getElementById('limit-select').value = '4';
+      document.getElementById('min-facts-select').value = '0';
+      document.querySelectorAll('#require-chips .chip').forEach(c => c.setAttribute('aria-pressed', 'false'));
       loadGraph();
     }
 
@@ -912,7 +1250,7 @@ GRAPH_HTML = """<!DOCTYPE html>
       toast('Loading similarity constellation...');
       const urlParams = new URLSearchParams(window.location.search);
       const trackInput = document.getElementById('seed-input').value.trim();
-      const strategy = customParams.strategy || document.getElementById('strategy-select').value;
+      const strategy = customParams.strategy || selectedStrategies().join(',');
       const hops = customParams.hops || document.getElementById('hops-select').value;
       const limit = customParams.limit || document.getElementById('limit-select').value;
       const minScore = document.getElementById('min-score').value;
@@ -929,6 +1267,10 @@ GRAPH_HTML = """<!DOCTYPE html>
       if (camelot) fetchUrl += `&camelot=${encodeURIComponent(camelot)}`;
       if (genre) fetchUrl += `&genre=${encodeURIComponent(genre)}`;
       if (mood) fetchUrl += `&mood=${encodeURIComponent(mood)}`;
+      const require = pressed('#require-chips', 'fact');
+      if (require.length) fetchUrl += `&require=${require.join(',')}`;
+      const minFacts = document.getElementById('min-facts-select').value;
+      if (minFacts !== '0') fetchUrl += `&min_facts=${minFacts}`;
 
       if (customParams.track_id) {
         document.getElementById('playlist-select').value = '';
@@ -1269,14 +1611,131 @@ GRAPH_HTML = """<!DOCTYPE html>
 
     document.addEventListener('DOMContentLoaded', renderCollection);
 
+    // --- Combined facts ----------------------------------------------------
+    // Seven facts, scored on every link by graph_view.edge_facts.
+    const FACT_LABELS = {
+      chords: 'Chord motion', sound: 'Sound (CLAP)', lyrics: 'Lyric meaning',
+      mood: 'Same mood', key: 'Key mixes', tempo: 'Tempo (±6%)', genre: 'Shared genre',
+    };
+    // Dim for a link that rests on one fact, bright when several agree.
+    const EDGE_STRENGTH_COLORS = ['#1e293b', '#334155', '#475569', '#0e7490', '#0891b2', '#22d3ee', '#a5f3fc'];
+    let factThresholds = {};
+
+    function pressed(groupSel, attr) {
+      return [...document.querySelectorAll(`${groupSel} .chip[aria-pressed="true"]`)].map(c => c.dataset[attr]);
+    }
+
+    function selectedStrategies() {
+      const picked = pressed('#strategy-chips', 'strategy');
+      return picked.length ? picked : ['structural'];
+    }
+
+    // The search behind each fact (graph_view.FACT_STRATEGY): requiring a
+    // fact switches its search on, or the walk rarely finds songs that pass.
+    const FACT_STRATEGY = __FACT_STRATEGY__;
+
+    function bindChips() {
+      document.querySelectorAll('#strategy-chips .chip, #require-chips .chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          const on = chip.getAttribute('aria-pressed') !== 'true';
+          chip.setAttribute('aria-pressed', String(on));
+          const search = on && FACT_STRATEGY[chip.dataset.fact];
+          if (search) {
+            document.querySelector(`#strategy-chips .chip[data-strategy="${search}"]`)
+              .setAttribute('aria-pressed', 'true');
+          }
+          // Links need at least one search behind them.
+          if (!on && chip.dataset.strategy && !pressed('#strategy-chips', 'strategy').length) {
+            chip.setAttribute('aria-pressed', 'true');
+          }
+        });
+      });
+      const fromUrl = new URLSearchParams(window.location.search).get('strategy');
+      if (fromUrl) {
+        const want = fromUrl.split(',');
+        document.querySelectorAll('#strategy-chips .chip').forEach(c =>
+          c.setAttribute('aria-pressed', String(want.includes(c.dataset.strategy))));
+        if (!pressed('#strategy-chips', 'strategy').length) {
+          document.querySelector('#strategy-chips .chip').setAttribute('aria-pressed', 'true');
+        }
+      }
+    }
+
+    function hashHue(text) {
+      let h = 0;
+      for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) % 360;
+      return h;
+    }
+
+    function nodeColor(n) {
+      const by = document.getElementById('color-select').value;
+      if (by === 'mood') return MOOD_COLORS[(n.dominant_mood || 'neutral').toLowerCase()] || '#94a3b8';
+      if (by === 'genre') {
+        const g = (n.artist_genres && n.artist_genres[0]) || n.genre;
+        return g ? `hsl(${hashHue(g)}, 65%, 55%)` : '#6c757d';
+      }
+      if (by === 'energy') {
+        if (n.energy == null) return '#6c757d';
+        const e = Math.max(0, Math.min(1, n.energy));
+        return `hsl(${Math.round(220 - 220 * e)}, 75%, 55%)`;  // calm blue to intense red
+      }
+      return n.key_color || n.color || '#38bdf8';
+    }
+
+    function recolor() {
+      if (!cy) return;
+      cy.nodes().forEach(node => node.data('color', nodeColor(node.data('raw'))));
+    }
+
+    function factValue(fact, val) {
+      if (val === null || val === undefined) return 'unknown';
+      if (typeof val === 'number') {
+        const cut = factThresholds[fact];
+        return cut != null ? `${val.toFixed(2)} (≥${cut})` : val.toFixed(2);
+      }
+      if (val === true) return 'yes';
+      if (val === false) return 'no';
+      return String(val);
+    }
+
+    function showWhyLinked(edge) {
+      if (!edge || !edge.facts) return;
+      const a = cy.getElementById(String(edge.source)).data('raw') || {};
+      const b = cy.getElementById(String(edge.target)).data('raw') || {};
+      document.getElementById('why-pair').textContent =
+        `${a.title || edge.source} ↔ ${b.title || edge.target} · found by ${(edge.found_by || []).join(', ')}`;
+      const list = document.getElementById('why-list');
+      list.innerHTML = '';
+      const agree = new Set(edge.agree || []);
+      Object.keys(FACT_LABELS).forEach(fact => {
+        const li = document.createElement('li');
+        li.className = agree.has(fact) ? 'yes' : 'no';
+        const name = document.createElement('span');
+        name.className = 'why-name';
+        name.textContent = FACT_LABELS[fact];
+        const val = document.createElement('span');
+        val.className = 'why-val';
+        val.textContent = factValue(fact, edge.facts[fact]);
+        li.append(name, val);
+        list.appendChild(li);
+      });
+      document.getElementById('why-card').style.display = 'block';
+    }
+
     function renderCytoscape(data) {
+      factThresholds = (data.stats && data.stats.fact_thresholds) || {};
+      ((data.stats && data.stats.added_strategies) || []).forEach(s => {
+        const chip = document.querySelector(`#strategy-chips .chip[data-strategy="${s}"]`);
+        if (chip) chip.setAttribute('aria-pressed', 'true');
+      });
+      document.getElementById('why-card').style.display = 'none';
       const elements = [];
       data.nodes.forEach(n => {
         elements.push({
           data: {
             id: n.id,
             label: n.artist + '\\n' + n.title,
-            color: n.color || '#38bdf8',
+            color: nodeColor(n),
             raw: n,
             borderWidth: n.is_seed ? 4 : ((n.mood_swings || 0) >= MOOD_SWINGY ? 3 : 1),
             borderColor: n.is_seed ? '#38bdf8' : ((n.mood_swings || 0) >= MOOD_SWINGY ? '#e2e8f0' : '#1e293b'),
@@ -1293,7 +1752,9 @@ GRAPH_HTML = """<!DOCTYPE html>
               source: String(e.source),
               target: String(e.target),
               weight: e.weight,
-              width: Math.max(1, (e.weight || 0.8) * 3.5),
+              raw: e,
+              width: 1 + (e.strength || 0) * 1.2,
+              lineColor: EDGE_STRENGTH_COLORS[Math.min(e.strength || 0, EDGE_STRENGTH_COLORS.length - 1)],
             }
           });
         }
@@ -1337,10 +1798,14 @@ GRAPH_HTML = """<!DOCTYPE html>
             selector: 'edge',
             style: {
               'width': 'data(width)',
-              'line-color': '#334155',
+              'line-color': 'data(lineColor)',
               'curve-style': 'bezier',
-              'opacity': 0.7
+              'opacity': 0.75
             }
+          },
+          {
+            selector: 'edge:selected',
+            style: { 'line-color': '#f59e0b', 'opacity': 1 }
           }
         ],
         layout: {
@@ -1357,6 +1822,12 @@ GRAPH_HTML = """<!DOCTYPE html>
       cy.on('tap', 'node', function(evt) {
         const node = evt.target;
         showNodeDetails(node.data('raw'));
+      });
+      cy.on('tap', 'edge', function(evt) {
+        showWhyLinked(evt.target.data('raw'));
+      });
+      cy.on('tap', function(evt) {
+        if (evt.target === cy) document.getElementById('why-card').style.display = 'none';
       });
       bindCollectorDrag();
       cy.on('tap grab pan zoom', function(evt) {
@@ -1470,6 +1941,7 @@ GRAPH_HTML = """<!DOCTYPE html>
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      bindChips();
       loadPlaylists();
       loadGraph();
     });
@@ -1482,6 +1954,7 @@ GRAPH_HTML = """<!DOCTYPE html>
 # The page's mood colours come from MOOD_COLORS, so the strip, the Mood
 # strategy and /mood cannot drift apart.
 GRAPH_HTML = GRAPH_HTML.replace("__MOOD_COLORS__", json.dumps(MOOD_COLORS))
+GRAPH_HTML = GRAPH_HTML.replace("__FACT_STRATEGY__", json.dumps(FACT_STRATEGY))
 
 
 async def serve_graph_ui(request: Request) -> HTMLResponse:
@@ -1537,6 +2010,8 @@ async def api_graph_data(request: Request) -> JSONResponse:
     genre_filter = params.get("genre", "").strip() or None
     camelot_filter = params.get("camelot", "").strip() or None
     mood_filter = params.get("mood", "").strip() or None
+    require = parse_facts(params.get("require", ""))
+    min_facts = int(params["min_facts"]) if params.get("min_facts", "").isdigit() else 0
 
     track_id: Optional[int] = None
     if track_id_str and track_id_str.isdigit():
@@ -1573,6 +2048,8 @@ async def api_graph_data(request: Request) -> JSONResponse:
         genre_filter=genre_filter,
         camelot_filter=camelot_filter,
         mood_filter=mood_filter,
+        require=require,
+        min_facts=min_facts,
     )
     return JSONResponse(data)
 
