@@ -29,6 +29,7 @@ docs-confluence-publish      Build Confluence export site
 docs-live                    Serve MkDocs locally on http://$(DOCS_ADDR)
 docs-sync                    Auto-sync documentation (API modules and Makefile targets)
 docs-write                   Regenerate generated docs
+flatten-counts               Flatten play counts for dev/training: drop fixture/repeat plays, cap at CAP (default 1; DRY=1 previews)
 folder-scan                  Scan a music folder: fingerprint, classify, resolve YT/Spotify, ingest (DIR=... LIMIT=... DRY_RUN=1)
 format                       Run formatters
 health                       Run the karaoke platform health check (services, ports, cluster, DB)

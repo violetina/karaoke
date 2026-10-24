@@ -36,7 +36,7 @@ K8S_NAMESPACE ?= karaoke
         install-audio analyze api ctrl-api mcp dj mpris ytmusic-sync \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
-        index-youtube-cache db-cleanup db-cleanup-dry-run vector-index vector-index-dry-run vector-status folder-scan \
+        index-youtube-cache db-cleanup db-cleanup-dry-run flatten-counts vector-index vector-index-dry-run vector-status folder-scan \
         mq-port-forward postprocess-worker celery-worker celery-sync-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
@@ -304,6 +304,9 @@ db-cleanup: ## Run track deduplication (fuzzy title + duration guard), orphan so
 
 db-cleanup-dry-run: ## Preview duplicate-track merges without writing anything
 	$(PYTHON) scripts/db_cleanup.py --dry-run
+
+flatten-counts: ## Flatten play counts for dev/training: drop fixture/repeat plays, cap at CAP (default 1; DRY=1 previews)
+	$(PYTHON) scripts/flatten_play_counts.py --cap $(or $(CAP),1) $${DRY:+--dry-run}
 
 mq-port-forward: ## Expose the in-cluster RabbitMQ AMQP on localhost:5672 (management on 15672)
 	# The pre-existing kind cluster has no AMQP port mapping; forward instead of
