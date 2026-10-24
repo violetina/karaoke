@@ -2179,24 +2179,30 @@ def get_similarity_graph(
     genre_filter: Optional[str] = None,
     camelot_filter: Optional[str] = None,
     mood_filter: Optional[str] = None,
+    require: str = "",
+    min_facts: int = 0,
 ) -> str:
     """Generate a musical similarity graph (nodes and edges) for a track or playlist.
 
     Args:
         track_id: Center the constellation on this track ID (optional if playlist_id provided).
         playlist_id: Generate graph spanning songs in a saved playlist (e.g. 'dj-list', 'jazz-funk-happy').
-        strategy: 'structural' (chord motion), 'context' (lyric topics & meaning), 'mood' (emotion & sentiment), 'acoustic' (CLAP timbre), or 'harmonic' (Camelot wheel).
+        strategy: 'structural' (chord motion), 'context' (lyric topics & meaning), 'mood' (emotion & sentiment), 'acoustic' (CLAP timbre), or 'harmonic' (Camelot wheel). Comma-separate several to combine their links (e.g. 'structural,acoustic').
         hops: Number of neighbor traversal hops from seed (1-3, default 2).
         limit_per_node: Maximum similarity edges drawn per node (default 4, max 8).
         min_score: Minimum similarity score threshold for drawing links (e.g. 0.6).
         bpm_min: Filter nodes with tempo below this BPM.
         bpm_max: Filter nodes with tempo above this BPM.
-        genre_filter: Substring match for genre (e.g. 'jazz', 'blues', 'rock').
+        genre_filter: Genre, matched like the TUI's H filter: the artist's broad or specific genre when classified, the track's CLAP genre otherwise (e.g. 'jazz', 'blues', 'rock').
         camelot_filter: Exact Camelot key code filter (e.g. '8A', '9B').
         mood_filter: Dominant mood filter (e.g. 'happy', 'tender', 'sad', 'angry').
+        require: Comma-separated facts every link must share: chords, sound, lyrics, mood, key, tempo, genre (e.g. 'key,tempo').
+        min_facts: Only follow links where at least this many of those seven facts hold (0 = any).
 
     Returns:
         JSON with 'nodes', 'edges', 'stats', and a link to the visual graph at http://localhost:8888/graph.
+        Each edge lists its 'facts' (cosines for chords/sound/lyrics, otherwise yes/no or the shared key
+        relation or genre), the facts that hold ('agree'), and 'strength' (how many hold).
     """
     from . import graph_view
     data = graph_view.build_similarity_graph(
@@ -2211,6 +2217,8 @@ def get_similarity_graph(
         genre_filter=genre_filter,
         camelot_filter=camelot_filter,
         mood_filter=mood_filter,
+        require=require,
+        min_facts=min_facts,
     )
     return json.dumps(data, indent=2)
 
