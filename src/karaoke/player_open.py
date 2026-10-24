@@ -566,12 +566,20 @@ _PLAYBACK_JS = """(() => {
     v.muted = true;
   }
   if (!v) return JSON.stringify({present: false, casting: isCasting});
+  // YouTube Music streams the whole queue through one <video>: its
+  // currentTime and duration keep counting across songs (43 minutes into a
+  // session while the song was at 1:57). The YouTube player object reports
+  // the current song, as MPRIS does; the bare element is the fallback.
+  const p = document.querySelector('#movie_player');
+  const songPos = p && typeof p.getCurrentTime === 'function' ? p.getCurrentTime() : NaN;
+  const songDur = p && typeof p.getDuration === 'function' ? p.getDuration() : NaN;
+  const own = isFinite(songPos) && isFinite(songDur) && songDur > 0;
   return JSON.stringify({
     present: true,
     ended: !!v.ended,
     paused: !!v.paused,
-    position: v.currentTime || 0,
-    duration: (isFinite(v.duration) ? v.duration : 0) || 0,
+    position: own ? songPos : (v.currentTime || 0),
+    duration: own ? songDur : ((isFinite(v.duration) ? v.duration : 0) || 0),
     readyState: v.readyState || 0,
     muted: !!v.muted,
     casting: isCasting,
