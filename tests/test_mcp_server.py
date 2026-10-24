@@ -6,7 +6,7 @@ import json
 import time
 import pytest
 
-from karaoke import mcp_server, player_open, ytmusic_playlist
+from karaoke import localcache, mcp_server, player_open, ytmusic_playlist
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +70,42 @@ def test_search_songs_by_key():
     data = json.loads(res_str)
     for track in data["tracks"]:
         assert track["camelot"] == "8A"
+
+
+def test_search_songs_genre_uses_artist_classification():
+    """Genre matches like the TUI's H filter: artist genres first, CLAP only as fallback."""
+    with localcache.connect() as conn:
+        localcache.ensure_genre_table(conn)
+        localcache.ensure_artist_genres_table(conn)
+        cur = conn.cursor()
+        tracks = [
+            # Classified as jazz, but CLAP hears "blues".
+            (5001, "Django Reinhardt", "Minor Swing", "blues"),
+            # Classified as blues, but CLAP hears "punk rock".
+            (5002, "Rory Gallagher", "Walkin' Wounded", "punk rock"),
+            # Unclassified: only the CLAP genre is known.
+            (5003, "Trio Ferret", "Gin-Gin", "blues"),
+            # Substring of the wanted genre must no longer match.
+            (5004, "Tal Farlow", "Yardbird Suite", "blues rock"),
+        ]
+        for tid, artist, title, clap in tracks:
+            cur.execute("INSERT INTO tracks (track_id, artist, title, album, duration, play_count)"
+                        " VALUES (%s, %s, %s, '', 100.0, 0)", (tid, artist, title))
+            cur.execute("INSERT INTO track_genre (track_id, genre, labelled_at) VALUES (%s, %s, 0)",
+                        (tid, clap))
+        for artist, genre, broad in (("django reinhardt", "gypsy jazz", "jazz"),
+                                     ("rory gallagher", "blues rock", "blues")):
+            cur.execute("INSERT INTO artist_genres (artist_normalized, genre, broad_genre, source,"
+                        " fetched_at) VALUES (%s, %s, %s, 'test', 0)", (artist, genre, broad))
+        conn.commit()
+
+    def artists(**kw) -> set[str]:
+        return {t["artist"] for t in json.loads(mcp_server.search_songs(limit=10, **kw))["tracks"]}
+
+    assert artists(genre="blues") == {"Rory Gallagher", "Trio Ferret"}
+    assert artists(genre="Jazz") == {"Django Reinhardt"}
+    # A specific artist genre matches too, not just the broad one.
+    assert artists(genre="gypsy jazz") == {"Django Reinhardt"}
 
 
 def test_get_now_playing():
