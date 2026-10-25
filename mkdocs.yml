@@ -102,6 +102,7 @@ nav:
   - Plans & Design:
       - Roadmap / TODO: todo.md
       - Disk chord backfill plan: disk_chord_backfill_plan.md
+      - Artist identity and metadata plan: artist_metadata_plan.md
       - Vector search plan: vector-search-plan.md
       - Browse mode enhancements plan: browse_mode_enhancements_plan.md
       - Lyrics waterfall timed detection plan: lyrics_waterfall_timed_detection_plan.md
