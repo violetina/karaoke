@@ -67,27 +67,48 @@ _KARAOKE_ORDER = """
 def genre_ids(genre: str, conn) -> list[int]:
     """Tracks the TUI's ``H`` filter shows for this genre, best first.
 
-    The filter's match, ranked by how much the song *belongs* to the genre:
-    every artist genre has weight 1.0, and an act tagged with five broad
-    genres (Blondie: rock, pop, punk, soul via disco, electronic) would
-    otherwise open "Soul". So: dedicated acts (at most two broad genres)
-    first, then broad ones, then tracks known only by the CLAP guess on the
-    song itself -- the least reliable ("shoegaze" Billie Holiday).
+    The filter's match, ranked by how much the song *belongs* to the genre.
+    Every artist genre has weight 1.0, so "has the genre" is not enough: The
+    Doors are tagged blues (via "blues rock") and opened "Blues"; Zappa and
+    King Crimson are tagged jazz (via "jazz fusion") and opened "Jazz". An
+    artist's *main* genre is the broad genre most of its specific tags map to
+    (The Doors: acid, blues and psychedelic rock -> rock 3, blues 1); a tie
+    keeps both (Rory Gallagher: blues 2, rock 2). An act counts for a genre
+    only when it is more than half as strong as its main one: Biohazard (rap
+    metal: hip hop 2, metal 3) is in "Hip Hop", System Of A Down (one nu metal
+    tag: hip hop 1, metal 4) is not -- so these lists are narrower than the
+    TUI's ``H`` filter, which takes any tag. Ranked: acts whose main genre this
+    is, then the other strong ones, then tracks known only by the CLAP guess
+    on the song itself -- the least reliable ("shoegaze" Billie Holiday).
+    Within each, the more dedicated act (fewer broad genres) first.
     """
     rows = conn.execute(f"""
-        WITH breadth AS (
-            SELECT artist_normalized, count(DISTINCT broad_genre) AS n
-            FROM artist_genres GROUP BY artist_normalized)
+        WITH tags AS (
+            SELECT artist_normalized, lower(trim(broad_genre)) AS broad, count(*) AS n
+            FROM artist_genres GROUP BY artist_normalized, lower(trim(broad_genre))),
+        strength AS (
+            SELECT artist_normalized, broad, n,
+                   max(n) OVER (PARTITION BY artist_normalized) AS top FROM tags),
+        breadth AS (
+            SELECT artist_normalized, count(*) AS n FROM tags GROUP BY artist_normalized)
         SELECT t.track_id FROM tracks t
         LEFT JOIN track_genre g ON g.track_id = t.track_id
         LEFT JOIN breadth b ON b.artist_normalized = lower(trim(t.artist))
-        WHERE EXISTS (SELECT 1 FROM artist_genres ag
-                       WHERE (lower(trim(ag.broad_genre)) = lower(trim(%(g)s))
-                              OR lower(trim(ag.genre)) = lower(trim(%(g)s)))
+        WHERE EXISTS (SELECT 1 FROM strength s
+                       WHERE s.artist_normalized = lower(trim(t.artist))
+                         AND s.broad = lower(trim(%(g)s)) AND 2 * s.n > s.top)
+           OR EXISTS (SELECT 1 FROM artist_genres ag
+                       WHERE lower(trim(ag.genre)) = lower(trim(%(g)s))
                          AND ag.artist_normalized = lower(trim(t.artist)))
            OR (b.n IS NULL
                AND lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(g)s)))
-        ORDER BY CASE WHEN b.n IS NULL THEN 2 WHEN b.n <= 2 THEN 0 ELSE 1 END,
+        ORDER BY CASE WHEN b.n IS NULL THEN 2
+                      WHEN EXISTS (SELECT 1 FROM strength s
+                                    WHERE s.artist_normalized = lower(trim(t.artist))
+                                      AND s.broad = lower(trim(%(g)s))
+                                      AND s.n = s.top) THEN 0
+                      ELSE 1 END,
+                 b.n NULLS LAST,
                  {_KARAOKE_ORDER}""", {"g": genre}).fetchall()
     return [int(r["track_id"]) for r in rows]
 
