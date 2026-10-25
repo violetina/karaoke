@@ -38,7 +38,7 @@ def test_cap_stops_at_the_limit():
 
 def test_flow_order_follows_the_best_next_song(monkeypatch):
     rows = [_row(1, "A"), _row(2, "B"), _row(3, "C"), _row(4, "D")]
-    tracks = {r["track_id"]: object() for r in rows}
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
     monkeypatch.setattr(dj_suggest, "_load", lambda ids, conn, osc: tracks)
     # Each song is followed best by the next id up, except 1 -> 3.
     best_next = {1: 3, 3: 2, 2: 4}
@@ -53,7 +53,7 @@ def test_flow_order_follows_the_best_next_song(monkeypatch):
 
 def test_flow_order_keeps_one_act_apart_when_it_can(monkeypatch):
     rows = [_row(1, "A"), _row(2, "A"), _row(3, "B")]
-    tracks = {r["track_id"]: object() for r in rows}
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
     monkeypatch.setattr(dj_suggest, "_load", lambda ids, conn, osc: tracks)
     monkeypatch.setattr(dj_suggest, "score", lambda s, c, st: 0.9 if c is tracks[2] else 0.5)
     out = sp.flow_order(rows, MagicMock(), None)
@@ -112,3 +112,70 @@ def test_every_rule_has_a_distinct_name():
     names = [r.name for r in sp.RULES]
     assert len(names) == len(set(names))
     assert all(n.startswith(("Genre: ", "Smart: ")) for n in names)
+
+
+def test_genre_penalty_grades_same_related_unrelated_unknown():
+    assert sp.genre_penalty("rock", "rock") == sp.GENRE_PENALTY["same"]
+    assert sp.genre_penalty("rock", "punk") == sp.GENRE_PENALTY["related"]
+    assert sp.genre_penalty("punk", "country") == sp.GENRE_PENALTY["unrelated"]
+    assert sp.genre_penalty(None, "jazz") == sp.GENRE_PENALTY["unknown"]
+
+
+def test_each_song_takes_the_family_its_list_leans_to():
+    options = {1: ["electronic", "pop", "rock"], 2: ["rock"], 3: ["rock", "punk"], 4: ["pop"]}
+    fam = sp.assign_families(options, {})
+    assert fam == {1: "rock", 2: "rock", 3: "rock", 4: "pop"}
+
+
+def test_a_genre_less_song_borrows_its_sound_alikes_family():
+    tracks = {1: dj_suggest.Track(1, clap=[1.0, 0.0]), 2: dj_suggest.Track(2, clap=[0.99, 0.1]),
+              3: dj_suggest.Track(3, clap=[0.0, 1.0]), 4: dj_suggest.Track(4, clap=[0.1, 1.0])}
+    fam = sp.assign_families({1: [], 2: ["jazz"], 3: [], 4: ["metal"]}, tracks)
+    assert fam[1] == "jazz" and fam[3] == "metal"
+
+
+def test_a_genre_less_song_with_no_close_sound_stays_unknown():
+    tracks = {1: dj_suggest.Track(1, clap=[1.0, 0.0]), 2: dj_suggest.Track(2, clap=[0.0, 1.0])}
+    assert sp.assign_families({1: [], 2: ["jazz"]}, tracks)[1] is None
+
+
+def test_odd_one_out_genres_only_fill():
+    rows = [_row(i, f"Act {i}") for i in range(1, 7)]
+    fam = {1: "rock", 2: "country", 3: "rock", 4: "rock", 5: None, 6: "rock"}
+    kept = sp.prefer_common_families(rows, fam, limit=5)
+    assert [r["track_id"] for r in kept] == [1, 3, 4, 5, 6]
+    assert len(sp.prefer_common_families(rows, fam, limit=10)) == 6
+
+
+def test_a_family_of_more_than_five_plays_as_one_block(monkeypatch):
+    rows = [_row(i, f"Act {i}") for i in range(1, 10)]
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
+    monkeypatch.setattr(dj_suggest, "score", lambda s, c, st: 0.5)
+    fam = {1: "rock", 2: "jazz", 3: "rock", 4: "jazz", 5: "rock", 6: "rock", 7: "rock",
+           8: "rock", 9: "jazz"}
+    out = [r["track_id"] for r in sp.flow_order(rows, MagicMock(), None, families=fam, tracks=tracks)]
+    rock = [i for i, t in enumerate(out) if fam[t] == "rock"]
+    assert rock == list(range(rock[0], rock[0] + 6))
+
+
+def test_flow_prefers_the_smaller_emotional_jump(monkeypatch):
+    rows = [_row(1, "A"), _row(2, "B"), _row(3, "C")]
+    tracks = {1: dj_suggest.Track(1, end=(0.8, 0.5, "joyful")),
+              2: dj_suggest.Track(2, start=(-0.8, -1.0, "sad")),
+              3: dj_suggest.Track(3, start=(0.7, 0.4, "joyful"))}
+    monkeypatch.setattr(dj_suggest, "score", lambda s, c, st: 0.5)
+    out = sp.flow_order(rows, MagicMock(), None, tracks=tracks)
+    assert [r["track_id"] for r in out] == [1, 3, 2]
+
+
+def test_genre_less_songs_can_sit_inside_a_block(monkeypatch):
+    rows = [_row(i, f"Act {i}") for i in range(1, 10)]
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
+    # Song 9 (no genre) follows song 1 best; everything else is level.
+    monkeypatch.setattr(dj_suggest, "score",
+                        lambda s, c, st: 0.9 if (s.track_id, c.track_id) == (1, 9) else 0.5)
+    fam = {i: "rock" for i in range(1, 8)} | {8: "jazz", 9: None}
+    out = [r["track_id"] for r in sp.flow_order(rows, MagicMock(), None, families=fam, tracks=tracks)]
+    assert out[1] == 9
+    rock = [i for i, t in enumerate(out) if fam[t] == "rock"]
+    assert all(fam[out[i]] in ("rock", None) for i in range(rock[0], rock[-1] + 1))
