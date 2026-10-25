@@ -712,8 +712,8 @@ def classify_artist(
                 specific: list[str] = []
                 broad: set[str] = set()
                 for r in rows:
-                    g = str(r[0]).strip()
-                    bg = str(r[1]).strip()
+                    g = str(r["genre"]).strip()
+                    bg = str(r["broad_genre"]).strip()
                     if g and g not in specific:
                         specific.append(g)
                     if bg:
@@ -738,7 +738,7 @@ def classify_artist(
 
     # Also check if collaborative/ensemble prefix is in seed
     # (e.g. "Django Reinhardt & le quintette du Hot club de France" -> "Django Reinhardt")
-    prefix = re.split(r"(%s:,\s*|/\s*|\s+(%s:&|and|with|feat\.%s|ft\.%s|et ses|et son|and his|& his|and her|& her|presents%s)\s+)", norm)[0].strip()
+    prefix = re.split(r"(?:,\s*|/\s*|\s+(?:&|and|with|feat\.?|ft\.?|et ses|et son|and his|& his|and her|& her|presents?)\s+)", norm)[0].strip()
     if prefix != norm and prefix in CURATED_SEED_ARTISTS:
         seed_spec, seed_broad = CURATED_SEED_ARTISTS[prefix]
         if conn is not None:

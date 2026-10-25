@@ -59,11 +59,18 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
         if h["_source"].get("clap_vector")]
     print(f"{len(docs)} embedded track(s)\n")
 
-    labelled = unlabelled = skipped = 0
+    # The index keeps docs for tracks since removed from the library; their
+    # genre row would break the foreign key and abort the run.
+    known = {int(r["track_id"]) for r in conn.execute("SELECT track_id FROM tracks").fetchall()}
+
+    labelled = unlabelled = skipped = orphaned = 0
     for doc in docs:
         if limit and labelled >= limit:
             break
         track_id = int(doc["track_id"])
+        if track_id not in known:
+            orphaned += 1
+            continue
         if not overwrite and localcache.genre_for(track_id, conn) is not None:
             skipped += 1
             continue
@@ -118,7 +125,8 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
                 client.indices.refresh(index=index)
             except Exception:
                 pass
-    print(f"\n{labelled} labelled, {unlabelled} matched nothing, {skipped} already had one")
+    print(f"\n{labelled} labelled, {unlabelled} matched nothing, {skipped} already had one, "
+          f"{orphaned} no longer in the library")
     if not dry_run:
         print("\nby genre:")
         for row in localcache.genre_counts(conn):
