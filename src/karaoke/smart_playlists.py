@@ -44,8 +44,8 @@ import numpy as np
 from .logger import log
 
 #: Long enough to be a session, short enough for the YouTube Music API, which
-#: slows and fails on longer playlists (the TUI and collector cap at 50 too).
-MAX_TRACKS = 50
+#: slows and fails on much longer playlists (the TUI and collector cap at 50).
+MAX_TRACKS = 70
 PER_ACT = 2
 #: Candidates kept before the odd-one-out genres are pushed to the back.
 POOL_TRACKS = 2 * MAX_TRACKS
