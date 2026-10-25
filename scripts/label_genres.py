@@ -48,17 +48,29 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
         print("no labels could be embedded")
         return 1
 
-    res = client.search(index=clap_vector.CLAP_INDEX, body={
-        "size": 10000, "query": {"match_all": {}},
-        "_source": ["track_id", "artist", "title", "clap_vector"]})
-    docs = [h["_source"] for h in res["hits"]["hits"] if h["_source"].get("clap_vector")]
+    from opensearchpy import helpers
+
+    # Scan, not one search: a search returns at most 10,000 hits, and the index
+    # outgrew that -- every track past the first 10k was never labelled.
+    docs = [h["_source"] for h in helpers.scan(
+        client, index=clap_vector.CLAP_INDEX,
+        query={"_source": ["track_id", "artist", "title", "clap_vector"],
+               "query": {"match_all": {}}})
+        if h["_source"].get("clap_vector")]
     print(f"{len(docs)} embedded track(s)\n")
 
-    labelled = unlabelled = skipped = 0
+    # The index keeps docs for tracks since removed from the library; their
+    # genre row would break the foreign key and abort the run.
+    known = {int(r["track_id"]) for r in conn.execute("SELECT track_id FROM tracks").fetchall()}
+
+    labelled = unlabelled = skipped = orphaned = 0
     for doc in docs:
         if limit and labelled >= limit:
             break
         track_id = int(doc["track_id"])
+        if track_id not in known:
+            orphaned += 1
+            continue
         if not overwrite and localcache.genre_for(track_id, conn) is not None:
             skipped += 1
             continue
@@ -113,7 +125,8 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
                 client.indices.refresh(index=index)
             except Exception:
                 pass
-    print(f"\n{labelled} labelled, {unlabelled} matched nothing, {skipped} already had one")
+    print(f"\n{labelled} labelled, {unlabelled} matched nothing, {skipped} already had one, "
+          f"{orphaned} no longer in the library")
     if not dry_run:
         print("\nby genre:")
         for row in localcache.genre_counts(conn):

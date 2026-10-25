@@ -597,17 +597,19 @@ classify_subgenre_to_broad = map_to_broad_genres
 _LAST_MUSICBRAINZ_REQ: float = 0.0
 
 
-def fetch_musicbrainz_genres(artist: str, timeout: float = 4.0) -> list[str]:
+#: Waits before retrying when MusicBrainz sheds load (503) or rate-limits (429).
+MUSICBRAINZ_RETRY_WAITS = (2.0, 5.0, 10.0)
+
+
+def fetch_musicbrainz_genres(artist: str, timeout: float = 4.0) -> Optional[list[str]]:
     """Fetch community consensus genre tags for an artist from MusicBrainz.
 
     Complies with MusicBrainz API policies (User-Agent header and rate limiting).
+    Returns None when MusicBrainz could not be asked -- overloaded or
+    unreachable -- as opposed to [] for an artist it has no genre tags for.
     """
     global _LAST_MUSICBRAINZ_REQ
-    now = time.time()
-    elapsed = now - _LAST_MUSICBRAINZ_REQ
-    if elapsed < 1.05:
-        time.sleep(1.05 - elapsed)
-    _LAST_MUSICBRAINZ_REQ = time.time()
+    import urllib.error
 
     query = urllib.parse.quote(f'artist:"{artist}"')
     url = f"https://musicbrainz.org/ws/2/artist/?query={query}&fmt=json&limit=3"
@@ -617,12 +619,25 @@ def fetch_musicbrainz_genres(artist: str, timeout: float = 4.0) -> list[str]:
     }
 
     req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:
-        log(f"MusicBrainz fetch failed for '{artist}': {exc}")
-        return []
+    data = None
+    for wait in (*MUSICBRAINZ_RETRY_WAITS, None):
+        elapsed = time.time() - _LAST_MUSICBRAINZ_REQ
+        if elapsed < 1.05:
+            time.sleep(1.05 - elapsed)
+        _LAST_MUSICBRAINZ_REQ = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 503) and wait is not None:
+                time.sleep(wait)
+                continue
+            log.warning("MusicBrainz fetch failed for '%s': %s", artist, exc)
+            return None
+        except Exception as exc:
+            log.warning("MusicBrainz fetch failed for '%s': %s", artist, exc)
+            return None
 
     artists = data.get("artists") or []
     if not artists:
@@ -659,7 +674,7 @@ def fetch_wikidata_genres(artist: str, timeout: float = 4.0) -> list[str]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        log(f"Wikipedia search failed for '{artist}': {exc}")
+        log.warning("Wikipedia search failed for '%s': %s", artist, exc)
         return []
 
     search_hits = data.get("query", {}).get("search", [])
@@ -712,8 +727,8 @@ def classify_artist(
                 specific: list[str] = []
                 broad: set[str] = set()
                 for r in rows:
-                    g = str(r[0]).strip()
-                    bg = str(r[1]).strip()
+                    g = str(r["genre"]).strip()
+                    bg = str(r["broad_genre"]).strip()
                     if g and g not in specific:
                         specific.append(g)
                     if bg:
@@ -738,7 +753,7 @@ def classify_artist(
 
     # Also check if collaborative/ensemble prefix is in seed
     # (e.g. "Django Reinhardt & le quintette du Hot club de France" -> "Django Reinhardt")
-    prefix = re.split(r"(%s:,\s*|/\s*|\s+(%s:&|and|with|feat\.%s|ft\.%s|et ses|et son|and his|& his|and her|& her|presents%s)\s+)", norm)[0].strip()
+    prefix = re.split(r"(?:,\s*|/\s*|\s+(?:&|and|with|feat\.?|ft\.?|et ses|et son|and his|& his|and her|& her|presents?)\s+)", norm)[0].strip()
     if prefix != norm and prefix in CURATED_SEED_ARTISTS:
         seed_spec, seed_broad = CURATED_SEED_ARTISTS[prefix]
         if conn is not None:
@@ -756,6 +771,11 @@ def classify_artist(
     specific_genres: list[str] = []
     if online:
         mb_tags = fetch_musicbrainz_genres(artist)
+        if mb_tags is None:
+            # MusicBrainz was unreachable, not silent: leave the artist
+            # unclassified for the next run rather than settle for the far
+            # weaker Wikipedia snippet match and cache it for good.
+            return ([], [])
         if mb_tags:
             specific_genres = mb_tags
         else:
@@ -803,7 +823,7 @@ def _save_to_db(
                     (artist_normalized, spec, bg, source, now),
                 )
             except Exception as e:
-                log(f"Error saving artist_genres for '{artist_normalized}': {e}")
+                log.warning("Error saving artist_genres for '%s': %s", artist_normalized, e)
     try:
         conn.commit()
     except Exception:

@@ -78,7 +78,7 @@ def main() -> int:
     already_classified: set[str] = set()
     if not args.force:
         c_exist = conn.execute("SELECT DISTINCT artist_normalized FROM artist_genres")
-        already_classified = {str(r[0]).casefold() for r in c_exist.fetchall()}
+        already_classified = {str(r["artist_normalized"]).casefold() for r in c_exist.fetchall()}
         print(f"Already classified: {len(already_classified)} artists.")
 
     unclassified = [
@@ -134,9 +134,9 @@ def _print_genre_stats(conn) -> None:
     print(f"{'Broad Genre':<16} | {'Artists':<8} | {'Tracks (approx)':<14}")
     print("-" * 44)
     for r in rows:
-        bg = str(r[0])
-        artists = r[1]
-        tracks = r[2]
+        bg = str(r["broad_genre"])
+        artists = r["artist_count"]
+        tracks = r["track_count"]
         print(f"{bg:<16} | {artists:<8} | {tracks:<14}")
 
 
