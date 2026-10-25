@@ -8,6 +8,7 @@ and computes both v2 representations.
 Usage:
     python scripts/fill_library_gaps.py --limit 20
     python scripts/fill_library_gaps.py --limit 0
+    python scripts/fill_library_gaps.py --max-per-artist 0
     python scripts/fill_library_gaps.py --exclude-artist sinatra --exclude-artist "ella fitzgerald"
 """
 from __future__ import annotations
@@ -32,7 +33,10 @@ from karaoke.postprocess_worker import run_download_logic  # noqa: E402
 
 
 def fetch_candidates(
-    conn, limit: Optional[int] = None, exclude_artists: Optional[list[str]] = None
+    conn,
+    limit: Optional[int] = None,
+    exclude_artists: Optional[list[str]] = None,
+    max_per_artist: int = 0,
 ) -> list[dict]:
     chord_timeline.ensure_schema(conn)
     mood_timeline.ensure_schema(conn)
@@ -70,6 +74,15 @@ def fetch_candidates(
         query, (chords.CHORDS_VERSION, mood_timeline.MOOD_VERSION, exclude_patterns)
     ).fetchall()
     candidates = [dict(r) for r in rows]
+    if max_per_artist > 0:
+        per_artist: dict[str, int] = {}
+        capped = []
+        for cand in candidates:
+            artist_key = (cand["artist"] or "").strip().lower()
+            if per_artist.get(artist_key, 0) < max_per_artist:
+                per_artist[artist_key] = per_artist.get(artist_key, 0) + 1
+                capped.append(cand)
+        candidates = capped
     if limit and limit > 0:
         candidates = candidates[:limit]
     return candidates
@@ -182,6 +195,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--skip-chords", action="store_true", help="Skip chord detection")
     parser.add_argument("--skip-moods", action="store_true", help="Skip mood timeline")
     parser.add_argument(
+        "--max-per-artist",
+        type=int,
+        default=25,
+        help="Max tracks per artist in one run, to spread a batch (default: 25, 0 = unlimited)",
+    )
+    parser.add_argument(
         "--exclude-artist",
         action="append",
         default=[],
@@ -197,6 +216,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             conn,
             limit=args.limit if args.limit > 0 else None,
             exclude_artists=args.exclude_artist,
+            max_per_artist=args.max_per_artist,
         )
         total = len(candidates)
         print(f"Found {total} candidate track(s) needing chords v2 or mood v2.")
