@@ -12,8 +12,17 @@ Two kinds, all named so they can be told apart from hand-made lists:
 Every list keeps to songs that can be played (a YouTube source), favours
 songs with synced lyrics -- this is a karaoke library -- allows two songs per
 act, and is then put in *flow* order: each next song is the one that follows
-best under the DJ booth's own scoring (sound, mood hand-off, key, tempo), so
-a list plays like a set rather than a sorted table.
+best, so a list plays like a set rather than a sorted table.
+
+"Follows best" starts from the DJ booth's fit (the sound, plus a little mood
+hand-off) and adds what makes a *set* smooth rather than a single pick right:
+a heavier mood hand-off so the feeling does not lurch, compatible keys, close
+tempo, similar chord motion, and the genre family. Genre does two more jobs.
+A family with more than five songs in a list plays as one block instead of
+being scattered through it. And a family that turns up only once or twice
+among a list's candidates is the odd one out for that feeling ("Party" is
+mostly rock in this library; its lone country song is the weird mix), so such
+songs only fill a list that would otherwise come up short.
 
 Rebuilding replaces each list's contents in place: the saved playlist row and,
 with ``--push``, the YouTube Music playlist of the same name (its id, and so
@@ -38,6 +47,51 @@ from .logger import log
 #: slows and fails on longer playlists (the TUI and collector cap at 50 too).
 MAX_TRACKS = 50
 PER_ACT = 2
+#: Candidates kept before the odd-one-out genres are pushed to the back.
+POOL_TRACKS = 2 * MAX_TRACKS
+#: A family with more songs than this in a list plays as one block.
+CLUSTER_OVER = 5
+#: A family with this many songs or fewer among the candidates is an outlier.
+LONELY_AT_MOST = 2
+
+#: Transition weights on top of the booth's fit (timbre + 0.1 mood flow).
+#: Mood is raised to 0.5 in all: a set should not lurch from one feeling to
+#: another, where the booth only ranks single picks. Measured on the 24 lists:
+#: 0.3 left More Komijn and Sing-along with bigger emotional jumps than
+#: before; 0.8 gave back most of the tempo gain and cost Electronic 0.08 of
+#: sound similarity. Key, tempo and chord motion did not predict what radio
+#: DJs played next (see dj_suggest), so they stay small -- they smooth a
+#: transition, they do not choose it.
+MOOD_WEIGHT = 0.5
+KEY_WEIGHT = 0.1
+TEMPO_WEIGHT = 0.1
+HARMONY_WEIGHT = 0.05
+#: Tempo closeness decays over this log-ratio (8%: still mixable).
+TEMPO_SCALE = 0.08
+#: Subtracted from a transition by how far apart the two genre families are.
+GENRE_PENALTY = {"same": 0.0, "related": 0.15, "unrelated": 0.4, "unknown": 0.1}
+#: Songs this alike (CLAP cosine) lend a genre-less song their family.
+NEIGHBOUR_SIMILARITY = 0.75
+
+#: Broad genre families that sit well next to each other in a set.
+RELATED_FAMILIES = {
+    "rock": {"punk", "metal", "blues", "pop"},
+    "punk": {"rock", "metal"},
+    "metal": {"rock", "punk"},
+    "blues": {"jazz", "soul", "rock", "country", "folk"},
+    "jazz": {"blues", "soul", "latin"},
+    "soul": {"blues", "jazz", "pop", "hip hop"},
+    "folk": {"country", "blues", "world"},
+    "country": {"folk", "blues"},
+    "electronic": {"ambient", "pop", "hip hop"},
+    "ambient": {"electronic", "classical"},
+    "pop": {"rock", "soul", "electronic"},
+    "hip hop": {"soul", "electronic", "reggae"},
+    "reggae": {"hip hop", "latin"},
+    "latin": {"jazz", "reggae", "world"},
+    "world": {"latin", "folk"},
+    "classical": {"ambient"},
+}
 SOURCE_KIND = "smart"
 
 GENRES = ("blues", "jazz", "folk", "soul", "reggae", "country", "latin",
@@ -258,32 +312,166 @@ def cap_per_act(rows: list[dict[str, Any]], per_act: int = PER_ACT,
     return out
 
 
-def flow_order(rows: list[dict[str, Any]], conn, os_client) -> list[dict[str, Any]]:
+def genre_options(rows: list[dict[str, Any]], conn) -> dict[int, list[str]]:
+    """The broad genre families each song could belong to.
+
+    The artist's genres when the artist is classified -- by full name, then by
+    the act ("Tommy Dorsey with Frank Sinatra" -> "tommy dorsey") -- otherwise
+    the families of the CLAP label on the song itself, the weaker guess.
+    """
+    from .artist_classifier import map_to_broad_genres
+    from .dj_suggest import artist_key
+
+    def names(artist: str) -> list[str]:
+        full = (artist or "").strip().lower()
+        act = artist_key(artist)
+        return list(dict.fromkeys(n for n in (full, act, f"the {act}") if n))
+
+    wanted = sorted({n for r in rows for n in names(r["artist"])})
+    by_artist: dict[str, list[str]] = {}
+    for g in conn.execute(
+            "SELECT artist_normalized, broad_genre FROM artist_genres"
+            " WHERE artist_normalized = ANY(%s) ORDER BY artist_normalized, broad_genre",
+            (wanted,)).fetchall():
+        fams = by_artist.setdefault(g["artist_normalized"], [])
+        if g["broad_genre"] not in fams:
+            fams.append(g["broad_genre"])
+    clap = {int(g["track_id"]): g["genre"] for g in conn.execute(
+        "SELECT track_id, genre FROM track_genre WHERE track_id = ANY(%s)",
+        ([r["track_id"] for r in rows],)).fetchall()}
+    out: dict[int, list[str]] = {}
+    for r in rows:
+        fams = next((by_artist[n] for n in names(r["artist"]) if n in by_artist), [])
+        if not fams and r["track_id"] in clap:
+            fams = map_to_broad_genres(clap[r["track_id"]])
+        out[r["track_id"]] = list(fams)
+    return out
+
+
+def assign_families(options: dict[int, list[str]], tracks: dict[int, Any]
+                    ) -> dict[int, Optional[str]]:
+    """One family per song, chosen to suit the list it is in.
+
+    An artist tagged rock, pop and electronic is "rock" in a rock-heavy list
+    and "electronic" in an electronic one: each song takes whichever of its
+    families the list as a whole leans to most. A song with no genre at all
+    borrows the family most of its closest-sounding listmates share.
+    """
+    from collections import Counter
+
+    from .dj_suggest import cosine
+
+    votes = Counter(f for fams in options.values() for f in fams)
+    fam: dict[int, Optional[str]] = {
+        tid: (max(fams, key=lambda f: votes[f]) if fams else None)
+        for tid, fams in options.items()}
+    known = [t for t, f in fam.items() if f]
+    for tid in [t for t, f in fam.items() if not f]:
+        me = getattr(tracks.get(tid), "clap", None)
+        if me is None:
+            continue
+        near = sorted(((cosine(me, getattr(tracks.get(o), "clap", None)), o) for o in known),
+                      reverse=True)[:3]
+        near_fams = Counter(fam[o] for sim, o in near if sim >= NEIGHBOUR_SIMILARITY)
+        if near_fams:
+            fam[tid] = near_fams.most_common(1)[0][0]
+    return fam
+
+
+def prefer_common_families(rows: list[dict[str, Any]], families: dict[int, Optional[str]],
+                           limit: int = MAX_TRACKS) -> list[dict[str, Any]]:
+    """Up to ``limit`` rows, odd-one-out genres only if the list needs them.
+
+    Keeps the rule's order. A song whose family has at most
+    ``LONELY_AT_MOST`` songs among the candidates is used only to fill.
+    """
+    from collections import Counter
+
+    counts = Counter(families.get(r["track_id"]) for r in rows)
+
+    def lonely(r) -> bool:
+        f = families.get(r["track_id"])
+        return f is not None and counts[f] <= LONELY_AT_MOST
+
+    keep = {r["track_id"] for r in sorted(rows, key=lonely)[:limit]}
+    return [r for r in rows if r["track_id"] in keep]
+
+
+def genre_penalty(a: Optional[str], b: Optional[str]) -> float:
+    if not a or not b:
+        return GENRE_PENALTY["unknown"]
+    if a == b:
+        return GENRE_PENALTY["same"]
+    if b in RELATED_FAMILIES.get(a, ()) or a in RELATED_FAMILIES.get(b, ()):
+        return GENRE_PENALTY["related"]
+    return GENRE_PENALTY["unrelated"]
+
+
+def transition(cur, cand) -> float:
+    """How well ``cand`` follows ``cur`` in a set, before genre and act."""
+    import math
+
+    from . import dj_suggest
+
+    s = dj_suggest.score(cur, cand, "flow")
+    if s is None:
+        return -1.0
+    s += (MOOD_WEIGHT - dj_suggest.MOOD_WEIGHT) * dj_suggest.mood_flow(cur, cand)
+    s += KEY_WEIGHT * dj_suggest.camelot_score(cur.camelot, cand.camelot)
+    ratio = dj_suggest.tempo_ratio(cur.bpm, cand.bpm)
+    if ratio is not None:
+        s += TEMPO_WEIGHT * math.exp(-ratio / TEMPO_SCALE)
+    s += HARMONY_WEIGHT * dj_suggest.cosine(cur.motion, cand.motion)
+    return s
+
+
+def flow_order(rows: list[dict[str, Any]], conn, os_client,
+               families: Optional[dict[int, Optional[str]]] = None,
+               tracks: Optional[dict[int, Any]] = None) -> list[dict[str, Any]]:
     """Sequence the rows as a set: each next song follows the last best.
 
     Starts from the first row (the rule's best pick) and greedily takes the
-    candidate the booth's "flow" scoring likes most after the current song.
-    Avoids two songs by one act back to back when anything else fits.
+    candidate that follows the current song best (:func:`transition`, less
+    :func:`genre_penalty`). Avoids two songs by one act back to back when
+    anything else fits. With ``families``, a family holding more than
+    ``CLUSTER_OVER`` songs is played out as one block before the list moves
+    on. Smaller families go between blocks; genre-less songs may go anywhere,
+    a block included, wherever they fit -- kept out of blocks they all piled
+    up at the end of the list.
     """
+    from collections import Counter
+
     from . import dj_suggest
 
     if len(rows) < 3:
         return rows
-    tracks = dj_suggest._load([r["track_id"] for r in rows], conn, os_client)
+    if tracks is None:
+        tracks = dj_suggest._load([r["track_id"] for r in rows], conn, os_client)
+    fam = families or {}
+    blocks = {f for f, n in Counter(fam.get(r["track_id"]) for r in rows).items()
+              if f and n > CLUSTER_OVER}
     by_id = {r["track_id"]: r for r in rows}
     order = [rows[0]["track_id"]]
     left = [r["track_id"] for r in rows[1:]]
     while left:
         cur = tracks.get(order[-1])
         cur_act = dj_suggest.artist_key(by_id[order[-1]]["artist"])
+        # The family the list is in: a genre-less song inside a block does
+        # not end the block.
+        cur_fam = next((fam[t] for t in reversed(order) if fam.get(t)), None)
 
         def fit(tid: int) -> float:
             cand = tracks.get(tid)
-            s = dj_suggest.score(cur, cand, "flow") if cur and cand else None
+            s = transition(cur, cand) if cur and cand else -1.0
             same_act = dj_suggest.artist_key(by_id[tid]["artist"]) == cur_act
-            return (s if s is not None else -1.0) - (1.0 if same_act else 0.0)
+            if families is not None:
+                s -= genre_penalty(cur_fam, fam.get(tid))
+            return s - (1.0 if same_act else 0.0)
 
-        nxt = max(left, key=fit)
+        pool = left
+        if cur_fam in blocks and any(fam.get(t) == cur_fam for t in left):
+            pool = [t for t in left if fam.get(t) in (cur_fam, None)]
+        nxt = max(pool, key=fit)
         order.append(nxt)
         left.remove(nxt)
     return [by_id[t] for t in order]
@@ -291,9 +479,14 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client) -> list[dict[str, An
 
 def build(rule: Rule, conn, os_client) -> list[dict[str, Any]]:
     """The rule's playlist rows, ready to save or push."""
+    from . import dj_suggest
+
     ids = rule.select(conn, os_client)
-    rows = cap_per_act(playable(ids, conn))
-    return flow_order(rows, conn, os_client)
+    pool = cap_per_act(playable(ids, conn), limit=POOL_TRACKS)
+    tracks = dj_suggest._load([r["track_id"] for r in pool], conn, os_client)
+    families = assign_families(genre_options(pool, conn), tracks)
+    rows = prefer_common_families(pool, families, MAX_TRACKS)
+    return flow_order(rows, conn, os_client, families=families, tracks=tracks)
 
 
 # -- saving --------------------------------------------------------------------
