@@ -36,3 +36,7 @@ scripts/tst-gemi.py.py
 # survives losing the disk.
 backups/
 build_vm/
+
+# Output of long one-off runs (backfills, artist resolving, indexing),
+# kept for checking afterwards and never committed.
+logs/
