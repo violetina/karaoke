@@ -15,17 +15,24 @@ python -m karaoke.smart_playlists --only "Smart: Dreamy" --push
 ## The lists
 
 **Genre: …** — Blues, Jazz, Folk, Soul, Reggae, Country, Latin, Ambient,
-Electronic, Hip Hop, Punk, Metal. The match is the TUI's `H` genre filter: an
-artist's genres (broad or specific) when the artist is classified, the CLAP
-genre guess on the track otherwise. Ranking is by how much the act *belongs* to
-the genre, because every artist genre has weight 1.0 and multi-genre acts
-(Blondie: rock, pop, punk, soul via disco, electronic) would otherwise open
-lists like Soul:
+Electronic, Hip Hop, Punk, Metal. An artist's genres come from
+`artist_genres`: MusicBrainz genre votes for artists resolved by
+`scripts/resolve_artists.py` (weight = votes), otherwise one row per tag from
+the seed list or the name-searched classifier. Tracks of unclassified artists
+fall back to the CLAP genre guess on the song.
 
-1. dedicated acts — at most two broad genres,
-2. broader acts,
+An artist's **main** genre is the broad genre with the most weight behind it
+(Frank Zappa: rock by far, jazz a distant second). An artist counts for a list
+only when the genre has more than half the weight of its main one, so one
+"blues rock" tag no longer puts The Doors in Blues. These lists are narrower
+than the TUI's `H` filter, which takes any tag. Ranked:
+
+1. artists whose main genre this is,
+2. other artists strong enough in it,
 3. tracks known only by the CLAP guess (least reliable; why there is no
    Shoegaze list — it put Billie Holiday there).
+
+Within each, the more dedicated artist (fewer broad genres) first.
 
 **Smart: …** — rules over the mood timeline (`track_moods`, current
 `MOOD_VERSION`) and CLAP:
@@ -49,12 +56,23 @@ lists like Soul:
 1. **Playable only** — a YouTube / YouTube Music source (the kiosk plays them).
 2. **Karaoke first** — synced lyrics, then plain lyrics, then none; most played next.
 3. **Two songs per act, one version per song** — "Call Me (12'' Version)" and a
-   cover by another act count as the same song (`song_key`).
-4. **50 songs** — the YouTube Music API slows and fails on longer playlists.
-5. **Flow order** — starting from the rule's best pick, each next song is the
-   one the DJ booth's `flow` scoring (CLAP timbre, mood hand-off, key, tempo)
-   likes most after the current one, avoiding the same act back to back. The
-   list plays like a set, not a sorted table.
+   cover by another act count as the same song (`song_key`). An act is the
+   first credited MusicBrainz artist when the track is resolved, so spellings
+   ("Bonnie "Prince" Billy", "Bonnie Prince Billy") and guest credits
+   ("Gorillaz feat. …") are one act; otherwise the artist name.
+4. **Genre family per song** — the artist's strong broad genres (or the CLAP
+   guess's), and of those the one the list leans to most. A genre-less song
+   borrows the family of close-sounding listmates. A family with at most two
+   songs among the list's 140 candidates is the odd one out and only fills a
+   list that would otherwise come up short.
+5. **70 songs** — the TUI's own queue and collector still cap at 50.
+6. **Flow order** — starting from the rule's best pick, each next song is the
+   one that follows the current one best: CLAP timbre, plus mood hand-off
+   (0.5), Camelot key (0.1), tempo (0.1) and chord motion (0.05), minus a
+   penalty when the genre families differ (0.15 related, 0.4 unrelated), and
+   never the same act back to back when anything else fits. A family with
+   more than five songs plays as one block. The list plays like a set, not a
+   sorted table.
 
 ## Refreshing
 

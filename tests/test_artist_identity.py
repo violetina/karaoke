@@ -171,3 +171,56 @@ def test_placeholder_artists_are_never_accepted():
     assert ai.pick_artist_by_name("artist", unknown) is None
     various = ai.credits_of(_rec("Song", [("Various Artists", ai.VARIOUS_ARTISTS, "")]))
     assert not ai.credit_matches("Various Artists", various)
+
+
+def test_voted_genres_keep_votes_and_drop_the_long_tail():
+    raw = {"genres": [{"name": "progressive rock", "count": 13}, {"name": "jazz fusion", "count": 9},
+                      {"name": "doo-wop", "count": 2}, {"name": "spoken word", "count": 1}]}
+    assert ai.voted_genres(raw) == [("progressive rock", 13), ("jazz fusion", 9)]
+
+
+def test_voted_genres_fall_back_to_tags_that_name_a_genre():
+    raw = {"genres": [], "tags": [{"name": "blues", "count": 2}, {"name": "british", "count": 5}]}
+    assert ai.voted_genres(raw) == [("blues", 2)]
+
+
+def _raw(mbid, name, genres):
+    return {"id": mbid, "name": name, "sort-name": name, "relations": [],
+            "genres": [{"name": g, "count": c} for g, c in genres]}
+
+
+def test_artist_genres_come_from_main_credits_votes_and_replace_older_rows():
+    with localcache.connect() as conn:
+        ai.ensure_schema(conn)
+        localcache.ensure_artist_genres_table(conn)
+        # A wrong name-searched row and a seed row the votes should replace.
+        conn.execute("INSERT INTO artist_genres VALUES ('phoenix', 'classical', 'classical', 1, 'online', 0)")
+        conn.execute("INSERT INTO artist_genres VALUES ('nobody known', 'folk', 'folk', 1, 'seed', 0)")
+        for artist, title in (("Phoenix", "1901"), ("Gorillaz, Fatoumata Diawara", "Désolé"),
+                              ("Nobody Known", "Song")):
+            conn.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s)", (artist, title))
+        conn.commit()
+        ai.save_artist(_raw("phx", "Phoenix", [("indie pop", 6), ("synth-pop", 3)]), conn)
+        ai.save_artist(_raw(GORILLAZ, "Gorillaz", [("trip hop", 4), ("alternative rock", 3)]), conn)
+        ai.save_artist(_raw(DIAWARA, "Fatoumata Diawara", [("folk", 9)]), conn)
+        ai.save_artist(_raw("nk", "Nobody Known", []), conn)
+        ids = {r["artist"]: r["track_id"] for r in conn.execute("SELECT * FROM tracks").fetchall()}
+        for artist, credits in (("Phoenix", [("phx", "main")]),
+                                ("Gorillaz, Fatoumata Diawara", [(GORILLAZ, "main"), (DIAWARA, "featured")]),
+                                ("Nobody Known", [("nk", "main")])):
+            for pos, (mbid, role) in enumerate(credits):
+                conn.execute("INSERT INTO track_artists VALUES (%s, %s, %s, %s, '', '', '', 'recording', 0)",
+                             (ids[artist], pos, mbid, role))
+        conn.commit()
+        totals = ai.derive_artist_genres(conn)
+        assert totals == {"from musicbrainz": 2, "kept as was": 1}
+        rows = conn.execute("SELECT artist_normalized, genre, broad_genre, weight, source"
+                            " FROM artist_genres ORDER BY 1, 2, 3").fetchall()
+        by = {}
+        for r in rows:
+            by.setdefault(r["artist_normalized"], set()).add((r["genre"], r["weight"], r["source"]))
+        assert ("classical", 1.0, "online") not in by["phoenix"]
+        assert ("indie pop", 6.0, "musicbrainz") in by["phoenix"]
+        # The guest's folk does not make the Gorillaz song folk.
+        assert {g for g, _, _ in by["gorillaz, fatoumata diawara"]} == {"trip hop", "alternative rock"}
+        assert by["nobody known"] == {("folk", 1.0, "seed")}

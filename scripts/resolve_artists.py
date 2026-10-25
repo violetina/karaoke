@@ -9,10 +9,15 @@ MusicBrainz allows one request a second, so the whole library (~3,600 artist
 strings) takes two to three hours. Re-running picks up where it stopped:
 resolved and unmatched strings are skipped, failed ones retried.
 
+After resolving, ``artist_genres`` is rewritten from the resolved artists'
+MusicBrainz genre votes, which is what smart playlists, search, the graph and
+the TUI's genre filter read.
+
 Usage:
     python scripts/resolve_artists.py --limit 20 --dry-run
     python scripts/resolve_artists.py
     python scripts/resolve_artists.py --retry-unmatched
+    python scripts/resolve_artists.py --genres-only
 """
 from __future__ import annotations
 
@@ -34,14 +39,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="also retry strings MusicBrainz had nothing convincing for")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve and print, store nothing")
+    ap.add_argument("--genres-only", action="store_true",
+                    help="only rewrite artist_genres from what is already resolved")
     args = ap.parse_args(argv)
 
     start = time.time()
     with localcache.connect() as conn:
-        totals = artist_identity.run(conn, musicbrainz, limit=args.limit,
-                                     retry_unmatched=args.retry_unmatched,
-                                     dry_run=args.dry_run)
-    print(f"\n{dict(totals)} in {time.time() - start:.0f}s")
+        if not args.genres_only:
+            totals = artist_identity.run(conn, musicbrainz, limit=args.limit,
+                                         retry_unmatched=args.retry_unmatched,
+                                         dry_run=args.dry_run)
+            print(f"\n{dict(totals)} in {time.time() - start:.0f}s")
+        if not args.dry_run:
+            genres = artist_identity.derive_artist_genres(conn)
+            print(f"artist_genres: {dict(genres)}")
     return 0
 
 
