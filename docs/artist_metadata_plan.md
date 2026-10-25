@@ -1,6 +1,6 @@
 # Artist identity and metadata — plan
 
-**Status: steps 1–3 merged (#139, #140), step 5 in progress; step 4 next.** Written 2026-10-25.
+**Status: steps 1–3 and 5 merged (#139–#141), step 4 in progress.** Written 2026-10-25.
 
 The short version: the library has no artist entity. An artist is whatever
 string the track came with, so "Bonnie "Prince" Bill", "Bonnie 'Prince' Bill"
@@ -106,11 +106,32 @@ item gets a row with an empty QID, so re-runs skip it until `--refresh`.
 
 Pseudonyms share an item: Bonnie "Prince" Billy's item is Will Oldham's.
 
-### 4. OpenSearch index (next)
+### 4. OpenSearch index (`src/karaoke/artist_index.py`)
 
-A `karaoke-artists` index: name plus aliases for fuzzy and as-you-type search,
-genres, country and decade as facets, members and similar artists as links.
-Rebuilt from Postgres, which stays the source of truth.
+`karaoke-artists` holds one document per resolved artist, rebuilt from
+Postgres, which stays the source of truth:
+
+- **Search:** name and every alias in an accent-folded `search_as_you_type`
+  field, plus fuzzy matching on name and aliases. "bony prins bily" finds
+  Bonnie "Prince" Billy, "einsturzende" finds Einstürzende Neubauten.
+- **Facets:** main genre and strong broad families (the rule smart playlists
+  use), voted genres, country (MusicBrainz code and Wikidata names), kind,
+  record labels, instruments, and `began_decade`. That is the decade an
+  artist was *born* (people) or *formed* (groups), not when they were active:
+  Aphex Twin is 1970s.
+- **Links:** members, bands and influences by name, with the MBID when that
+  artist is in the library too. Collaborators are artists credited together
+  on a library track, up to 15, most shared tracks first.
+- **Library:** the artist strings that resolve to the artist, and track counts
+  as main and as guest.
+
+A rebuild fills a fresh `karaoke-artists-<timestamp>` index and moves the
+alias onto it in one step, then deletes the old one. `make artist-index`
+rebuilds it, `make artist-index Q="frank z"` searches it, and `make artists`
+runs the whole chain (resolve, Wikidata, index).
+
+Similar artists (ListenBrainz or Last.fm) are not fetched yet; collaborations
+and members are the links available now.
 
 ### 5. Use it
 

@@ -352,6 +352,10 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.wikidata
 
+## Artist Index
+
+::: karaoke.artist_index
+
 ## Stage View
 
 ::: karaoke.stage_view

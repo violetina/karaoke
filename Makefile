@@ -40,7 +40,8 @@ K8S_NAMESPACE ?= karaoke
         mq-port-forward postprocess-worker celery-worker celery-sync-worker celery-flower postprocess-enqueue-all \
         systemd-install systemd-uninstall systemd-up systemd-down systemd-status health \
         auth-spotify auth-youtube auth-status sample audio-check \
-        recordings recording-show recording-analyse batch-enrich-vectors batch-sync-av
+        recordings recording-show recording-analyse batch-enrich-vectors batch-sync-av \
+        artists artist-index
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -214,6 +215,14 @@ dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
 
 smart-playlists: ## Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
 	$(PYTHON) -m karaoke.smart_playlists $${PUSH:+--push} $${DRY:+--dry-run}
+
+artists: ## Resolve artists to MusicBrainz, rewrite their genres, fetch Wikidata, rebuild the artist index
+	$(PYTHON) scripts/resolve_artists.py
+	$(PYTHON) scripts/enrich_artists_wikidata.py
+	$(PYTHON) scripts/index_artists.py
+
+artist-index: ## Rebuild the karaoke-artists OpenSearch index from Postgres (Q="..." searches it instead)
+	$(PYTHON) scripts/index_artists.py $(if $(Q),--search "$(Q)",)
 
 k8s-build: ## Build the library API container image
 	# --network=host: the default docker bridge has no working DNS on this host,
