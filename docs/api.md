@@ -336,6 +336,14 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.artist_classifier
 
+## Artist Identity
+
+::: karaoke.artist_identity
+
+## MusicBrainz Client
+
+::: karaoke.musicbrainz
+
 ## Stage View
 
 ::: karaoke.stage_view
