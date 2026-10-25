@@ -8,6 +8,7 @@ and computes both v2 representations.
 Usage:
     python scripts/fill_library_gaps.py --limit 20
     python scripts/fill_library_gaps.py --limit 0
+    python scripts/fill_library_gaps.py --exclude-artist sinatra --exclude-artist "ella fitzgerald"
 """
 from __future__ import annotations
 
@@ -30,7 +31,9 @@ from karaoke.logger import log  # noqa: E402
 from karaoke.postprocess_worker import run_download_logic  # noqa: E402
 
 
-def fetch_candidates(conn, limit: Optional[int] = None) -> list[dict]:
+def fetch_candidates(
+    conn, limit: Optional[int] = None, exclude_artists: Optional[list[str]] = None
+) -> list[dict]:
     chord_timeline.ensure_schema(conn)
     mood_timeline.ensure_schema(conn)
     query = """
@@ -59,9 +62,13 @@ def fetch_candidates(conn, limit: Optional[int] = None) -> list[dict]:
         WHERE (c.track_id IS NULL OR m.track_id IS NULL)
           AND length(trim(coalesce(t.artist, ''))) > 1
           AND length(trim(coalesce(t.title, ''))) > 1
+          AND NOT (t.artist ILIKE ANY(%s))
         ORDER BY t.play_count DESC NULLS LAST, t.track_id ASC
     """
-    rows = conn.execute(query, (chords.CHORDS_VERSION, mood_timeline.MOOD_VERSION)).fetchall()
+    exclude_patterns = [f"%{a.strip()}%" for a in exclude_artists or [] if a.strip()]
+    rows = conn.execute(
+        query, (chords.CHORDS_VERSION, mood_timeline.MOOD_VERSION, exclude_patterns)
+    ).fetchall()
     candidates = [dict(r) for r in rows]
     if limit and limit > 0:
         candidates = candidates[:limit]
@@ -174,12 +181,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--skip-chords", action="store_true", help="Skip chord detection")
     parser.add_argument("--skip-moods", action="store_true", help="Skip mood timeline")
+    parser.add_argument(
+        "--exclude-artist",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Skip tracks whose artist contains NAME, case-insensitive (repeatable)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Preview candidate tracks only")
     args = parser.parse_args(argv)
 
     print("=== KARAOKE LIBRARY GAP FILL: CHORDS V2 & MOOD V2 ===")
     with localcache.connect() as conn:
-        candidates = fetch_candidates(conn, limit=args.limit if args.limit > 0 else None)
+        candidates = fetch_candidates(
+            conn,
+            limit=args.limit if args.limit > 0 else None,
+            exclude_artists=args.exclude_artist,
+        )
         total = len(candidates)
         print(f"Found {total} candidate track(s) needing chords v2 or mood v2.")
         if args.dry_run:
