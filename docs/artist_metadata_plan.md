@@ -1,6 +1,6 @@
 # Artist identity and metadata — plan
 
-**Status: steps 1–2 in progress** (identity and storage). Written 2026-10-25.
+**Status: steps 1–2 merged (#139), step 3 in progress.** Written 2026-10-25.
 
 The short version: the library has no artist entity. An artist is whatever
 string the track came with, so "Bonnie "Prince" Bill", "Bonnie 'Prince' Bill"
@@ -82,11 +82,29 @@ artist fetch per new MBID come to about 7–8k requests, roughly 2–2½ hours a
 `scripts/resolve_artists.py` runs it: biggest artist strings first,
 `--limit`, `--dry-run`, `--retry-unmatched`.
 
-### 3. Wikidata enrichment (next)
+### 3. Wikidata enrichment (`src/karaoke/artist_wikidata.py`)
 
-A batched SPARQL query by MBID (P434) fetches genres, country, labels,
-members, influences, image and external IDs for the resolved artists, cached
-alongside the MusicBrainz data.
+Each resolved artist's Wikidata item comes from MusicBrainz's link, or else
+from a batched SPARQL query for the item whose MusicBrainz ID (P434) is the
+artist's. The entity API then fetches 50 items per request, and one more pass
+labels everything they reference. That keeps the whole library to a few
+hundred requests, a matter of minutes.
+
+`artist_wikidata` keeps, per MBID:
+- the item: QID, label, description
+- labelled item lists: kind (person, group), genres, countries (origin,
+  falling back to citizenship), record labels, members, bands, influences,
+  instruments
+- dates: formed or born, dissolved or died, at Wikidata's precision
+- the Commons image file name (not downloaded)
+- IDs on Spotify, Discogs, AllMusic, Last.fm, Apple Music, Deezer and YouTube
+- the English and Dutch Wikipedia titles
+
+Preferred statements win, and deprecated ones never count. An artist with no
+item gets a row with an empty QID, so re-runs skip it until `--refresh`.
+`scripts/enrich_artists_wikidata.py` runs it after `resolve_artists.py`.
+
+Pseudonyms share an item: Bonnie "Prince" Billy's item is Will Oldham's.
 
 ### 4. OpenSearch index (next)
 

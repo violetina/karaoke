@@ -344,6 +344,14 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.musicbrainz
 
+## Artist Wikidata
+
+::: karaoke.artist_wikidata
+
+## Wikidata Client
+
+::: karaoke.wikidata
+
 ## Stage View
 
 ::: karaoke.stage_view
