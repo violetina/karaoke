@@ -48,10 +48,15 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
         print("no labels could be embedded")
         return 1
 
-    res = client.search(index=clap_vector.CLAP_INDEX, body={
-        "size": 10000, "query": {"match_all": {}},
-        "_source": ["track_id", "artist", "title", "clap_vector"]})
-    docs = [h["_source"] for h in res["hits"]["hits"] if h["_source"].get("clap_vector")]
+    from opensearchpy import helpers
+
+    # Scan, not one search: a search returns at most 10,000 hits, and the index
+    # outgrew that -- every track past the first 10k was never labelled.
+    docs = [h["_source"] for h in helpers.scan(
+        client, index=clap_vector.CLAP_INDEX,
+        query={"_source": ["track_id", "artist", "title", "clap_vector"],
+               "query": {"match_all": {}}})
+        if h["_source"].get("clap_vector")]
     print(f"{len(docs)} embedded track(s)\n")
 
     labelled = unlabelled = skipped = 0
