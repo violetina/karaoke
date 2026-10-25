@@ -6,17 +6,21 @@ load -- often, at night -- so a 503 or 429 is retried with backoff, and only a
 request that still fails is reported, as None, so callers can tell "MusicBrainz
 was unreachable" from "MusicBrainz has nothing".
 
-The spacing is per process. Two processes querying at once (a backfill and a
-probe) together exceed the limit and mostly get 503s, which the retries
-absorb at the cost of speed.
+The spacing is shared by every process on the machine through a small lock
+file holding the time of the last request: the post-processing workers
+resolve new artists while ``make artists`` may be running, and two clients
+each keeping their own one-per-second pace together get mostly 503s.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 
 from .logger import log
@@ -29,20 +33,49 @@ SPACING_S = 1.05
 RETRY_WAITS_S = (2.0, 5.0, 10.0)
 TIMEOUT_S = 10.0
 
-_last_request = 0.0
+
+
+def _slot_file() -> Path:
+    from .config import settings
+
+    return settings.data_dir / "musicbrainz.slot"
+
+
+def wait_turn(slot: Optional[Path] = None, *, clock=time.time, sleep=time.sleep) -> None:
+    """Block until ``SPACING_S`` after the last request from any process.
+
+    The file is locked while it is read and rewritten, so two processes
+    cannot both take the same slot.
+    """
+    slot = slot or _slot_file()
+    slot.parent.mkdir(parents=True, exist_ok=True)
+    with open(slot, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                last = float(f.read().strip() or 0)
+            except ValueError:
+                last = 0.0
+            gap = clock() - last
+            if 0 <= gap < SPACING_S:
+                sleep(SPACING_S - gap)
+            f.seek(0)
+            f.truncate()
+            f.write(repr(clock()))
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def get(path: str, params: dict[str, str], *, sleep=time.sleep) -> Optional[dict[str, Any]]:
     """GET ``/ws/2/<path>`` as JSON, or None if MusicBrainz could not answer."""
-    global _last_request
     query = urllib.parse.urlencode({**params, "fmt": "json"})
     req = urllib.request.Request(f"{BASE_URL}/{path}?{query}", headers={
         "User-Agent": USER_AGENT, "Accept": "application/json"})
     for wait in (*RETRY_WAITS_S, None):
-        gap = time.time() - _last_request
-        if gap < SPACING_S:
-            sleep(SPACING_S - gap)
-        _last_request = time.time()
+        wait_turn(sleep=sleep)
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
                 return json.loads(resp.read().decode("utf-8"))

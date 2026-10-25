@@ -151,6 +151,12 @@ Done:
 - **Acts by MBID.** Smart playlists count "two songs per act" and "not the
   same act twice in a row" by first credited MBID.
 
+- **New songs.** Post-processing has an artist step: a newly ingested song is
+  linked to its artists, a new artist string is resolved through that song,
+  and new artists get Wikidata and an index document. The CLAP step labels a
+  genre too, so a new song by an unknown artist is never genre-less. See
+  `docs/howto-post-processing.md`.
+
 Next: the graph view and the DJ can link artists by members, collaborations,
 influences and similarity.
 

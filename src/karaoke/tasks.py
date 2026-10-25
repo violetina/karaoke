@@ -72,6 +72,8 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
             tasks.append(upgrade_timings.s())
         tasks += [
             sync_lyrics.s(),
+            # Before the search document, which carries the artist's genres.
+            resolve_artist.s(),
             rebuild_vectors.s(),
             # Last, on its own queue and worker: if that worker is down, only
             # the timbre vector waits -- lyrics, chords and search are done.
@@ -124,7 +126,7 @@ class PostprocessContext:
 
 
 #: Every step a chain knows, in the order needs_postprocessing reports them.
-STEPS = ("analysis", "timings", "sync", "vectors", "chords", "clap", "mood")
+STEPS = ("analysis", "timings", "sync", "vectors", "chords", "clap", "mood", "artist")
 
 
 def _forced_steps(payload: dict[str, Any]) -> list[str]:
@@ -456,6 +458,25 @@ def sync_lyrics(self, context_dict: dict[str, Any]) -> dict[str, Any]:
             log.warning("postprocess: lyrics sync failed for track %s (%s)",
                         context.track_id, context.url)
             raise RuntimeError(f"Lyrics sync failed for track {context.track_id}") # Retryable error
+    return context.to_dict()
+
+
+@app.task(bind=True, name="karaoke.tasks.resolve_artist")
+def resolve_artist(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """Link the track to its MusicBrainz artists, resolving a new artist string.
+
+    No automatic retry: when MusicBrainz is busy the string is recorded as
+    failed and ``make artists`` picks it up, rather than the chain waiting.
+    Requests are paced machine-wide (:func:`karaoke.musicbrainz.wait_turn`),
+    so several workers resolving at once stay within MusicBrainz's limit.
+    """
+    context = PostprocessContext.from_dict(context_dict)
+    if context.track_id is None or "artist" not in context.pending:
+        return context.to_dict()
+    log.info("celery resolve_artist: %s - %s", context.artist, context.title)
+    from . import postprocess_worker, localcache
+    with localcache.connect() as conn:
+        postprocess_worker.run_artist_logic(context.track_id, conn)
     return context.to_dict()
 
 

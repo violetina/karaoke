@@ -380,6 +380,88 @@ def pending(conn, *, retry_unmatched: bool = False, limit: Optional[int] = None
     return out
 
 
+def fetch_new_artists(res: Resolution, conn, mb, known: set[str]
+                      ) -> tuple[Resolution, list[str]]:
+    """Fetch and store the resolved credits' artists not stored yet.
+
+    Returns the resolution -- turned ``failed`` if an artist could not be
+    fetched, so the string is retried -- and the MBIDs newly stored.
+    """
+    fetched: list[str] = []
+    for c in res.credits:
+        if c.mbid in known:
+            continue
+        data = mb.artist(c.mbid)
+        if not data:
+            log.warning("artist %s (%s) could not be fetched", c.mbid, c.artist_name)
+            return Resolution("failed"), fetched
+        save_artist(data, conn)
+        known.add(c.mbid)
+        fetched.append(c.mbid)
+    return res, fetched
+
+
+def resolve_track(track_id: int, conn, mb) -> tuple[str, list[str]]:
+    """Link one track to its artists, resolving its artist string if it is new.
+
+    For a newly ingested song. A string resolved before only needs the new
+    track linked like its siblings, with no request at all. A string
+    MusicBrainz had nothing for (``unmatched``) is left alone; ``make
+    artists --retry-unmatched`` is the place to try again. Anything else is
+    resolved through this very song first. Returns the outcome and the MBIDs
+    of artists stored for the first time, which want Wikidata and the index.
+    """
+    ensure_schema(conn)
+    track = conn.execute("SELECT artist, title, duration FROM tracks WHERE track_id = %s",
+                         (track_id,)).fetchone()
+    if not track or not (track["artist"] or "").strip():
+        return "skipped", []
+    text = track["artist"]
+    lookup = conn.execute("SELECT status FROM artist_lookups WHERE artist_text = %s",
+                          (text,)).fetchone()
+    if lookup and lookup["status"] == "unmatched":
+        return "unmatched", []
+    if lookup and lookup["status"] == "resolved":
+        sibling = conn.execute("""
+            SELECT ta.* FROM track_artists ta JOIN tracks t ON t.track_id = ta.track_id
+            WHERE t.artist = %s AND ta.track_id <> %s
+            ORDER BY ta.track_id, ta.position""", (text, track_id)).fetchall()
+        first = [r for r in sibling if r["track_id"] == sibling[0]["track_id"]] if sibling else []
+        if first:
+            conn.execute("DELETE FROM track_artists WHERE track_id = %s", (track_id,))
+            for r in first:
+                conn.execute("""
+                    INSERT INTO track_artists (track_id, position, mbid, role, credited_as,
+                                               joinphrase, recording_mbid, method, resolved_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (track_id, r["position"], r["mbid"], r["role"], r["credited_as"],
+                     r["joinphrase"], r["recording_mbid"], r["method"], time.time()))
+            conn.commit()
+            return "linked", []
+    others = conn.execute(
+        "SELECT title, duration FROM tracks WHERE artist = %s AND track_id <> %s"
+        " ORDER BY duration IS NULL, track_id LIMIT 8", (text, track_id)).fetchall()
+    samples, seen = [], set()
+    for title, duration in [(track["title"], track["duration"])] + [
+            (o["title"], o["duration"]) for o in others]:
+        key = normalize(clean_title(title))
+        if key and key not in seen:
+            seen.add(key)
+            samples.append((title, duration))
+    res = resolve(text, samples[:SAMPLES], mb)
+    fetched: list[str] = []
+    if res.status == "resolved":
+        known = {r["mbid"] for r in conn.execute(
+            "SELECT mbid FROM artists WHERE mbid = ANY(%s)",
+            ([c.mbid for c in res.credits],)).fetchall()}
+        res, fetched = fetch_new_artists(res, conn, mb, known)
+    if res.status == "resolved":
+        link_tracks(text, res, conn)
+        derive_artist_genres(conn, artists=[text])
+    record_lookup(text, res, conn)
+    return res.status, fetched
+
+
 def run(conn, mb, *, limit: Optional[int] = None, retry_unmatched: bool = False,
         dry_run: bool = False, out: Callable[[str], None] = print) -> Counter:
     """Resolve pending artist strings, fetch new artists, link their tracks."""
@@ -391,17 +473,8 @@ def run(conn, mb, *, limit: Optional[int] = None, retry_unmatched: bool = False,
         text = item["artist"]
         res = resolve(text, item["samples"], mb)
         if res.status == "resolved" and not dry_run:
-            for c in res.credits:
-                if c.mbid in known:
-                    continue
-                data = mb.artist(c.mbid)
-                if not data:
-                    log.warning("artist %s (%s) could not be fetched", c.mbid, c.artist_name)
-                    res = Resolution("failed")
-                    break
-                save_artist(data, conn)
-                known.add(c.mbid)
-                totals["artists fetched"] += 1
+            res, fetched = fetch_new_artists(res, conn, mb, known)
+            totals["artists fetched"] += len(fetched)
         names = " + ".join(f"{c.artist_name}{' (feat.)' if c.role == 'featured' else ''}"
                            for c in res.credits)
         out(f"[{i}/{len(todo)}] {text[:40]:40} {item['tracks']:>4} tracks  "
@@ -447,14 +520,15 @@ def voted_genres(raw: dict[str, Any]) -> list[tuple[str, int]]:
                   key=lambda nc: (-nc[1], nc[0]))
 
 
-def derive_artist_genres(conn) -> Counter:
+def derive_artist_genres(conn, artists: Optional[list[str]] = None) -> Counter:
     """Rewrite ``artist_genres`` from MusicBrainz votes for every resolved string.
 
     Each artist string gets the summed votes of its main credited artists
     (guests do not lend a song their genre), one row per specific genre and
     broad family, weighted by votes. The rows replace the name-searched
     classifier's and the seed list's for that string; a string whose artists
-    have no usable genres keeps what it had.
+    have no usable genres keeps what it had. ``artists`` limits the rewrite
+    to those strings, as for one newly ingested song.
     """
     from .artist_classifier import map_to_broad_genres, normalize_artist
     from .localcache import ensure_artist_genres_table
@@ -465,7 +539,8 @@ def derive_artist_genres(conn) -> Counter:
         FROM track_artists ta
         JOIN tracks t ON t.track_id = ta.track_id
         JOIN artists a ON a.mbid = ta.mbid
-        WHERE ta.role = 'main'""").fetchall()
+        WHERE ta.role = 'main' AND (%s::text[] IS NULL OR t.artist = ANY(%s::text[]))""",
+        (artists, artists)).fetchall()
     by_string: dict[str, Counter] = {}
     for r in rows:
         votes = by_string.setdefault(r["artist"], Counter())

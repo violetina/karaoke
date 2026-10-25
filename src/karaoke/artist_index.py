@@ -114,8 +114,8 @@ def genre_profile(raw: dict[str, Any], wikidata_genres: Iterable[str] = ()
     return [n for n, _ in votes], broad, broad[0]
 
 
-def build_documents(conn) -> list[dict[str, Any]]:
-    """One document per artist in ``artists``, from Postgres."""
+def build_documents(conn, mbids: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """One document per artist in ``artists`` (or just ``mbids``), from Postgres."""
     from . import artist_wikidata
 
     artist_wikidata.ensure_schema(conn)
@@ -123,8 +123,10 @@ def build_documents(conn) -> list[dict[str, Any]]:
         SELECT a.*, w.qid, w.description, w.countries, w.genres AS wd_genres,
                w.record_labels, w.members, w.member_of, w.influenced_by, w.instruments,
                w.began, w.ended, w.image, w.external_ids, w.wikipedia
-        FROM artists a LEFT JOIN artist_wikidata w ON w.mbid = a.mbid""").fetchall()
-    mbid_of_qid = {a["wikidata"]: a["mbid"] for a in artists if a["wikidata"]}
+        FROM artists a LEFT JOIN artist_wikidata w ON w.mbid = a.mbid
+        WHERE %s::text[] IS NULL OR a.mbid = ANY(%s::text[])""", (mbids, mbids)).fetchall()
+    mbid_of_qid = {r["wikidata"]: r["mbid"] for r in conn.execute(
+        "SELECT mbid, wikidata FROM artists WHERE wikidata <> ''").fetchall()}
     aliases = defaultdict(list)
     for r in conn.execute("SELECT mbid, alias FROM artist_aliases ORDER BY alias").fetchall():
         aliases[r["mbid"]].append(r["alias"])
@@ -214,6 +216,22 @@ def rebuild(conn, os_client, *, alias: str = ARTIST_INDEX) -> dict[str, Any]:
         os_client.indices.delete(index=o)
     return {"index": new, "documents": len(docs), "indexed": ok, "failed": len(errors),
             "replaced": old}
+
+
+def upsert(conn, os_client, mbids: list[str], *, alias: str = ARTIST_INDEX) -> int:
+    """Write these artists' documents into the live index; how many were written.
+
+    For artists met by a newly ingested song, between full rebuilds. Does
+    nothing before the first rebuild has created the index.
+    """
+    from opensearchpy import helpers
+
+    if not mbids or not os_client.indices.exists_alias(name=alias):
+        return 0
+    docs = build_documents(conn, mbids=mbids)
+    ok, _ = helpers.bulk(os_client, ({"_index": alias, "_id": d["mbid"], "_source": d}
+                                     for d in docs), raise_on_error=False)
+    return ok
 
 
 def search(query: str, os_client, *, size: int = 10, index: str = ARTIST_INDEX,

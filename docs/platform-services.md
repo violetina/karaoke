@@ -209,6 +209,7 @@ sequenceDiagram
     HostWorker->>Store: execute resolve_track_id & download_audio
     HostWorker->>Store: execute analyze_audio (key/BPM/energy)
     HostWorker->>Store: execute upgrade_timings / sync_lyrics (Whisper)
+    HostWorker->>Store: execute resolve_artist (MusicBrainz, Wikidata)
     HostWorker->>Store: execute rebuild_vectors (OpenSearch)
     HostWorker->>RMQ: emit event -> exchange 'celeryev' (task.succeeded)
     deactivate HostWorker
