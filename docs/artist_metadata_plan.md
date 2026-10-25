@@ -1,6 +1,6 @@
 # Artist identity and metadata — plan
 
-**Status: steps 1–2 merged (#139), step 3 in progress.** Written 2026-10-25.
+**Status: steps 1–3 merged (#139, #140), step 5 in progress; step 4 next.** Written 2026-10-25.
 
 The short version: the library has no artist entity. An artist is whatever
 string the track came with, so "Bonnie "Prince" Bill", "Bonnie 'Prince' Bill"
@@ -82,7 +82,7 @@ artist fetch per new MBID come to about 7–8k requests, roughly 2–2½ hours a
 `scripts/resolve_artists.py` runs it: biggest artist strings first,
 `--limit`, `--dry-run`, `--retry-unmatched`.
 
-### 3. Wikidata enrichment (`src/karaoke/artist_wikidata.py`)
+### 3. Wikidata enrichment (`src/karaoke/artist_wikidata.py`, done)
 
 Each resolved artist's Wikidata item comes from MusicBrainz's link, or else
 from a batched SPARQL query for the item whose MusicBrainz ID (P434) is the
@@ -112,15 +112,26 @@ A `karaoke-artists` index: name plus aliases for fuzzy and as-you-type search,
 genres, country and decade as facets, members and similar artists as links.
 Rebuilt from Postgres, which stays the source of truth.
 
-### 5. Use it (next)
+### 5. Use it
 
-- Smart playlists count acts by MBID, so the per-act cap works across
-  spellings and guest credits.
-- Genres from MusicBrainz votes replace the tag counting `genre_ids` does
-  now. `artist_genres` stays as a derived table so existing callers keep
-  working.
-- The graph view and the DJ can link artists by members, collaborations,
-  influences and similarity.
+Done:
+
+- **Genres from votes.** `resolve_artists.py` ends by rewriting
+  `artist_genres` for every resolved string (`--genres-only` does just that).
+  The source is its main credited artists' MusicBrainz genres (curated genres,
+  else genre-like tags), weighted by votes, keeping genres with at least a
+  quarter of the top vote. Guests do not lend a song their genre. The rows
+  replace the seed list's and the name-searched classifier's for that string,
+  and a string with no usable votes keeps what it had. Every reader (search,
+  graph, TUI filter, smart playlists) picks this up without changes.
+- **Weighted main genre.** `genre_ids` and `genre_options` sum weights
+  instead of counting tags, and drop a family with half or less of an
+  artist's strongest.
+- **Acts by MBID.** Smart playlists count "two songs per act" and "not the
+  same act twice in a row" by first credited MBID.
+
+Next: the graph view and the DJ can link artists by members, collaborations,
+influences and similarity.
 
 ## Open questions
 

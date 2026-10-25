@@ -122,12 +122,14 @@ def genre_ids(genre: str, conn) -> list[int]:
     """Tracks the TUI's ``H`` filter shows for this genre, best first.
 
     The filter's match, ranked by how much the song *belongs* to the genre.
-    Every artist genre has weight 1.0, so "has the genre" is not enough: The
-    Doors are tagged blues (via "blues rock") and opened "Blues"; Zappa and
-    King Crimson are tagged jazz (via "jazz fusion") and opened "Jazz". An
-    artist's *main* genre is the broad genre most of its specific tags map to
-    (The Doors: acid, blues and psychedelic rock -> rock 3, blues 1); a tie
-    keeps both (Rory Gallagher: blues 2, rock 2). An act counts for a genre
+    "Has the genre" is not enough: The Doors are tagged blues (via "blues
+    rock") and opened "Blues"; Zappa and King Crimson are tagged jazz (via
+    "jazz fusion") and opened "Jazz". An artist's *main* genre is the broad
+    genre with the most weight behind it: MusicBrainz votes for artists
+    resolved by :mod:`karaoke.artist_identity` (Zappa: rock 70-odd votes,
+    jazz about 20), one per specific tag for the seed list and the
+    name-searched classifier (The Doors: acid, blues and psychedelic rock ->
+    rock 3, blues 1). A tie keeps both (Rory Gallagher: blues 2, rock 2). An act counts for a genre
     only when it is more than half as strong as its main one: Biohazard (rap
     metal: hip hop 2, metal 3) is in "Hip Hop", System Of A Down (one nu metal
     tag: hip hop 1, metal 4) is not -- so these lists are narrower than the
@@ -138,7 +140,7 @@ def genre_ids(genre: str, conn) -> list[int]:
     """
     rows = conn.execute(f"""
         WITH tags AS (
-            SELECT artist_normalized, lower(trim(broad_genre)) AS broad, count(*) AS n
+            SELECT artist_normalized, lower(trim(broad_genre)) AS broad, sum(weight) AS n
             FROM artist_genres GROUP BY artist_normalized, lower(trim(broad_genre))),
         strength AS (
             SELECT artist_normalized, broad, n,
@@ -309,9 +311,35 @@ def song_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", t).strip()
 
 
+def act_keys(rows: list[dict[str, Any]], conn) -> dict[int, str]:
+    """Who each song is by, for "two songs per act": the first credited artist.
+
+    By MusicBrainz ID when :mod:`karaoke.artist_identity` has resolved the
+    track, so "Bonnie "Prince" Billy" and "Bonnie Prince Billy", or "Gorillaz"
+    and "Gorillaz feat. Fatoumata Diawara", are one act. Otherwise by name
+    (:func:`dj_suggest.artist_key`).
+    """
+    from . import localcache
+    from .dj_suggest import artist_key
+
+    keys = {r["track_id"]: artist_key(r["artist"]) for r in rows}
+    if rows and localcache.table_exists(conn, "track_artists"):
+        for r in conn.execute(
+                "SELECT track_id, mbid FROM track_artists"
+                " WHERE position = 0 AND track_id = ANY(%s)",
+                ([r["track_id"] for r in rows],)).fetchall():
+            keys[int(r["track_id"])] = r["mbid"]
+    return keys
+
+
 def cap_per_act(rows: list[dict[str, Any]], per_act: int = PER_ACT,
-                limit: int = MAX_TRACKS) -> list[dict[str, Any]]:
-    """At most ``per_act`` songs per act, one version of each song, up to ``limit``."""
+                limit: int = MAX_TRACKS,
+                acts: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
+    """At most ``per_act`` songs per act, one version of each song, up to ``limit``.
+
+    ``acts`` (from :func:`act_keys`) says who each song is by; without it,
+    the artist name does.
+    """
     from .dj_suggest import artist_key
 
     seen: dict[str, int] = {}
@@ -321,7 +349,7 @@ def cap_per_act(rows: list[dict[str, Any]], per_act: int = PER_ACT,
     songs: set[str] = set()
     out = []
     for r in rows:
-        key = artist_key(r["artist"])
+        key = (acts or {}).get(r["track_id"]) or artist_key(r["artist"])
         song = song_key(r["title"])
         if seen.get(key, 0) >= per_act or song in songs:
             continue
@@ -338,7 +366,10 @@ def genre_options(rows: list[dict[str, Any]], conn) -> dict[int, list[str]]:
 
     The artist's genres when the artist is classified -- by full name, then by
     the act ("Tommy Dorsey with Frank Sinatra" -> "tommy dorsey") -- otherwise
-    the families of the CLAP label on the song itself, the weaker guess.
+    the families of the CLAP label on the song itself, the weaker guess. As in
+    :func:`genre_ids`, a family counts only when it has more than half the
+    weight of the artist's strongest one: Zappa is rock, not also classical
+    because a few voters said "modern classical".
     """
     from .artist_classifier import map_to_broad_genres
     from .dj_suggest import artist_key
@@ -349,14 +380,15 @@ def genre_options(rows: list[dict[str, Any]], conn) -> dict[int, list[str]]:
         return list(dict.fromkeys(n for n in (full, act, f"the {act}") if n))
 
     wanted = sorted({n for r in rows for n in names(r["artist"])})
-    by_artist: dict[str, list[str]] = {}
+    weights: dict[str, dict[str, float]] = {}
     for g in conn.execute(
-            "SELECT artist_normalized, broad_genre FROM artist_genres"
-            " WHERE artist_normalized = ANY(%s) ORDER BY artist_normalized, broad_genre",
-            (wanted,)).fetchall():
-        fams = by_artist.setdefault(g["artist_normalized"], [])
-        if g["broad_genre"] not in fams:
-            fams.append(g["broad_genre"])
+            "SELECT artist_normalized, lower(trim(broad_genre)) AS broad, sum(weight) AS w"
+            " FROM artist_genres WHERE artist_normalized = ANY(%s)"
+            " GROUP BY artist_normalized, lower(trim(broad_genre))"
+            " ORDER BY artist_normalized, broad", (wanted,)).fetchall():
+        weights.setdefault(g["artist_normalized"], {})[g["broad"]] = float(g["w"] or 0)
+    by_artist = {a: [f for f, w in fams.items() if 2 * w > max(fams.values())]
+                 for a, fams in weights.items()}
     clap = {int(g["track_id"]): g["genre"] for g in conn.execute(
         "SELECT track_id, genre FROM track_genre WHERE track_id = ANY(%s)",
         ([r["track_id"] for r in rows],)).fetchall()}
@@ -448,7 +480,8 @@ def transition(cur, cand) -> float:
 
 def flow_order(rows: list[dict[str, Any]], conn, os_client,
                families: Optional[dict[int, Optional[str]]] = None,
-               tracks: Optional[dict[int, Any]] = None) -> list[dict[str, Any]]:
+               tracks: Optional[dict[int, Any]] = None,
+               acts: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
     """Sequence the rows as a set: each next song follows the last best.
 
     Starts from the first row (the rule's best pick) and greedily takes the
@@ -472,11 +505,15 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
     blocks = {f for f, n in Counter(fam.get(r["track_id"]) for r in rows).items()
               if f and n > CLUSTER_OVER}
     by_id = {r["track_id"]: r for r in rows}
+
+    def act_of(tid: int) -> str:
+        return (acts or {}).get(tid) or dj_suggest.artist_key(by_id[tid]["artist"])
+
     order = [rows[0]["track_id"]]
     left = [r["track_id"] for r in rows[1:]]
     while left:
         cur = tracks.get(order[-1])
-        cur_act = dj_suggest.artist_key(by_id[order[-1]]["artist"])
+        cur_act = act_of(order[-1])
         # The family the list is in: a genre-less song inside a block does
         # not end the block.
         cur_fam = next((fam[t] for t in reversed(order) if fam.get(t)), None)
@@ -484,7 +521,7 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
         def fit(tid: int) -> float:
             cand = tracks.get(tid)
             s = transition(cur, cand) if cur and cand else -1.0
-            same_act = dj_suggest.artist_key(by_id[tid]["artist"]) == cur_act
+            same_act = act_of(tid) == cur_act
             if families is not None:
                 s -= genre_penalty(cur_fam, fam.get(tid))
             return s - (1.0 if same_act else 0.0)
@@ -503,11 +540,13 @@ def build(rule: Rule, conn, os_client) -> list[dict[str, Any]]:
     from . import dj_suggest
 
     ids = rule.select(conn, os_client)
-    pool = cap_per_act(playable(ids, conn), limit=POOL_TRACKS)
+    candidates = playable(ids, conn)
+    acts = act_keys(candidates, conn)
+    pool = cap_per_act(candidates, limit=POOL_TRACKS, acts=acts)
     tracks = dj_suggest._load([r["track_id"] for r in pool], conn, os_client)
     families = assign_families(genre_options(pool, conn), tracks)
     rows = prefer_common_families(pool, families, MAX_TRACKS)
-    return flow_order(rows, conn, os_client, families=families, tracks=tracks)
+    return flow_order(rows, conn, os_client, families=families, tracks=tracks, acts=acts)
 
 
 # -- saving --------------------------------------------------------------------

@@ -413,3 +413,82 @@ def run(conn, mb, *, limit: Optional[int] = None, retry_unmatched: bool = False,
             totals["tracks linked"] += link_tracks(text, res, conn)
         record_lookup(text, res, conn)
     return totals
+
+
+# -- genres for the rest of the library ------------------------------------------
+
+#: A genre needs this share of the artist's top vote count to count at all.
+#: Readers of ``artist_genres`` (search, the graph, the TUI's genre filter)
+#: take any row, and Frank Zappa's 25 voted genres run down to single votes
+#: for doo-wop and spoken word.
+GENRE_MIN_SHARE = 0.25
+GENRE_SOURCE = "musicbrainz"
+
+
+def voted_genres(raw: dict[str, Any]) -> list[tuple[str, int]]:
+    """An artist's genres with their MusicBrainz votes, weak ones dropped.
+
+    MusicBrainz's curated genres when it has any; otherwise its free tags that
+    name a genre (most small artists only have tags).
+    """
+    from .artist_classifier import map_to_broad_genres
+
+    items = raw.get("genres") or [t for t in raw.get("tags") or []
+                                  if map_to_broad_genres(t.get("name", ""))]
+    votes: dict[str, int] = {}
+    for g in items:
+        name, count = (g.get("name") or "").strip().lower(), int(g.get("count") or 0)
+        if name and count > 0:
+            votes[name] = max(votes.get(name, 0), count)
+    if not votes:
+        return []
+    top = max(votes.values())
+    return sorted(((n, c) for n, c in votes.items() if c >= GENRE_MIN_SHARE * top),
+                  key=lambda nc: (-nc[1], nc[0]))
+
+
+def derive_artist_genres(conn) -> Counter:
+    """Rewrite ``artist_genres`` from MusicBrainz votes for every resolved string.
+
+    Each artist string gets the summed votes of its main credited artists
+    (guests do not lend a song their genre), one row per specific genre and
+    broad family, weighted by votes. The rows replace the name-searched
+    classifier's and the seed list's for that string; a string whose artists
+    have no usable genres keeps what it had.
+    """
+    from .artist_classifier import map_to_broad_genres, normalize_artist
+    from .localcache import ensure_artist_genres_table
+
+    ensure_artist_genres_table(conn)
+    rows = conn.execute("""
+        SELECT DISTINCT t.artist, a.mbid, a.raw
+        FROM track_artists ta
+        JOIN tracks t ON t.track_id = ta.track_id
+        JOIN artists a ON a.mbid = ta.mbid
+        WHERE ta.role = 'main'""").fetchall()
+    by_string: dict[str, Counter] = {}
+    for r in rows:
+        votes = by_string.setdefault(r["artist"], Counter())
+        for name, count in voted_genres(r["raw"] or {}):
+            votes[name] += count
+    totals: Counter = Counter()
+    now = time.time()
+    for artist, votes in by_string.items():
+        key = normalize_artist(artist)
+        mapped = [(g, b, c) for g, c in votes.items() for b in map_to_broad_genres(g)]
+        if not key or not mapped:
+            totals["kept as was"] += 1
+            continue
+        conn.execute("DELETE FROM artist_genres WHERE artist_normalized = %s", (key,))
+        for genre, broad, count in mapped:
+            conn.execute("""
+                INSERT INTO artist_genres (artist_normalized, genre, broad_genre, weight,
+                                           source, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (artist_normalized, genre, broad_genre) DO UPDATE SET
+                    weight = excluded.weight, source = excluded.source,
+                    fetched_at = excluded.fetched_at""",
+                (key, genre, broad, float(count), GENRE_SOURCE, now))
+        totals["from musicbrainz"] += 1
+    conn.commit()
+    return totals

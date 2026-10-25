@@ -179,3 +179,42 @@ def test_genre_less_songs_can_sit_inside_a_block(monkeypatch):
     assert out[1] == 9
     rock = [i for i, t in enumerate(out) if fam[t] == "rock"]
     assert all(fam[out[i]] in ("rock", None) for i in range(rock[0], rock[-1] + 1))
+
+
+def test_two_spellings_of_one_artist_are_one_act():
+    rows = [_row(1, 'Bonnie "Prince" Billy'), _row(2, "Bonnie Prince Billy"),
+            _row(3, "Bonnie 'Prince' Bill"), _row(4, "Bowie")]
+    acts = {1: "bpb", 2: "bpb", 3: "bpb"}
+    assert [r["track_id"] for r in sp.cap_per_act(rows, acts=acts)] == [1, 2, 4]
+    assert len(sp.cap_per_act(rows)) == 4
+
+
+def test_act_keys_prefer_the_first_credited_mbid(monkeypatch):
+    from karaoke import localcache
+
+    rows = [_row(1, "Gorillaz, Fatoumata Diawara"), _row(2, "The Slits")]
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [{"track_id": 1, "mbid": "gorillaz-mbid"}]
+    monkeypatch.setattr(localcache, "table_exists", lambda c, t: True)
+    assert sp.act_keys(rows, conn) == {1: "gorillaz-mbid", 2: "slits"}
+
+
+def test_flow_order_keeps_one_act_apart_across_spellings(monkeypatch):
+    rows = [_row(1, "Bonnie Prince Billy"), _row(2, 'Bonnie "Prince" Billy'), _row(3, "Bowie")]
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
+    monkeypatch.setattr(dj_suggest, "score", lambda s, c, st: 0.9 if c.track_id == 2 else 0.5)
+    out = sp.flow_order(rows, MagicMock(), None, tracks=tracks, acts={1: "bpb", 2: "bpb"})
+    assert [r["track_id"] for r in out] == [1, 3, 2]
+
+
+def test_a_weak_family_is_not_an_option():
+    from karaoke import localcache
+
+    with localcache.connect() as conn:
+        localcache.ensure_artist_genres_table(conn)
+        for genre, broad, w in (("progressive rock", "rock", 13), ("art rock", "rock", 11),
+                                ("jazz fusion", "jazz", 9), ("modern classical", "classical", 4)):
+            conn.execute("INSERT INTO artist_genres VALUES ('frank zappa', %s, %s, %s, 'musicbrainz', 0)",
+                         (genre, broad, w))
+        conn.commit()
+        assert sp.genre_options([_row(1, "Frank Zappa")], conn) == {1: ["rock"]}
