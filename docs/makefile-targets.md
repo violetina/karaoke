@@ -4,6 +4,8 @@ Generated from make help
 admin                        Run the backend operations & worker management TUI
 analyze                      Detect + store key/BPM for a file (FILE=... ARTIST=... TITLE=...)
 api                          Launch the FastAPI library backend (read-only: tracks, lyrics, stats)
+artist-index                 Rebuild the karaoke-artists OpenSearch index from Postgres (Q="..." searches it instead)
+artists                      Resolve artists to MusicBrainz, rewrite their genres, fetch Wikidata, rebuild the artist index
 audio-check                  Report whether audio analysis is available (and from where)
 auth-spotify                 Sign in to Spotify in the playback Chrome profile (persists for the kiosk window)
 auth-status                  Report Spotify token validity and playback-window state
