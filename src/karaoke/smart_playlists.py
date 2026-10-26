@@ -127,13 +127,15 @@ def genre_ids(genre: str, conn) -> list[int]:
     "jazz fusion") and opened "Jazz". An artist's *main* genre is the broad
     genre with the most weight behind it: MusicBrainz votes for artists
     resolved by :mod:`karaoke.artist_identity` (Zappa: rock 70-odd votes,
-    jazz about 20), one per specific tag for the seed list and the
+    jazz about 20), one per specific tag from Wikidata, the seed list and the
     name-searched classifier (The Doors: acid, blues and psychedelic rock ->
-    rock 3, blues 1). A tie keeps both (Rory Gallagher: blues 2, rock 2). An act counts for a genre
-    only when it is more than half as strong as its main one: Biohazard (rap
-    metal: hip hop 2, metal 3) is in "Hip Hop", System Of A Down (one nu metal
-    tag: hip hop 1, metal 4) is not -- so these lists are narrower than the
-    TUI's ``H`` filter, which takes any tag. Ranked: acts whose main genre this
+    rock 3, blues 1). A tie keeps both (Rory Gallagher: blues 2, rock 2). An
+    act counts for a genre only when it is more than half as strong as its
+    main one: Biohazard (rap metal: hip hop 2, metal 3) is in "Hip Hop",
+    System Of A Down (one nu metal tag: hip hop 1, metal 4) is not -- so these
+    lists are narrower than the TUI's ``H`` filter, which takes any tag. There
+    is no way around that rule: a tag literally named "latin" used to let
+    Jason Derulo (latin 1 of 8) into "Latin". Ranked: acts whose main genre this
     is, then the other strong ones, then tracks known only by the CLAP guess
     on the song itself -- the least reliable ("shoegaze" Billie Holiday).
     Within each, the more dedicated act (fewer broad genres) first.
@@ -153,9 +155,6 @@ def genre_ids(genre: str, conn) -> list[int]:
         WHERE EXISTS (SELECT 1 FROM strength s
                        WHERE s.artist_normalized = lower(trim(t.artist))
                          AND s.broad = lower(trim(%(g)s)) AND 2 * s.n > s.top)
-           OR EXISTS (SELECT 1 FROM artist_genres ag
-                       WHERE lower(trim(ag.genre)) = lower(trim(%(g)s))
-                         AND ag.artist_normalized = lower(trim(t.artist)))
            OR (b.n IS NULL
                AND lower(trim(COALESCE(g.genre, ''))) = lower(trim(%(g)s)))
         ORDER BY CASE WHEN b.n IS NULL THEN 2
