@@ -188,26 +188,32 @@ def save(mbid: str, row: dict[str, Any], conn) -> None:
             fetched_at = excluded.fetched_at""", (mbid, *values, time.time()))
 
 
-def pending(conn, *, refresh: bool = False, limit: Optional[int] = None) -> list[dict[str, Any]]:
-    """Artists without Wikidata facts yet (all of them with ``refresh``)."""
+def pending(conn, *, refresh: bool = False, limit: Optional[int] = None,
+            mbids: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Artists without Wikidata facts yet (all of them with ``refresh``).
+
+    ``mbids`` narrows it to those artists, as for a newly ingested song.
+    """
     rows = conn.execute(f"""
         SELECT a.mbid, a.name, a.wikidata FROM artists a
         LEFT JOIN artist_wikidata w ON w.mbid = a.mbid
-        {'' if refresh else 'WHERE w.mbid IS NULL'}
+        WHERE {'TRUE' if refresh else 'w.mbid IS NULL'}
+          AND (%s::text[] IS NULL OR a.mbid = ANY(%s::text[]))
         ORDER BY (SELECT count(*) FROM track_artists ta WHERE ta.mbid = a.mbid) DESC, a.mbid
-        """).fetchall()
+        """, (mbids, mbids)).fetchall()
     return [dict(r) for r in (rows[:limit] if limit else rows)]
 
 
 def run(conn, wd, *, limit: Optional[int] = None, refresh: bool = False,
-        dry_run: bool = False, out: Callable[[str], None] = print) -> Counter:
+        dry_run: bool = False, mbids: Optional[list[str]] = None,
+        out: Callable[[str], None] = print) -> Counter:
     """Fetch and store Wikidata facts for pending artists, ``CHUNK`` at a time.
 
     ``wd`` is the :mod:`karaoke.wikidata` module or a stand-in with the same
     ``qids_for_mbids``, ``entities`` and ``labels``.
     """
     ensure_schema(conn)
-    todo = pending(conn, refresh=refresh, limit=limit)
+    todo = pending(conn, refresh=refresh, limit=limit, mbids=mbids)
     totals: Counter = Counter()
     for start in range(0, len(todo), CHUNK):
         chunk = todo[start:start + CHUNK]

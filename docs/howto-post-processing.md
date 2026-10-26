@@ -137,12 +137,26 @@ front of the fast steps of the next song:
 
 | Queue | Worker | Runs |
 |---|---|---|
-| `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, vectors, finish |
+| `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, artist, vectors, finish |
 | `karaoke-sync` | `karaoke-celery-sync` (2 processes, 3 threads each) | Whisper lyric sync (`make celery-sync-worker`) |
-| `karaoke-clap` | `karaoke-celery-clap` (1 process) | CLAP timbre embedding and mood |
+| `karaoke-clap` | `karaoke-celery-clap` (1 process) | CLAP timbre embedding, CLAP genre label, and mood |
 
 If `karaoke-celery-sync` is down, lyric sync waits in its queue and the rest of
 the chain waits behind it; nothing else is held up.
+
+The **artist** step (`resolve_artist`, before vectors so the search document
+carries the artist's genres) links the song to its MusicBrainz artists:
+
+- An artist string resolved before is linked instantly, with no request.
+- A new string is resolved through this very song, and its genres are
+  rewritten from MusicBrainz votes. Artists stored for the first time also get
+  their Wikidata facts and a `karaoke-artists` document.
+- A string MusicBrainz had nothing for (`unmatched`) or was too busy to answer
+  (`failed`) is left to `make artists`, and is not pending. That way a
+  library-wide enqueue can never turn into thousands of lookups.
+- The step never retries and never fails the chain. MusicBrainz requests are
+  paced machine-wide through a lock file, so four workers and a running
+  `make artists` together stay within one request a second.
 
 ### 3b. Run the dashboard
 

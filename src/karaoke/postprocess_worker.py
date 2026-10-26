@@ -448,10 +448,74 @@ def run_clap_logic(track_id: int, audio_path: Path, conn,
             log.warning("postprocess: could not index CLAP vector for track %s", track_id)
             return False
         log.info("postprocess: embedded track %s with CLAP", track_id)
+        label_clap_genre(track_id, vector, conn)
         return True
     except Exception:
         log.exception("postprocess: CLAP embedding failed for track %s", track_id)
         return False
+
+
+#: Genre label embeddings, computed once per worker process.
+_genre_labels: Optional[dict[str, list[float]]] = None
+
+
+def label_clap_genre(track_id: int, vector, conn) -> Optional[str]:
+    """Label the track's genre from its CLAP vector, as folder scans do.
+
+    Without it a newly ingested song by an unclassified artist had no genre
+    in any form until someone ran ``scripts/label_genres.py``. Best effort:
+    a failure here never fails the embedding.
+    """
+    global _genre_labels
+    try:
+        from . import genre, localcache
+
+        if _genre_labels is None:
+            _genre_labels = genre.label_vectors()
+        verdict = genre.classify(list(vector), _genre_labels)
+        if verdict is None:
+            return None
+        localcache.record_genre(track_id, verdict, conn)
+        return verdict.genre
+    except Exception:
+        log.warning("postprocess: CLAP genre label failed for track %s", track_id, exc_info=True)
+        return None
+
+
+def run_artist_logic(track_id: int, conn) -> str:
+    """Link a newly ingested track to its MusicBrainz artists.
+
+    A known artist string is linked instantly; a new one is resolved through
+    this song (:func:`karaoke.artist_identity.resolve_track`), which also
+    rewrites its genres. Artists stored for the first time then get their
+    Wikidata facts and an artist-index document. Every part is best effort:
+    MusicBrainz being busy leaves the string ``failed`` for the next
+    ``make artists``, and never holds up the rest of the chain.
+    """
+    from . import artist_identity, musicbrainz
+
+    try:
+        status, fetched = artist_identity.resolve_track(track_id, conn, musicbrainz)
+    except Exception:
+        log.warning("postprocess: artist resolve failed for track %s", track_id, exc_info=True)
+        return "error"
+    if fetched:
+        try:
+            from . import artist_wikidata, wikidata
+
+            artist_wikidata.run(conn, wikidata, mbids=fetched, out=lambda line: None)
+        except Exception:
+            log.warning("postprocess: Wikidata for %s failed", fetched, exc_info=True)
+        try:
+            from . import artist_index
+            from .osclient import client
+
+            artist_index.upsert(conn, client(), fetched)
+        except Exception:
+            log.warning("postprocess: artist index update for %s failed", fetched, exc_info=True)
+    log.info("postprocess: artist for track %s: %s%s", track_id, status,
+             f" ({len(fetched)} new)" if fetched else "")
+    return status
 
 
 def run_mood_logic(track_id: int, audio_path: Path, conn) -> bool:

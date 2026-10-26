@@ -40,12 +40,16 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
     synced lyrics lack Enhanced LRC word tags), ``"sync"`` (approved lyrics are
     plain text with no timings at all), ``"vectors"`` (no OpenSearch document),
     ``"chords"`` (no harmonic progression with chord motion), ``"clap"``
-    (no CLAP timbre embedding) and ``"mood"`` (no current mood timeline).
-    Empty list = nothing to do.
+    (no CLAP timbre embedding), ``"mood"`` (no current mood timeline) and
+    ``"artist"`` (not linked to MusicBrainz artists, and its artist string is
+    either new or resolved before -- an ``unmatched`` or ``failed`` string is
+    left to ``make artists``, so a library-wide enqueue cannot turn into
+    thousands of MusicBrainz lookups). Empty list = nothing to do.
 
-    The last two are answered by OpenSearch rather than the database. Pass
-    ``include_search_artefacts=False`` to skip those two round-trips when the
-    caller only cares about the database-derived steps.
+    ``vectors``, ``chords`` and ``clap`` are answered by OpenSearch rather than
+    the database, and ``artist`` may cost MusicBrainz lookups. Pass
+    ``include_search_artefacts=False`` to leave out those and the mood check
+    when the caller only cares about the cheap, database-derived steps.
     """
     from . import track_analysis
     from .upgrade_timings import has_word_timings
@@ -102,7 +106,28 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
         except Exception:
             log.debug("could not check mood timeline for track %s", track_id)
 
+    if include_search_artefacts and _needs_artist(track_id, conn):
+        pending.append("artist")
+
     return pending
+
+
+def _needs_artist(track_id: int, conn: Connection) -> bool:
+    """Whether the track should be linked to MusicBrainz artists now."""
+    from . import localcache
+
+    try:
+        if not localcache.table_exists(conn, "artist_lookups"):
+            return False
+        row = conn.execute("""
+            SELECT EXISTS (SELECT 1 FROM track_artists WHERE track_id = t.track_id) AS linked,
+                   l.status
+            FROM tracks t LEFT JOIN artist_lookups l ON l.artist_text = t.artist
+            WHERE t.track_id = %s""", (track_id,)).fetchone()
+    except Exception:
+        log.debug("could not check artist links for track %s", track_id)
+        return False
+    return bool(row) and not row["linked"] and row["status"] in (None, "resolved")
 
 
 def _missing_search_artefacts(track_id: int) -> list[str]:
