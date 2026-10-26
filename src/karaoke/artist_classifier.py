@@ -379,6 +379,38 @@ SUBGENRE_TO_BROAD: dict[str, list[str]] = {
     "carnatic": ["world", "classical"],
     "hindustani": ["world", "classical"],
     "bhangra": ["world", "pop"],
+
+    # MusicBrainz genres common in this library that neither the entries above
+    # nor the keyword fallback catch (counted over 2,945 resolved artists,
+    # 2026-10-26): dance 78 artists, edm 74, neo-psychedelia 49, ... Unmapped,
+    # they carry no weight, and "bolero" left Guadalupe Pineda out of Latin.
+    # Left out on purpose: experimental, avant-garde, instrumental, lo-fi,
+    # noise, comedy, christmas music -- descriptions, not families.
+    "dance": ["electronic", "pop"],
+    "edm": ["electronic"],
+    "club": ["electronic"],
+    "alternative dance": ["electronic", "rock"],
+    "indietronica": ["electronic", "rock"],
+    "breaks": ["electronic"],
+    "big beat": ["electronic"],
+    "nu disco": ["electronic"],
+    "euro-disco": ["electronic", "pop"],
+    "chillwave": ["electronic"],
+    "new rave": ["electronic", "rock"],
+    "post-industrial": ["electronic", "rock"],
+    "neo-psychedelia": ["rock"],
+    "heavy psych": ["rock", "metal"],
+    "aor": ["rock"],
+    "jam band": ["rock"],
+    "pigfuck": ["rock", "punk"],
+    "slowcore": ["rock"],
+    "crossover prog": ["rock"],
+    "mod": ["rock"],
+    "stomp and holler": ["folk", "rock"],
+    "psychobilly": ["punk", "rock"],
+    "bolero": ["latin"],
+    "ranchera": ["latin"],
+    "mpb": ["latin"],
 }
 
 # Curated offline seed dictionary for immediate, zero-latency resolution

@@ -138,12 +138,14 @@ and members are the links available now.
 Done:
 
 - **Genres from votes.** `resolve_artists.py` ends by rewriting
-  `artist_genres` for every resolved string (`--genres-only` does just that).
-  The source is its main credited artists' MusicBrainz genres (curated genres,
-  else genre-like tags), weighted by votes, keeping genres with at least a
-  quarter of the top vote. Guests do not lend a song their genre. The rows
-  replace the seed list's and the name-searched classifier's for that string,
-  and a string with no usable votes keeps what it had. Every reader (search,
+  `artist_genres` for every resolved string (`--genres-only` does just that;
+  `make artists` runs it again after Wikidata). The source is its main
+  credited artists' MusicBrainz genres (curated genres, else genre-like tags),
+  weighted by votes, keeping genres with at least a quarter of the top vote.
+  Without votes, Wikidata's genres count one each. Without either, the
+  name-searched classifier's guess is dropped, since it was often another
+  artist of the same name ("Liminal", an Australian psych band, came out
+  latin); the curated seed list stays. Guests do not lend a song their genre. Every reader (search,
   graph, TUI filter, smart playlists) picks this up without changes.
 - **Weighted main genre.** `genre_ids` and `genre_options` sum weights
   instead of counting tags, and drop a family with half or less of an

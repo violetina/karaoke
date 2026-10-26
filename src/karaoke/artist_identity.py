@@ -521,38 +521,59 @@ def voted_genres(raw: dict[str, Any]) -> list[tuple[str, int]]:
 
 
 def derive_artist_genres(conn, artists: Optional[list[str]] = None) -> Counter:
-    """Rewrite ``artist_genres`` from MusicBrainz votes for every resolved string.
+    """Rewrite ``artist_genres`` for every resolved string from what is known.
 
-    Each artist string gets the summed votes of its main credited artists
-    (guests do not lend a song their genre), one row per specific genre and
-    broad family, weighted by votes. The rows replace the name-searched
-    classifier's and the seed list's for that string; a string whose artists
-    have no usable genres keeps what it had. ``artists`` limits the rewrite
-    to those strings, as for one newly ingested song.
+    Each artist string gets its main credited artists' genres (guests do not
+    lend a song their genre), one row per specific genre and broad family:
+
+    1. MusicBrainz votes, weighted by votes (``source = 'musicbrainz'``);
+    2. else Wikidata's genres, one vote each (``source = 'wikidata'``);
+    3. else nothing from either: the name-searched classifier's guess is
+       dropped, because knowing the real artist showed those guesses to be
+       other artists of the same name ("Liminal", an Australian psych band,
+       came out latin). The hand-curated seed list stays.
+
+    1 and 2 replace whatever the string had. ``artists`` limits the rewrite to
+    those strings, as for one newly ingested song.
     """
+    from . import artist_wikidata
     from .artist_classifier import map_to_broad_genres, normalize_artist
     from .localcache import ensure_artist_genres_table
 
     ensure_artist_genres_table(conn)
+    artist_wikidata.ensure_schema(conn)
     rows = conn.execute("""
-        SELECT DISTINCT t.artist, a.mbid, a.raw
+        SELECT DISTINCT t.artist, a.mbid, a.raw, w.genres AS wd_genres
         FROM track_artists ta
         JOIN tracks t ON t.track_id = ta.track_id
         JOIN artists a ON a.mbid = ta.mbid
+        LEFT JOIN artist_wikidata w ON w.mbid = a.mbid
         WHERE ta.role = 'main' AND (%s::text[] IS NULL OR t.artist = ANY(%s::text[]))""",
         (artists, artists)).fetchall()
-    by_string: dict[str, Counter] = {}
+    by_string: dict[str, tuple[Counter, Counter]] = {}
     for r in rows:
-        votes = by_string.setdefault(r["artist"], Counter())
+        votes, wiki = by_string.setdefault(r["artist"], (Counter(), Counter()))
         for name, count in voted_genres(r["raw"] or {}):
             votes[name] += count
+        for g in r["wd_genres"] or []:
+            label = (g.get("label") or "").strip().lower().removesuffix(" music")
+            if label:
+                wiki[label] = 1
     totals: Counter = Counter()
     now = time.time()
-    for artist, votes in by_string.items():
+    for artist, (votes, wiki) in by_string.items():
         key = normalize_artist(artist)
-        mapped = [(g, b, c) for g, c in votes.items() for b in map_to_broad_genres(g)]
-        if not key or not mapped:
-            totals["kept as was"] += 1
+        if not key:
+            continue
+        source, mapped = GENRE_SOURCE, [(g, b, c) for g, c in votes.items()
+                                        for b in map_to_broad_genres(g)]
+        if not mapped:
+            source, mapped = "wikidata", [(g, b, c) for g, c in wiki.items()
+                                          for b in map_to_broad_genres(g)]
+        if not mapped:
+            gone = conn.execute("DELETE FROM artist_genres WHERE artist_normalized = %s"
+                                " AND source = 'online'", (key,)).rowcount
+            totals["name guess dropped" if gone else "no genres"] += 1
             continue
         conn.execute("DELETE FROM artist_genres WHERE artist_normalized = %s", (key,))
         for genre, broad, count in mapped:
@@ -563,7 +584,7 @@ def derive_artist_genres(conn, artists: Optional[list[str]] = None) -> Counter:
                 ON CONFLICT (artist_normalized, genre, broad_genre) DO UPDATE SET
                     weight = excluded.weight, source = excluded.source,
                     fetched_at = excluded.fetched_at""",
-                (key, genre, broad, float(count), GENRE_SOURCE, now))
-        totals["from musicbrainz"] += 1
+                (key, genre, broad, float(count), source, now))
+        totals[f"from {source}"] += 1
     conn.commit()
     return totals

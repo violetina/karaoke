@@ -504,6 +504,12 @@ def run_artist_logic(track_id: int, conn) -> str:
             from . import artist_wikidata, wikidata
 
             artist_wikidata.run(conn, wikidata, mbids=fetched, out=lambda line: None)
+            # Wikidata's genres stand in when MusicBrainz has no votes, so
+            # the string's genres are rewritten once they are known.
+            row = conn.execute("SELECT artist FROM tracks WHERE track_id = %s",
+                               (track_id,)).fetchone()
+            if row:
+                artist_identity.derive_artist_genres(conn, artists=[row["artist"]])
         except Exception:
             log.warning("postprocess: Wikidata for %s failed", fetched, exc_info=True)
         try:
