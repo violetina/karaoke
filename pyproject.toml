@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karaoke"
-version = "1.4.0"
+version = "1.5.0"
 description = "Local karaoke + lyric semantic search over OpenSearch (kind cluster), LRCLIB synced lyrics."
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,8 @@ dependencies = [
     "textual",
     "pyfiglet>=1.0",
     "fastapi>=0.110.0",
+    "httpx>=0.27",
+    "sse-starlette>=2.0",
     "uvicorn[standard]>=0.28.0",
     "pika",
     "celery>=5.4",
@@ -73,9 +75,13 @@ karaoke-ytmusic-playlist = "karaoke.ytmusic_playlist:ytmusic_playlist_main"
 karaoke-mpris = "karaoke.mpris_service:mpris_main"
 karaoke-mcp = "karaoke.mcp_server:main"
 karaoke-dj = "karaoke.dj_chat:main"
+karaoke-dashboard = "karaoke.dashboard_api:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+karaoke = ["webapp_dist/index.html", "webapp_dist/assets/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

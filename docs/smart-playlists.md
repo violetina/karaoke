@@ -63,9 +63,9 @@ Within each, the more dedicated artist (fewer broad genres) first.
 4. **Genre family per song** — the artist's strong broad genres (or the CLAP
    guess's), and of those the one the list leans to most. A genre-less song
    borrows the family of close-sounding listmates. A family with at most two
-   songs among the list's 140 candidates is the odd one out and only fills a
+   songs among the list's 198 candidates is the odd one out and only fills a
    list that would otherwise come up short.
-5. **70 songs** — the TUI's own queue and collector still cap at 50.
+5. **99 songs** — the TUI's own queue and collector still cap at 50.
 6. **Flow order** — starting from the rule's best pick, each next song is the
    one that follows the current one best: CLAP timbre, plus mood hand-off
    (0.5), Camelot key (0.1), tempo (0.1) and chord motion (0.05), minus a

@@ -40,3 +40,7 @@ build_vm/
 # Output of long one-off runs (backfills, artist resolving, indexing),
 # kept for checking afterwards and never committed.
 logs/
+
+# Webapp node_modules and local build caches
+**/node_modules/
+src/karaoke/webapp/dist/

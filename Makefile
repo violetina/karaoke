@@ -33,7 +33,7 @@ K8S_NAMESPACE ?= karaoke
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-audit docs-sync docs-confluence-prep \
         docs-confluence-publish deps-make2graph view_makeflow lint format \
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
-        install-audio analyze api ctrl-api mcp dj mpris ytmusic-sync \
+        install-audio analyze api ctrl-api mcp dj dashboard dashboard-build mpris ytmusic-sync \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run flatten-counts vector-index vector-index-dry-run vector-status folder-scan \
@@ -212,6 +212,12 @@ mcp: ## Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 
 dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
 	$(PYTHON) -m karaoke.dj_chat
+
+dashboard: ## Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
+	$(PYTHON) -m karaoke.dashboard_api
+
+dashboard-build: ## Build the Vue 3 dashboard frontend bundle
+	cd src/karaoke/webapp && npm run build
 
 smart-playlists: ## Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
 	$(PYTHON) -m karaoke.smart_playlists $${PUSH:+--push} $${DRY:+--dry-run}

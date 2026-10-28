@@ -146,6 +146,11 @@ Several tables are managed directly by application modules rather than the legac
 | `postprocess_claims` | `postprocess_queue.py` | Atomic lock (`song_key`, `claimed_at`) with 15-minute TTL preventing duplicate Celery post-processing chains for tracks already in flight. |
 | `sync_failures` | `postprocess_queue.py` | Remembers deterministic Whisper alignment failures keyed by `track_id` and SHA-1 `lyrics_hash`, preventing un-alignable tracks from infinite Celery retry loops. |
 | `active_queue_state` | `localcache.py` | Active playback and queue ordering state across TUI restarts. |
+| `artists` | `artist_identity.py` | Canonical MusicBrainz artist entity (MBID, name, sort name, type, country, begin/end, disambiguation, Wikidata QID, genres with vote counts, raw payload). |
+| `artist_aliases` | `artist_identity.py` | Normalized alternate spellings, aliases, and legal names mapping to canonical artist MBIDs. |
+| `track_artists` | `artist_identity.py` | Tracks to MBID artists in credit order, role (`main`/`featured`), join phrases, recording MBID, and resolution method (`recording`/`name`). |
+| `artist_lookups` | `artist_identity.py` | Resolution tracking per artist string (`resolved`, `unmatched`, `failed`) and method. |
+| `artist_wikidata` | `artist_wikidata.py` | Cached Wikidata facts per MBID: kind, genres, country, labels, members, influences, instruments, dates, Commons image, and streaming IDs (Spotify, Discogs, Apple Music, YouTube). |
 
 ## Unified event store
 

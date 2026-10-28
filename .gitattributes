@@ -1,0 +1,2 @@
+# Built vendor bundles contain embedded shader strings; do not rewrite their whitespace.
+src/karaoke/webapp_dist/assets/* -whitespace linguist-generated=true

@@ -41,6 +41,40 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
+## Unified web dashboard
+
+Run `make dashboard` (or `karaoke-dashboard` after installing the package), then
+open <http://127.0.0.1:8900>. The dashboard combines live highlighted lyrics,
+animated mood/chord overlays, artist knowledge and relationship graphs, library
+tracks, playlists, player controls, and an embedded Ollama AI DJ chat.
+
+The host control API (`make ctrl-api`, port 8765) supplies playback and stage
+state. The MCP server (`make mcp`, port 8888) supplies similarity graphs and
+playlists. OpenSearch (9200) provides derived artist/search data; Ollama (11434)
+powers the chat. These services run separately. Artist ingestion uses MusicBrainz
+and Wikidata; full song analysis runs on the existing Celery workers.
+
+The release includes a prebuilt Vue frontend. To rebuild after editing it:
+
+```bash
+npm ci --prefix src/karaoke/webapp
+make dashboard-build
+node tests/test_dashboard_chat_safety.mjs
+```
+
+Click a graph node to inspect it without interrupting playback. Right-click a
+song for Play now, Queue next, Add to AI DJ playlist, or processing. Chat replies
+never automatically queue or play tracks: queue suggestions require a button
+click. Queue next requires a running YouTube Music kiosk and a queueable source.
+The artist pane follows each song change, resolving new artists as needed.
+
+Use `DASHBOARD_PORT` / `DASHBOARD_HOST` to override the bind address, and
+`KARAOKE_CTRL_API_URL`, `KARAOKE_MCP_API_URL`, `OPENSEARCH_URL`, `OLLAMA_URL`,
+`KARAOKE_DJ_MODEL` to override upstreams/model. The dashboard defaults to binding
+on all interfaces and has no authentication: run it only on a trusted local
+network, or set `DASHBOARD_HOST=127.0.0.1`. Restart the dashboard after Python
+changes and hard-refresh after rebuilding its frontend.
+
 ## Usage
 
 ```bash

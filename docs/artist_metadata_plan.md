@@ -1,6 +1,6 @@
 # Artist identity and metadata — plan
 
-**Status: steps 1–3 and 5 merged (#139–#141), step 4 in progress.** Written 2026-10-25.
+**Status: steps 1–5 merged (#139–#142, #144), complete.** Written 2026-10-25.
 
 The short version: the library has no artist entity. An artist is whatever
 string the track came with, so "Bonnie "Prince" Bill", "Bonnie 'Prince' Bill"

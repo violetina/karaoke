@@ -23,6 +23,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dashboard:
+    name: Dashboard build and chat safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/karaoke/webapp/package-lock.json
+      - run: npm ci --prefix src/karaoke/webapp
+      - run: npm run build --prefix src/karaoke/webapp
+      - run: node tests/test_dashboard_chat_safety.mjs
+
   test:
     name: Unit tests
     runs-on: ubuntu-latest

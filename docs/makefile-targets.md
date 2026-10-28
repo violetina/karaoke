@@ -20,6 +20,8 @@ celery-worker                Run the Celery post-processing worker (CLAP/audio s
 clean                        Remove build artifacts
 clean-tools                  Remove cached helper tools
 ctrl-api                     Launch the host-side control API (playback; needs a desktop session)
+dashboard                    Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
+dashboard-build              Build the Vue 3 dashboard frontend bundle
 db-cleanup                   Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
