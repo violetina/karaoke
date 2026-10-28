@@ -6,10 +6,11 @@ analysis, genre/tone, recordings, play stats, saved playlists) in a local
 semantic/vector search and is always rebuilt from this database.
 
 !!! info "Migration status — complete (cutover)"
-    The SQLite → Postgres migration has been **cut over**. Postgres is now the
-    only backend the application opens at runtime; SQLite is no longer used
-    outside the one-time migration script. See
-    [Migration status](#migration-status) for what moved and what is left.
+    The SQLite → Postgres migration has been **cut over**. Postgres is the only
+    backend the application opens for its operational library at runtime, via
+    `KARAOKE_PG_URL`. SQLite remains only for the one-time migration script and
+    the configurable Celery result backend (`celery-results.sqlite`); neither is
+    the music library. See [Migration status](#migration-status) for details.
 
 ## PostgreSQL (current backend)
 

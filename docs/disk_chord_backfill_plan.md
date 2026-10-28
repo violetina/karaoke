@@ -1,7 +1,8 @@
 # Disk chord backfill — plan
 
-**Status: not started.** Written 2026-09-21. Waiting on a go-ahead and on the
-USB backup disk being mounted.
+**Historical status recorded 2026-09-21: not started.** Waiting on a go-ahead
+and on the USB backup disk being mounted. This snapshot does not establish the
+current backfill status.
 
 The short version: ~11.4k tracks in the library have no chord analysis, and the
 audio for almost all of them is sitting on the USB backup disk. Analysing them

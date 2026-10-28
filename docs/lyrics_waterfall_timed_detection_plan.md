@@ -1,5 +1,13 @@
 # Implementation Plan: Lyrics Detection Waterfall & Timed Version Priority
 
+!!! note "Historical implementation proposal (pre-PostgreSQL cutover)"
+    Storage references below predate the cutover; the lyrics cache is now
+    PostgreSQL via `localcache` / `KARAOKE_PG_URL` (see
+    [Database backend](database.md)). Example SQL written with `?` placeholders
+    is SQLite-only; the shipped psycopg code uses `%s`. Any "~100ms" timings are
+    illustrative, not guarantees.
+
+
 This plan investigates and fixes the lyrics detection waterfall bug where finding untimed lyrics in YouTube / YouTube Music (e.g. via the CDP lyrics panel or untimed captions) causes the system to settle for plain text, overwrite existing synced lyrics, and schedule heavy Whisper audio alignment when real synced lyrics exist online.
 
 ---

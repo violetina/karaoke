@@ -1,5 +1,13 @@
 # Implementation Plan: Browse Mode ('H') Fixes & Enhancements
 
+!!! note "Historical implementation proposal (pre-PostgreSQL cutover)"
+    Track counts and timings below are pre-cutover SQLite measurements, not
+    current PostgreSQL benchmarks. The operational store is now PostgreSQL via
+    `localcache` / `KARAOKE_PG_URL` (see [Database backend](database.md)). The
+    example SQL uses SQLite-only forms (`COLLATE NOCASE`, `:name` placeholders);
+    the shipped code uses `lower(...)` and psycopg `%s` / `%(name)s` instead.
+
+
 This plan addresses the bugs and feature gaps in Browse Mode (`H`) in the Karaoke TUI:
 1. **Browse all songs**: Eliminating the artificial 70-item cap (`INITIAL_BROWSE_LIMIT = 70`) so users can browse all 10,000+ songs in their collection (with optional batch/all selection and live count).
 2. **Genre filter in `H`**: Adding a synchronized genre selector to the browse overlay header (`#browse-head`).

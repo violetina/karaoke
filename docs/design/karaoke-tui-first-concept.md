@@ -1,5 +1,11 @@
 # Karaoke TUI first editable concept
 
+!!! note "Historical design snapshot"
+    Descriptions below reflect the original concept. SQLite mentions are
+    recovered historical context; the application now uses PostgreSQL through
+    `localcache` / `KARAOKE_PG_URL` (see [Database backend](../database.md)).
+
+
 Editable drawing: `docs/design/karaoke-tui-first-concept.excalidraw`
 
 Open it by dragging the `.excalidraw` file into https://excalidraw.com/ or any Excalidraw-compatible editor. This is easier to edit together than trying to hand-edit terminal box art.
