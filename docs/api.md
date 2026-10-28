@@ -155,7 +155,7 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.genre
 
-## OpenSearch & SQLite Search Engine
+## OpenSearch & PostgreSQL Search Engine
 
 ::: karaoke.librarysearch
 

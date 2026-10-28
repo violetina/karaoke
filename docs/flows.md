@@ -52,7 +52,7 @@ prefix comparison is stable across restarts.
 ### Lyric resolution for a detection
 
 Once a mode is chosen, `detect.resolve_lyrics()` turns it into
-`(artist, title, lyrics)` from the local SQLite cache, preferring the canonical
+`(artist, title, lyrics)` from the local PostgreSQL cache, preferring the canonical
 URL over the often-stale browser artist/title.
 
 ```mermaid
@@ -312,7 +312,7 @@ flowchart TD
 
 ### Why each guard is there
 
-**Never downgrade synced lyrics.** If SQLite already holds approved synced
+**Never downgrade synced lyrics.** If PostgreSQL already holds approved synced
 lyrics for a track, an untimed plain text payload from the YouTube Music lyrics
 panel or captions will never overwrite or erase the timestamps.
 
@@ -385,12 +385,12 @@ flowchart TD
 
 ## Bi-Directional YouTube Music Playlist Sync Flow
 
-`karaoke-ytmusic-playlist --sync --bidirectional` performs differential synchronization between local SQLite (`karaoke.db`) and YouTube Music playlists.
+`karaoke-ytmusic-playlist --sync --bidirectional` performs differential synchronization between local PostgreSQL (`KARAOKE_PG_URL`) and YouTube Music playlists.
 
 ```mermaid
 flowchart TD
     A[YT Music Playlist API] <-->|get_playlist_tracks| B[bidirectional_sync_ytmusic_playlist]
-    B -->|Remote Additions| C[Import Track & Source into SQLite]
+    B -->|Remote Additions| C[Import Track & Source into PostgreSQL]
     C -->|Auto-Fetch| D[LRCLIB / Whisper Synced Lyrics]
     B -->|Local Additions| E[Export Synced Tracks to YT Music]
     D -->|Emit Task Event| F[RabbitMQ / Argo Events Ledger]

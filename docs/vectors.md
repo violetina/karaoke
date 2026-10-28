@@ -23,7 +23,7 @@ Run `python scripts/fill_analysis_and_vector_gaps.py`:
 3. Runs zero-shot CLAP classification & audio feature extraction.
 4. Updates OpenSearch vector indices (`tracks`, `tracks-lines`).
 
-SQLite remains the source of truth; all of these are derived, and all but one
+PostgreSQL remains the source of truth; all of these are derived, and all but one
 are rebuildable.
 
 ## Two audio spaces, answering different questions
@@ -96,7 +96,7 @@ Discogs-EffNet models are the conventional route and need TensorFlow, which
 will not install here (no cp314 wheels, and the ebuild's `libclang` dependency
 exists in no repo).
 
-Stored in **both** places: `track_genre` in SQLite is the source of truth, and
+Stored in **both** places: `track_genre` in PostgreSQL is the source of truth, and
 `genre` / `genre_score` / `genre_runner_up` are mirrored onto the CLAP and
 track documents so a search can filter without a join. 116 tracks are labelled;
 4 matched nothing and are deliberately left unlabelled.
@@ -150,7 +150,7 @@ index using the command `--notes`.
 which space answered rather than presenting two incomparable scores on one
 scale.
 
-The TUI's own search box reads **none** of these — it scores SQLite rows
+The TUI's own search box reads **none** of these — it scores PostgreSQL rows
 directly (see [Search and weights](search.md)), so the state of the vector
 indexes changes nothing about what typing in the TUI returns.
 

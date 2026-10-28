@@ -5,7 +5,7 @@ questions. Knowing which one is running explains most surprises.
 
 | | where | index | answers |
 |---|---|---|---|
-| **Library search** | the TUI's `/` box | SQLite | "which track do I mean?" |
+| **Library search** | the TUI's `/` box | PostgreSQL | "which track do I mean?" |
 | **Semantic search** | `karaoke.search`, the API | OpenSearch | "which song goes like this?" |
 
 The TUI's search box is the first one. It never touches OpenSearch, so the
@@ -16,9 +16,9 @@ type in the TUI.
 
 ## Library search (the TUI box)
 
-`karaoke.librarysearch.search()` reads every candidate track out of SQLite and
-scores it in Python. No index, no server: the library is small enough that a
-full scan is faster than anything that would need keeping in sync.
+`karaoke.librarysearch.search()` reads every candidate track out of PostgreSQL and
+scores it in Python. This path does not use the OpenSearch index; it still
+requires the operational PostgreSQL server.
 
 ```mermaid
 flowchart TD

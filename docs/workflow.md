@@ -11,7 +11,7 @@ To maintain a clean and stable `main` branch, this project uses **Git worktrees*
 - `/home/tina/karaoke` -> Always tracks `main`. Use this for running the stable app, end-to-end testing, and pulling merged changes. Do **not** develop new features directly here.
 - `/home/tina/karaoke-tui` -> Tracks `feat/tui`. Use this for developing the interactive browser and Textual UI components.
 - `/home/tina/karaoke-index` -> Tracks `feat/index`. Use this for OpenSearch, vector indexing, and semantic search features.
-- `/home/tina/karaoke-datamodel` -> Tracks `feat/data-model-refactor`. Use this for SQLite database schema and cache logic changes.
+- `/home/tina/karaoke-datamodel` -> Tracks `feat/data-model-refactor`. Use this for PostgreSQL database schema and cache logic changes.
 
 ### Adding a New Worktree
 
@@ -60,7 +60,7 @@ On every Enter press, the TUI logs the selected row, artist, title, source kind,
 
 ## Cache indexing for the TUI
 
-Downloaded YouTube cache files are indexed into SQLite source rows with:
+Downloaded YouTube cache files are indexed into PostgreSQL source rows with:
 
 ```bash
 cd ~/karaoke
@@ -102,7 +102,7 @@ Browser MPRIS `position` can run slightly **ahead** of audible output (output/de
 
 ### Per-track saved offsets
 
-Offsets can be persisted per track in the `track_sync_offsets` SQLite table (`track_id`, `offset_s`, `updated_at`):
+Offsets can be persisted per track in the `track_sync_offsets` PostgreSQL table (`track_id`, `offset_s`, `updated_at`):
 
 - Press `S` (capital) to save the current offset for the playing track.
 - When you've nudged the offset and the track changes, the TUI **asks** whether to Save or Discard the change before moving on.
@@ -132,7 +132,7 @@ This section details how metadata, lyrics, and audio analysis flow through the k
 
 ### 1. The Unified Lyric & Metadata Dataflow
 
-Every track in the platform is managed through three key tables in SQLite:
+Every track in the platform is managed through three key tables in PostgreSQL:
 * `tracks`: Stores the canonical identity (Artist, Title, Duration).
 * `sources`: Maps a track to an external media URL (YouTube webpage, Spotify URI, local file path, etc.).
 * `lyrics`: Stores approved synced or plain lyrics.
@@ -148,7 +148,7 @@ During active playback (Spotify, Browser YouTube tabs, VLC), the system operates
 Due to differences in metadata formatting between Spotify, YouTube, and lyric providers (LRCLIB, Genius), the following types of database gaps can naturally occur:
 * **Duplicate Tracks:** For example, Spotify reports the artist as `"Inpatient"`, whereas a lyric search/staging saves the canonical multi-artist string `"Inpatient, Ren & Chris Webby"`. This creates two disjoint track records for the same song.
 * **Orphan Tracks:** A track has approved lyrics in the database but lacks any associated external URL/kind in the `sources` table (rendering it un-openable on Enter).
-* **Orphan Cache Files:** A YouTube audio file (`*.webm`) was downloaded into the local cache (`~/.local/share/karaoke/youtube/`), but the track/source record was deleted, modified, or never mapped in SQLite.
+* **Orphan Cache Files:** A YouTube audio file (`*.webm`) was downloaded into the local cache (`~/.local/share/karaoke/youtube/`), but the track/source record was deleted, modified, or never mapped in PostgreSQL.
 
 To proactively avoid and heal these gaps, follow the mitigation workflows below.
 
@@ -159,7 +159,7 @@ A suite of built-in CLI commands and background scripts are available to automat
 #### A. Database Cleanup & Self-Healing (`scripts/db_cleanup.py`)
 This central utility runs a 3-phase database cleanup and self-healing loop:
 1. **Track Deduplication:** Automatically groups tracks by lowercase title and identifies duplicate records where the artist names are compatible (substrings, shared first words, or matching uploader strings). It consolidates all lyrics, sources, and track analyses into the canonical record and prunes the duplicates.
-2. **Source Healing:** Scans the database for tracks that have approved lyrics but are missing entries in the `sources` table. It automatically searches YouTube for those tracks and registers their YouTube webpage URLs in SQLite.
+2. **Source Healing:** Scans the database for tracks that have approved lyrics but are missing entries in the `sources` table. It automatically searches YouTube for those tracks and registers their YouTube webpage URLs in PostgreSQL.
 3. **Orphan Cache File Healing:** Scans your local YouTube cache (`~/.local/share/karaoke/youtube/`) for downloaded audio files that are not mapped in your database. It calls `yt-dlp` to retrieve their titles, decodes clean metadata, adds them back to `tracks`/`sources`, and runs full key/BPM/energy/brightness analysis on the local file.
 
 **Run the database cleanup script:**

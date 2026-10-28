@@ -242,7 +242,7 @@ k8s-deploy: k8s-load ## Deploy the library API to the kind cluster
 	kubectl --context $(KUBE_CONTEXT) apply -k deploy/k8s
 	kubectl --context $(KUBE_CONTEXT) -n $(K8S_NAMESPACE) rollout status deploy/karaoke-api --timeout=120s
 
-k8s-seed-db: ## Copy the local SQLite library into the cluster PVC
+k8s-seed-db: ## Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
 	./scripts/seed_db.sh
 
 k8s-status: ## Show deployed karaoke resources
@@ -259,7 +259,7 @@ k8s-logs: ## Follow library API pod logs
 k8s-undeploy: ## Remove the karaoke API from the cluster (keeps the PVC)
 	kubectl --context $(KUBE_CONTEXT) delete -k deploy/k8s --ignore-not-found
 
-index-youtube-cache: ## Add cached YouTube downloads to SQLite so they show in browse
+index-youtube-cache: ## Add cached YouTube downloads to PostgreSQL so they show in browse
 	$(PYTHON) scripts/index_youtube_cache.py
 
 yt-playlist-ingest: ## Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
@@ -357,7 +357,7 @@ upgrade-timings-dry-run: ## Preview which cached tracks can gain word-level timi
 upgrade-timings: ## Upgrade cached lyrics to word-level timing via YouTube captions
 	$(PYTHON) -m karaoke.upgrade_timings
 
-vector-index-dry-run: ## Preview SQLite -> OpenSearch vector indexing without writing
+vector-index-dry-run: ## Preview PostgreSQL -> OpenSearch vector indexing without writing
 	$(PYTHON) -m karaoke.vector_index --dry-run --no-embed --lines
 
 health: ## Run the karaoke platform health check (services, ports, cluster, DB)
@@ -433,7 +433,7 @@ systemd-status: ## Show status of all karaoke units + last health check
 	-journalctl --user -u karaoke-healthcheck.service -n 12 --no-pager || true
 
 
-vector-index: ## Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
+vector-index: ## Rebuild OpenSearch vector indexes from PostgreSQL (set LINES=1 for line docs)
 	$(PYTHON) -m karaoke.vector_index --rebuild $(if $(LINES),--lines,)
 
 vector-status: ## Show OpenSearch vector index status and rebuild progress

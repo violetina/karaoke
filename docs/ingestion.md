@@ -16,7 +16,7 @@ Both run the same pipeline per file:
 tags → (fingerprint if tags missing) → key/BPM/energy analysis
      → CLAP genre vector (when audio model available)
      → YouTube + Spotify source resolution
-     → SQLite ingest (track, local source, lyrics, analysis, genre)
+     → PostgreSQL ingest (track, local source, lyrics, analysis, genre)
 ```
 
 The overnight scan rebuilds the OpenSearch vectors once at the end; the retry
@@ -50,7 +50,10 @@ PYTHONPATH=src .venv/bin/python scripts/retry_skipped_collection.py --dry-run
 # -> On disk=<N> already ingested(local)=<M> missing=<N-M>
 ```
 
-### Example snapshot (mid first-pass, 2026-09-09)
+### Historical example snapshot (before the PostgreSQL cutover)
+
+The following 2026-09-09 measurements came from the old SQLite deployment.
+Its `database is locked` failures are historical, not current PostgreSQL behaviour.
 
 A ~20k-file backup collection, partway through the overnight scan:
 
@@ -66,15 +69,16 @@ A ~20k-file backup collection, partway through the overnight scan:
 | Skipped on `database is locked` | 107 |
 | Other errors | 1 |
 
-Throughput is roughly 800 files/hour on this machine (dominated by online
-source lookups). WAL mode keeps the TUI responsive while the scan runs.
+The historical run achieved roughly 800 files/hour, dominated by online
+source lookups. Current performance depends on the workload, external providers
+and PostgreSQL; SQLite WAL tuning does not apply.
 
 ## Recovering skipped files (resumable)
 
-The first pass skips a file whenever the SQLite write loses the lock
-(`database is locked`) or a file has no usable tags. Those files never get a
-`kind='local'` source row, so the retry pass finds them and re-ingests only
-them:
+Files skipped because of a database/provider error or missing usable metadata
+may have no `kind='local'` source row. The retry pass compares files on disk with
+PostgreSQL and re-ingests missing ones. The old SQLite `database is locked`
+condition is not a current-backend diagnostic:
 
 ```bash
 # Preview what would be retried (read-only)
@@ -86,22 +90,21 @@ PYTHONPATH=src .venv/bin/python scripts/retry_skipped_collection.py
 
 It is **resumable**: each run recomputes the missing set from the database, so
 you can stop it (Ctrl-C) and relaunch later and it continues where it left off.
-With WAL mode active, lock-skips are rare on the retry.
-
-Run the retry pass **after** the first pass finishes, so the two do not compete
-for the writer.
+Run the retry pass **after** the first pass finishes to avoid duplicate work
+and competing downloads or provider lookups. PostgreSQL supports concurrent
+clients; there is no SQLite single-writer/WAL configuration to tune.
 
 ### Running from Admin TUI
 
 The Admin TUI (`python -m karaoke.admin_tui`) exposes these operations directly in the **File Ingestion & Folder Scan** panel:
 
 - **`Retry Skipped (p)`** (`btn-retry-skipped`): Ingests skipped files for the specified or default collection folder, updating OpenSearch vectors on completion.
-- **`Dry Run Check (d)`** (`btn-retry-dryrun`): Rapidly previews how many on-disk files are missing from SQLite without modifying anything.
-- **`Index YT Cache (y)`** (`btn-index-cache`): Scans downloaded YouTube cache files (`~/.local/share/karaoke/youtube/`) and adds unindexed tracks to SQLite.
+- **`Dry Run Check (d)`** (`btn-retry-dryrun`): Rapidly previews how many on-disk files are missing from PostgreSQL without modifying anything.
+- **`Index YT Cache (y)`** (`btn-index-cache`): Scans downloaded YouTube cache files (`~/.local/share/karaoke/youtube/`) and adds unindexed tracks to PostgreSQL.
 
 ### Files that still won't ingest
 
-Some skipped files have empty ID3 tags and do not resolve via fingerprint; they
-log `SKIP ... missing artist/title after tags & fingerprint`. That is a property
-of those files, not a scan bug. A filename-based artist/title fallback (for the
-common `Artist - Title.mp3` pattern) is a possible future enhancement.
+The scanner already tries a filename-based `Artist - Title.ext` fallback when
+tags and fingerprint metadata are incomplete. Files that still lack usable
+artist/title metadata are skipped; inspect their names/tags rather than assuming
+that retrying will identify them. See `folder_scan.py` for the fallback order.

@@ -80,13 +80,15 @@ print('track_id:', tid, 'needs:', needs_postprocessing(tid, conn))
                                      • upgrade word timings     ─► lyrics (Enhanced LRC)
                                                    │
                                                    ▼
-                                            SQLite (~/.local/share/karaoke)
+                                            PostgreSQL (KARAOKE_PG_URL)
 ```
 
-**Why the worker runs on the host (not in-cluster):** it needs the local SQLite DB, the
-YouTube audio cache, and the heavy analysis stack (essentia/librosa/whisper/yt-dlp) —
-none of which belong in the slim API container image. Only the stateless **RabbitMQ
-broker** runs in kind.
+**Why the worker runs on the host (not in the slim API container):** it needs
+access to the downloaded audio cache and the heavy analysis stack
+(essentia/librosa/Whisper/yt-dlp), plus a PostgreSQL connection through
+`KARAOKE_PG_URL`. Database connectivity is not tied to a SQLite file. RabbitMQ
+runs in kind; other cluster services are documented in the
+[platform topology](platform-services.md).
 
 Key modules:
 - `src/karaoke/postprocess_queue.py` — `needs_postprocessing()` (gap detection),
@@ -94,15 +96,13 @@ Key modules:
   `KARAOKE_ORCHESTRATOR=legacy` keeps the old pika path available).
 - `src/karaoke/celery_app.py` — Celery app configuration (RabbitMQ broker, queue
   name `karaoke-postprocess-celery`).
-- `src/karaoke/tasks.py` — Celery task wrapper. Phase 1 deliberately calls the proven
-  `postprocess_worker.process_task()` so behaviour stays unchanged while Celery adds
 - `src/karaoke/tasks.py` — **Celery orchestrator task** (`postprocess_track`), which
   chains together the granular sub-tasks for downloading audio, analyzing, syncing
   lyrics, and rebuilding vectors. Also includes the individual sub-tasks.
 - `src/karaoke/postprocess_worker.py` — Reusable **core logic functions** (`run_download_logic`,
   `run_analysis_logic`, `run_timings_logic`, `run_sync_logic`, `run_vectors_logic`)
   called by the Celery tasks. The legacy pika consumer has been removed.
-- `scripts/enqueue_postprocess.py` — bulk backfill from SQLite.
+- `scripts/enqueue_postprocess.py` — bulk backfill from PostgreSQL.
 - `deploy/k8s/rabbitmq.yaml` — broker Deployment + NodePort Service.
 
 ---

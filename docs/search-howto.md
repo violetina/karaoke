@@ -90,9 +90,9 @@ curl -X POST "http://localhost:9200/tracks-lines/_search?pretty" \
 
 ---
 
-## 4. Re-indexing and Synchronizing from SQLite
+## 4. Re-indexing and Synchronizing from PostgreSQL
 
-OpenSearch indices are derived from SQLite (`~/.local/share/karaoke/karaoke.db`). You can dry-run or rebuild the index using the indexing scripts or Makefile targets:
+OpenSearch indices are derived from PostgreSQL (`KARAOKE_PG_URL`). You can dry-run or rebuild the index using the indexing scripts or Makefile targets:
 
 ```bash
 # Dry-run track indexing

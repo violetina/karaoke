@@ -124,7 +124,7 @@ Pipeline per file (`karaoke.folder_scan.scan_and_ingest_folder`):
    (`clap_vector.embed_audio`), zero-shot genre (`genre.classify`).
 4. **Resolve** YouTube (`youtube.search` + `source_select.select_best_source`)
    and Spotify (`SpotifyClient.search_track`).
-5. **Ingest** into SQLite (`tracks`, `sources`, `lyrics`, `track_analysis`,
+5. **Ingest** into PostgreSQL (`tracks`, `sources`, `lyrics`, `track_analysis`,
    `track_analysis_history`, `track_genre`). `sources` accumulates local,
    YouTube/YT Music, and Spotify rows; it does not replace existing sources.
 
@@ -204,10 +204,11 @@ The TUI (`karaoke.tui.KaraokeTui`) routes player controls (play/pause, next,
 previous, seek) and record start/stop through this client; a web UI does the
 same over HTTP with no new backend code.
 
-Also ported onto `ApiClient` (HTTP-first, SQLite/in-process fallback):
+Also ported onto `ApiClient` (HTTP-first, PostgreSQL/in-process fallback):
 
 - `karaoke.browse.KaraokeBrowser` — track listing (`list_tracks`) and playback (`play`).
-- `karaoke-stats` (`cli.stats_main`) — reads `GET /api/stats?limit=&days=`.
+- `make stats` (`cli.stats_main`) — reads `GET /api/stats?limit=&days=`. The parser
+  name is `karaoke-stats`; no standalone entry point is currently installed.
 - `karaoke-recording --analyse/--discard` (`recording_worker.recording_main`) —
   mutating actions go through `record_analyse` / `record_discard_audio`.
 

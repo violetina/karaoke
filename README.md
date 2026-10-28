@@ -1,60 +1,120 @@
-# karaoke
+# Karaoke
 
-A local karaoke + lyric-search platform.
+A local-first karaoke, music-library and AI DJ platform for Linux. Follow desktop
+playback with synced lyrics, explore songs and artist relationships, and manage a
+YouTube Music queue from the terminal or the unified web dashboard.
 
-- **Drive** playback/cache/history from local **SQLite**: known tracks, source URLs/URIs, approved lyrics, radio stats and backfill gaps.
-- **Fetch** synced (timestamped) lyrics from **LRCLIB** (free, no key), cached in SQLite.
-- **Index** SQLite + local library data into optional **OpenSearch** vector indexes when semantic search/training features are wanted.
-- **Karaoke** CLI: identify the current song (file / text / live via `songrec`), then render time-synced highlighted lyrics.
-- **lyricsearch**: semantic "find the song that goes '...'" via lyric embeddings (OpenSearch-derived index).
-- **Whisper fallback**: for local files with no LRCLIB match, transcribe to approximate synced lyrics with faster-whisper.
-- **Backfill**: log missing radio/player lyrics into SQLite and process them later with `karaoke-backfill`.
+[Latest release](https://github.com/violetina/karaoke/releases/latest) ·
+[Changelog](https://github.com/violetina/karaoke/blob/main/CHANGELOG.md) · [Architecture](https://github.com/violetina/karaoke/blob/main/docs/architecture.md) ·
+[Service map](https://github.com/violetina/karaoke/blob/main/docs/platform-services.md) · [Makefile commands](https://github.com/violetina/karaoke/blob/main/docs/makefile-targets.md)
 
-## Source model (hybrid)
+## What it does
 
-- `~/Music` = optional audio source for scanning and Whisper transcription.
-- Spotify (your account) = optional metadata/source seed (liked songs / playlists). Spotify's API does **not** allow audio download, so no Whisper for Spotify-only tracks unless a matching audio source is found elsewhere.
-- SQLite (`~/.local/share/karaoke/karaoke.db`) is the operational database: tracks, sources, lyrics, stats and backfill gaps.
-- OpenSearch is optional and derived from SQLite/local files for semantic search, sentiment and training experiments; playback must not require the cluster.
+- **Live karaoke:** synced lyrics with word highlighting, desktop-player following,
+  radio/microphone identification and a fullscreen stage view.
+- **Unified dashboard:** Vue 3 + FastAPI, animated mood art with live chord overlays,
+  mood-over-time timelines, song details, play counts and playlist membership.
+- **Artist knowledge:** MusicBrainz identities, Wikidata facts, band members and side
+  projects, with ID-based navigation rather than partial-name substitutions.
+- **Music discovery:** local title/artist/lyric search plus optional OpenSearch lyric,
+  timbre, mood and harmonic similarity graphs.
+- **Playlists and controls:** transport, seek, library browsing, saved/smart playlists
+  and explicit play/queue actions. Smart playlists hold up to 99 tracks.
+- **AI DJ:** an embedded Ollama chat for recommendations and music questions. Chat
+  answers do not automatically play or queue songs; queue suggestions require a click.
+- **Background enrichment:** source resolution, audio analysis, chords, mood,
+  classification, lyric alignment and vector indexing through Celery workers.
 
-## Layout
+## Storage and dependencies
 
-```
-src/karaoke/        # the package
-tests/              # pytest
-deploy/             # kind + opensearch manifests
-docs/               # MkDocs project documentation
-```
+**PostgreSQL is the operational source of truth.** Tracks, sources, approved lyrics,
+artist identities, play history, recordings and saved playlists live there. Configure
+it with `KARAOKE_PG_URL`; see [Database backend](https://github.com/violetina/karaoke/blob/main/docs/database.md) for schema,
+connection settings and migration details. The application no longer uses the old
+`karaoke.db` SQLite file for its library.
 
-## Safety
+OpenSearch is a **derived, rebuildable index**, not the playback database. Cached
+lyric lookup and local library search can work without it, provided PostgreSQL is
+available. Unknown-song recognition, LRCLIB requests and external metadata lookups
+still need internet access. Celery's task-result store may separately use
+`celery-results.sqlite`; that is not the music library.
 
-The scanner/deploy scripts **only** talk to the `kind-karaoke` kube-context. They abort if the current
-context is not `kind-*`, so nothing can touch the AKS work clusters.
+| Component | Purpose | Default port |
+| --- | --- | --- |
+| PostgreSQL | Operational library and event data | 5432 |
+| Library API | Read-only tracks, lyrics and stats | 8000 |
+| Host control API | Desktop playback, stage state, `/tv` and `/mood` | 8765 |
+| MCP / graph server | AI tools, playlists and `/graph` | 8888 |
+| Unified dashboard | Browser frontend and aggregation API | 8900 |
+| OpenSearch | Derived artist and vector search indexes | 9200 |
+| Ollama | Local AI DJ model | 11434 |
+| RabbitMQ | Celery task broker | 5672 |
+| Flower | Worker/task monitoring | 5555 |
 
-See the implementation plan: `~/.hermes/plans/2026-08-29_173500-local-karaoke-platform.md`.
+The host control API and kiosk need a Linux desktop session. Playback uses MPRIS
+and/or Chrome CDP. Local files are optional audio sources; Spotify supplies metadata
+and playback integration, not downloadable audio.
 
-## Dev quickstart
+## Install from source
+
+Python 3.11+ is declared in `pyproject.toml`; the local development environment uses
+Python 3.14. Install system media tools and provision PostgreSQL before running the
+platform. Follow the [service runbook](https://github.com/violetina/karaoke/blob/main/docs/howto-systemd-services.md) and
+[database guide](https://github.com/violetina/karaoke/blob/main/docs/database.md) for the complete setup.
 
 ```bash
-python3.14 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-pytest -v
+git clone https://github.com/violetina/karaoke.git
+cd karaoke
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ".[dev]"
 ```
 
-## Unified web dashboard
+Audio analysis and YouTube support have additional dependencies:
 
-Run `make dashboard` (or `karaoke-dashboard` after installing the package), then
-open <http://127.0.0.1:8900>. The dashboard combines live highlighted lyrics,
-animated mood/chord overlays, artist knowledge and relationship graphs, library
-tracks, playlists, player controls, and an embedded Ollama AI DJ chat.
+```bash
+python -m pip install -e ".[youtube,beats]"
+make install-audio   # optional isolated analysis environment
+```
 
-The host control API (`make ctrl-api`, port 8765) supplies playback and stage
-state. The MCP server (`make mcp`, port 8888) supplies similarity graphs and
-playlists. OpenSearch (9200) provides derived artist/search data; Ollama (11434)
-powers the chat. These services run separately. Artist ingestion uses MusicBrainz
-and Wikidata; full song analysis runs on the existing Celery workers.
+Use your own PostgreSQL connection string in `KARAOKE_PG_URL`. Do not use a real
+library database for destructive maintenance or test fixtures. Downloaded audio and
+artwork normally live under `~/.local/share/karaoke`, configurable with
+`KARAOKE_DATA_DIR`.
 
-The release includes a prebuilt Vue frontend. To rebuild after editing it:
+## Run the unified dashboard
+
+With PostgreSQL available, start these in separate terminals, or use the existing
+host service setup if they are already running:
+
+```bash
+make ctrl-api     # host playback and stage state, :8765
+make mcp          # graph, playlists and MCP tools, :8888
+make dashboard    # unified browser dashboard, :8900
+```
+
+Open <http://127.0.0.1:8900>. The release wheel includes the built frontend, and
+`karaoke-dashboard` is also available after package installation. OpenSearch enables
+the derived search/artist features; Ollama powers chat. Full analysis requires the
+appropriate Celery workers, RabbitMQ and audio models.
+
+### Dashboard behaviour
+
+- **Left-click a graph node:** inspect the artist without interrupting playback.
+- **Right-click a song node:** Play now, Queue next, Add to AI DJ playlist, or process.
+- **Song change:** refresh the artist pane and library list; resolve new artist links.
+- **Mood square:** the `/mood` canvas animation, with chords overlaid inside it.
+- **Mood over time:** stored feeling/arc, swing count and coloured timeline segments.
+- **AI DJ replies:** informational by default. Click a queue suggestion to act on it.
+
+Queue next needs a running YouTube Music kiosk and a queueable YouTube source. It
+never falls back to Play now. Word highlighting uses exact word timings when
+available and estimated word positions for line-only synced lyrics.
+
+### Frontend development
+
+Node.js is needed only to build or develop the Vue frontend, not to serve the built
+release. CI builds it with Node.js 22.
 
 ```bash
 npm ci --prefix src/karaoke/webapp
@@ -62,216 +122,113 @@ make dashboard-build
 node tests/test_dashboard_chat_safety.mjs
 ```
 
-Click a graph node to inspect it without interrupting playback. Right-click a
-song for Play now, Queue next, Add to AI DJ playlist, or processing. Chat replies
-never automatically queue or play tracks: queue suggestions require a button
-click. Queue next requires a running YouTube Music kiosk and a queueable source.
-The artist pane follows each song change, resolving new artists as needed.
+Restart `make dashboard` after changing Python code. After a frontend rebuild,
+hard-refresh the browser. The dashboard is separate from the library/control APIs;
+restarting the gateway or kiosk is not a substitute for restarting it.
 
-Use `DASHBOARD_PORT` / `DASHBOARD_HOST` to override the bind address, and
-`KARAOKE_CTRL_API_URL`, `KARAOKE_MCP_API_URL`, `OPENSEARCH_URL`, `OLLAMA_URL`,
-`KARAOKE_DJ_MODEL` to override upstreams/model. The dashboard defaults to binding
-on all interfaces and has no authentication: run it only on a trusted local
-network, or set `DASHBOARD_HOST=127.0.0.1`. Restart the dashboard after Python
-changes and hard-refresh after rebuilding its frontend.
+### Dashboard configuration and safety
 
-## Usage
+| Variable | Purpose |
+| --- | --- |
+| `DASHBOARD_HOST`, `DASHBOARD_PORT` | Dashboard bind address and port |
+| `KARAOKE_CTRL_API_URL` | Host control API upstream |
+| `KARAOKE_MCP_API_URL` | MCP/graph server upstream |
+| `OPENSEARCH_URL` | Derived search service |
+| `OLLAMA_URL`, `KARAOKE_DJ_MODEL` | Chat server and model |
 
-```bash
-# Index a music library (tags -> LRCLIB lyrics -> embed -> OpenSearch)
-music-index --dir ~/Music
-
-# Semantic search: find a song by what its lyrics mean
-lyricsearch "religion faith losing my belief"
-lyricsearch --keyword "teen spirit"          # keyword mode
-
-# Karaoke: synced, highlighted lyrics in the terminal
-karaoke "R.E.M. - Losing My Religion"        # by name (uses cache/LRCLIB)
-karaoke --file song.mp3                       # from a local file's tags
-karaoke --file song.mp3 --transcribe          # Whisper fallback if no LRCLIB lyrics
-karaoke --file song.mp3 --force-transcribe    # always transcribe (skip cache + LRCLIB)
-karaoke --listen                              # identify room audio via mic (songrec), sync once
-karaoke --radio                               # CONTINUOUS: follow live radio, re-lock as songs change
-karaoke --output                              # identify audio playing on this machine
-karaoke --youtube URL                         # karaoke a YouTube video (yt-dlp title -> lyrics)
-karaoke --youtube URL --download              # + fetch audio so Whisper/beats can run
-karaoke-yt URL                                # shorthand: URL is positional (no flag)
-karaoke-yt URL -d --transcribe                # download + Whisper if no LRCLIB match
-karaoke-yt --cache-status                     # show downloaded YouTube audio size
-karaoke-yt --prune-cache 100                  # prune oldest downloads to <= 100 MiB
-karaoke-stage youtube URL                     # stage YouTube captions for review
-karaoke-stage list                            # review unapproved staged lyrics
-karaoke --print "Queen - Bohemian Rhapsody"  # just print the LRC, no live player
-karaoke --spotify                             # lock lyrics to the LIVE Spotify position
-karaoke --player                              # get current song from any desktop player (MPRIS)
-```
-
-## Stats
-
-Every play/identification is recorded in the local cache. Report it with:
+**The dashboard has no authentication and defaults to binding on all interfaces.**
+Keep it on a trusted network, or bind it to loopback:
 
 ```bash
-karaoke-stats            # plays, discoveries, top tracks/artists, per-mode, cache hit-rate
-karaoke-stats --days 7   # only the last week
-karaoke-stats --json     # machine-readable
-make stats               # same summary via make
+DASHBOARD_HOST=127.0.0.1 make dashboard
 ```
 
-In `--radio` mode the stats also track song *discovery*: each new song songrec
-identifies is a `discover` event, drift-corrections are `relock`, and lyrics
-served from the local cache are `cache_hit` — so you can see how often radio
-re-locked known songs offline.
+Do not expose playback controls, Chrome CDP or the dashboard directly to the
+internet. Kubernetes examples in this project target `kind-karaoke`; always select
+that context explicitly and do not run project deployment commands against work or
+production clusters.
 
-## Offline behaviour and song identification
-
-- **Known song, no cluster**: after a song has been played once, its lyrics live
-  in the local SQLite cache. Radio/live modes replay it with no cluster and no
-  LRCLIB request.
-- **Unknown song**: identification still uses `songrec`, which queries Shazam
-  **online**. There is no offline audio-fingerprint match (that would need
-  AcoustID/Chromaprint); the local cache stores recognition *results*, not
-  fingerprints.
-
-## Sound check
-
-Before a live session, verify the audio + identify + lyrics stack:
+## Terminal and fullscreen interfaces
 
 ```bash
-make test-audio          # pactl devices, songrec, LRCLIB reachability
-make mic-test            # live mic VU meter (SECS=4 to change duration)
+make tui                                    # interactive karaoke TUI
+make admin                                  # operations and worker management
+make dj                                     # terminal AI DJ chat
+karaoke "R.E.M. - Losing My Religion"         # resolve a song and render its lyrics
+karaoke --player                            # follow a desktop MPRIS player
+karaoke --spotify                           # follow Spotify playback
+karaoke --listen                            # identify room audio through songrec
+karaoke --output                            # identify audio playing on this machine
+karaoke --radio                             # continuous identification/re-locking
+karaoke --file song.mp3                      # use local file metadata
+karaoke --print "Queen - Bohemian Rhapsody"   # print lyrics without the live UI
 ```
 
-### Live audio sync (mic / room)
+Fullscreen views: <http://127.0.0.1:8765/tv>,
+<http://127.0.0.1:8765/mood> and <http://127.0.0.1:8888/graph>.
 
-`karaoke --listen` (mic) or `--output` (this machine's audio) identify the song
-via songrec AND read its Shazam `offset` (position in the track at match time).
-The player anchors that offset to a monotonic clock, so lyrics scroll in sync
-with whatever is playing in the room — no keypress, no Spotify needed. Offsets
-from several matches are clustered (median of the tightest group) to reject the
-occasional chorus-repeat outlier. Use `--offset <secs>` to nudge for latency if
-lines run early/late.
-
-**Live nudge controls** (in `--radio`, `--listen`, `--output` players): the
-song-recognition step listens for ~10s before returning a position, which can
-leave the highlighted line running a couple of lines behind the audio. Correct
-it on the fly without restarting:
-
-| Key | Action |
-|-----|--------|
-| `b` | lyrics are **behind** → jump the highlight **forward** one line |
-| `v` | lyrics are **ahead** → step the highlight **back** one line |
-| `0` | reset the nudge to the `--offset` baseline |
-| `q` | quit |
-
-Each press snaps the highlight exactly one line and the accumulated nudge is
-shown in the footer (e.g. `nudge +6.2s`), so it sticks for the rest of the song.
-`--offset <secs>` still sets the starting bias if you already know the lag.
-
-**Default forward lead**: because that ~10s recognition window biases the
-reported position low, mic/radio locks now start with a **+12.6s forward
-pre-bias** baked in (`DEFAULT_LEAD_S`), so the highlight lands close to the audio
-without tapping `b` at all. Tune or disable it with `--lead <secs>` (e.g.
-`--lead 0` for the raw offset, `--lead 8` for a smaller push). `--lead` stacks on
-top of `--offset`; the `0` key resets the live nudge back to this baseline.
-
-### Word-level highlight
-
-The active line highlights the **current word in purple** (magenta) on top of the
-blue line background. LRCLIB only timestamps whole lines, so the word playhead is
-interpolated: the line's on-screen duration (until the next line's timestamp, or
-a 4s tail for the last line) is spread evenly across its words. It's an estimate,
-not per-word karaoke timing, but it gives a natural left-to-right sweep to sing
-along to. Falls back cleanly on blank lines.
-
-### Spotify position sync
-
-`karaoke --spotify` reads the track currently playing on Spotify and scrolls the
-lyrics locked to the **real playback position** (polls progress + interpolates),
-so lines advance in time with the audio — no keypress needed. It reuses the OAuth
-credentials Hermes already stored in `~/.hermes/auth.json` (no separate login).
-Spotify's API forbids audio download, so these tracks use LRCLIB lyrics only
-(no Whisper); metadata can be indexed for search via the Spotify importer.
-
-### YouTube mode
-
-`karaoke --youtube URL` resolves a YouTube video to its lyrics: [yt-dlp] reads the
-video's title/uploader/duration, a smart parser strips promo decorations
-(`(Official Music Video)`, `[Lyrics]`, `| Label`, VEVO/`- Topic` uploader noise)
-and splits `Artist - Title`, and the result flows through the normal
-LRCLIB → cache → synced-render pipeline. Auto-generated `Art - Topic` channels use
-the uploader as the artist; `music.youtube.com` track/artist tags are used
-verbatim when present. Timing is keypress-started (like `--file`); to sync to
-YouTube actually playing through your speakers, use `--output` or `--radio`.
-
-`karaoke-yt URL` is a shorthand console entry for the same flow (the URL is the
-positional argument, no `--youtube` flag needed): `karaoke-yt URL -d --transcribe`,
-`karaoke-yt URL --print`, etc.
-
-Requires the optional extra: `pip install -e ".[youtube]"` (or `pip install yt-dlp`).
-Unlike Spotify, YouTube audio *can* be fetched — `--youtube URL --download` saves
-the audio so the Whisper fallback and librosa beat detection work on videos with
-no LRCLIB match. Downloads go to `~/.local/share/karaoke/youtube/` by default and
-are auto-pruned after each download to `KARAOKE_YT_CACHE_MAX_MB` (default 500 MiB;
-set to `0` to disable). You can inspect or clean the cache manually:
+## Ingest, enrich and search
 
 ```bash
-karaoke-yt --cache-status          # count + MiB + directory
-karaoke-yt --prune-cache 100       # delete oldest audio until <= 100 MiB
-karaoke-yt --clear-cache           # delete all downloaded YouTube audio
-karaoke-yt URL -d --cache-max-mb 50 # per-run cap override
+make folder-scan DIR=~/Music LIMIT=50 DRY_RUN=1 # preview a local scan
+make index-youtube-cache                       # ingest downloaded audio into PostgreSQL
+make artists                                  # resolve artists, facts and genres
+make artist-index                             # rebuild the derived artist index
+make vector-index-dry-run                      # preview track/lyric indexing
+make vector-index LINES=1                       # rebuild derived OpenSearch vectors
+make stats                                    # play/discovery statistics
+lyricsearch "religion faith losing my belief"   # semantic lyric search
+lyricsearch --keyword "teen spirit"             # keyword search
 ```
 
-Downloading is a YouTube ToS gray area; metadata-only is the default.
+See the [ingestion quickstart](https://github.com/violetina/karaoke/blob/main/docs/howto-quickstart-runbook.md),
+[post-processing guide](https://github.com/violetina/karaoke/blob/main/docs/howto-post-processing.md),
+[search guide](https://github.com/violetina/karaoke/blob/main/docs/search.md), [vector reference](https://github.com/violetina/karaoke/blob/main/docs/vectors.md) and
+[artist metadata overview](https://github.com/violetina/karaoke/blob/main/docs/artist_metadata_plan.md).
 
-#### Staging YouTube captions / crawled lyrics
+### Lyrics and YouTube
 
-When LRCLIB has no lyrics but YouTube displays captions/lyrics, keep them out of
-the trusted cache until reviewed:
+LRCLIB supplies plain and synced lyrics. Whisper can transcribe missing words or
+align known lyrics to audio. Lower-trust captions go through a staging/review queue:
 
 ```bash
-karaoke-stage youtube URL              # fetch captions and stage as pending
-karaoke-stage list                     # list pending candidates
-karaoke-stage show 12                  # inspect raw staged lyrics
-karaoke-stage approve 12               # copy approved candidate to local cache
-karaoke-stage reject 12                # leave it out of the approved cache
+karaoke-yt URL --download
+karaoke-stage youtube URL
+karaoke-stage list
+karaoke-stage show 12
+karaoke-stage approve 12   # review the candidate before approving it
 ```
 
-This is the review queue for lower-trust sources: YouTube manual/auto captions
-now, and later web crawls or Whisper training/transcription output. Approved rows
-are copied into the normal local lyrics cache; pending/rejected rows remain
-separate and never affect `karaoke` lookup.
+Use `make auth-youtube` / `make auth-spotify` for the dedicated playback browser
+profile. Download/caption authentication is separate; see
+[browser cookies](https://github.com/violetina/karaoke/blob/main/docs/browser-cookies.md). Spotify does not provide downloadable
+audio, and YouTube downloads/cookie automation may be restricted by service terms.
 
-#### YouTube Premium / library access (cookies)
-
-If you have YouTube Music Premium, you can authenticate the fetch with your
-logged-in session to get higher-bitrate audio (better Whisper/beat results) and
-access library-only / private / age-restricted tracks:
+## Operations and verification
 
 ```bash
-karaoke-yt URL --download --cookies-from-browser firefox   # read cookies live from a browser
-karaoke-yt URL --download --cookies ~/yt-cookies.txt        # or an exported cookies.txt
+make systemd-status          # inspect existing host services
+make health                  # check services, database and upstreams
+make test-audio               # audio/recognition/lyrics prerequisites
+make mic-test                 # microphone meter
+make test                     # Python test suite
+make lint                     # Python compile checks
+make docs-audit               # documentation drift check
+.venv/bin/mkdocs build --strict
 ```
 
-The browser spec accepts yt-dlp's full form, e.g. `firefox:PROFILE`,
-`chrome+gnomekeyring`, `firefox:prof::Container`. Notes:
+Python tests require a PostgreSQL server. The fixture pins its dedicated test
+database; see `tests/conftest.py` before running against a new environment. The
+JavaScript chat-safety regression runs separately with the command above.
 
-- This does **not** use Premium's in-app "Download" — those offline files are
-  DRM-locked and unreadable. It authenticates the normal yt-dlp fetch *as you*.
-- Automating downloads with your account cookies is against YouTube's ToS and can
-  get an account flagged with heavy use. Fine for occasional karaoke; your call.
-  Anonymous, metadata-only stays the default.
+## Repository layout
 
-[yt-dlp]: https://github.com/yt-dlp/yt-dlp
-
-### Desktop player (MPRIS)
-
-`karaoke --player` (or `-p`) gets the current song from any MPRIS-compatible
-desktop media player (Spotify, VLC, web browsers playing media, etc.) via the
-`playerctl` command-line tool.
-
-This is a one-shot lookup; if the song changes, re-run the command. It's a
-convenient way to avoid typing the artist and title for a song already playing
-on your desktop. You may need to `emerge media-sound/playerctl` if it's not
-already installed.
-
-
+```text
+src/karaoke/                  Python application and APIs
+src/karaoke/webapp/           Vue frontend source and npm lockfile
+src/karaoke/webapp_dist/      Prebuilt frontend served by FastAPI
+tests/                       Python and JavaScript regression tests
+deploy/                      Host services and Kubernetes manifests
+scripts/                     Ingestion, maintenance and migration tools
+docs/                        MkDocs guides, API reference and historical plans
+```

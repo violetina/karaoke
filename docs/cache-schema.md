@@ -5,7 +5,7 @@ Karaoke now has one operational database and one optional derived index:
 - **PostgreSQL** (`KARAOKE_PG_URL`) is the source of truth for playback, source URLs, lyrics cache, stats, and backfill gaps (see [Database backend](database.md)).
 - **OpenSearch** (`tracks`, on the kind cluster) is a rebuildable derived index for semantic/vector search and future training features.
 
-This page covers the OpenSearch index. For the SQLite schema see [Local cache and stats](local-cache-and-stats.md). For the re-index/training direction see [Vector search and training plan](vector-search-plan.md).
+This page covers the OpenSearch index. For the PostgreSQL schema see [Database backend](database.md); [Local cache and stats](local-cache-and-stats.md) explains playback lookup and statistics. For the re-index/training direction see [Vector search and training plan](vector-search-plan.md).
 
 The same schema supports:
 
@@ -85,7 +85,10 @@ The same schema supports:
 
 ## Cache lookup rules
 
-Lyrics playback uses `search.find_track()`, not the semantic search endpoint.
+Normal lyric playback reads PostgreSQL through `localcache` first, then uses
+LRCLIB or local transcription as needed. It does not require OpenSearch.
+`search.find_track()` is an exact-guarded lookup for the derived OpenSearch index,
+not the operational lyric cache.
 
 `find_track()` performs:
 
@@ -113,5 +116,5 @@ stateDiagram-v2
 
 - OpenSearch kNN is bundled in OpenSearch 3.8+; do not set the removed `knn.plugin.enabled` setting.
 - The index dimension must match `EMBED_DIM` and the embedding model. The default model is `all-MiniLM-L6-v2`, which emits 384 dimensions.
-- The cache is best-effort. If OpenSearch is down, playback falls through to LRCLIB/Whisper without failing the whole CLI.
+- OpenSearch is best-effort and derived. If it is down, PostgreSQL-backed lyric lookup still works; a cache miss may use LRCLIB/Whisper. PostgreSQL itself must be available.
 - Write-through lyrics cache entries do not currently include vectors; library scans and Spotify imports are the paths that populate semantic search vectors.

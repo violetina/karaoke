@@ -15,7 +15,7 @@ unit names (`karaoke-*`) are separate — see [systemd services](howto-systemd-s
 
 ## The pipeline
 
-### 1. Ingest cached YouTube downloads into SQLite
+### 1. Ingest cached YouTube downloads into PostgreSQL
 
 ```bash
 make index-youtube-cache
@@ -64,7 +64,7 @@ them, and rebuilds the vector index at the end in one shot:
 PYTHONPATH=src .venv/bin/python scripts/fill_analysis_and_vector_gaps.py
 ```
 
-### 3. Vectorize: rebuild OpenSearch indexes from SQLite
+### 3. Vectorize: rebuild OpenSearch indexes from PostgreSQL
 
 ```bash
 make vector-index-dry-run         # preview, no writes, no embedding
@@ -90,7 +90,7 @@ If a backfill / gap-fill already handled analysis and you only added new cached
 files:
 
 ```bash
-make index-youtube-cache      # pull any new cache files into SQLite
+make index-youtube-cache      # pull any new cache files into PostgreSQL
 make vector-index LINES=1     # re-embed into OpenSearch
 ```
 
@@ -113,6 +113,6 @@ These names look plausible but do **not** exist as targets:
 
 - `find-sources` — resolving missing YouTube/Spotify sources for sourceless tracks
   is done ad-hoc via `karaoke.youtube.search()` in a script, not a make target.
-- `karaoke-folder-scan` / `karaoke-analyze` / `karaoke-vector-index` — the
-  `karaoke-` prefix is the **systemd unit** naming style. The make targets are
+- `karaoke-folder-scan` / `karaoke-analyze` / `karaoke-vector-index` are installed
+  **console commands**, not Makefile targets. The corresponding make targets are
   `folder-scan`, `analyze`, `vector-index` (no prefix).

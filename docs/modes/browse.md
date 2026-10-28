@@ -8,12 +8,12 @@ opening a song launches it in the browser. This is the old "youtube mode".
 
 - Shows the library table (`H` toggles the overlay); pick a row and `Enter`
   opens it.
-- **Unconstrained library browsing**: browse all tracks across the entire SQLite
+- **Unconstrained library browsing**: browse all tracks across the entire PostgreSQL
   database (10,000+ tracks) without artificial page cutoffs, with live count
   tracking in the footer toolbar (`tracks (filter · genre)`).
 - **Global SQL sorting**: Sort by Artist/Title, Most Played, Least Played,
   Energy (high→low / low→high), BPM, or Musical Key. Sorting is evaluated
-  directly in SQLite (`ORDER BY`), ensuring global ranking across the entire database.
+  directly in PostgreSQL (`ORDER BY`), ensuring global ranking across the entire database.
 - **Genre & Filter Dropdowns**:
   - `Filter`: Toggle between `working` (tracks with approved lyrics), `all`, `staging`, and `spotify`.
   - `Genre`: Filter by broad consensus genre or specific classification, synchronized with the sidebar genre selector.

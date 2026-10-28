@@ -79,7 +79,7 @@ flowchart TD
 
 `moodart.generate()` is deterministic for a given track, so the panel does not
 shimmer between refreshes — the variety comes from tracks differing, not from
-randomness. It derives everything from the SQLite analysis row (always present
+randomness. It derives everything from the PostgreSQL analysis row (always present
 for an analysed track, needs no cluster):
 
 - **Key → hue.** The twelve pitch classes are laid around the colour wheel

@@ -13,7 +13,7 @@ This page tracks planned features, ongoing enhancements, and accuracy improvemen
   currently the cover art). Sample video frames on beat, or generate art from
   the line's sentiment. See `docs/tui.md`.
 - [ ] **Old: TUI Word-Level Playhead Rendering** — Render real word-level Enhanced LRC timestamps in the Textual TUI player.
-- [ ] **Automated OpenSearch Backfill Cron** — Background worker to sync new SQLite tracks and lyric lines into OpenSearch indices automatically.
+- [ ] **Automated OpenSearch Backfill Cron** — Background worker to sync new PostgreSQL tracks and lyric lines into OpenSearch indices automatically.
 - [ ] **Whisper GPU Acceleration Tuning** — Optimize local Whisper transcription worker configuration for faster offline fallback.
 
 ---

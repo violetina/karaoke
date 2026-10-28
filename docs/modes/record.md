@@ -67,7 +67,7 @@ they are invisible: the audio sits on disk and the tracks never gain a key.
 
 ## HTTP
 
-Inspecting a session is read-only over SQLite, so it lives in the
+Inspecting a session is read-only over PostgreSQL, so it lives in the
 cluster-deployable API:
 
 ```
