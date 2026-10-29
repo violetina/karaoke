@@ -400,6 +400,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-webtui.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-relay.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mcp.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-dashboard.service $(HOME)/.config/systemd/user/
 	# karaoke.target Wants this, so a missing symlink makes the target fail to
 	# pull it in. It was linked by hand on the live host and absent here.
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-obot-tunnel.service $(HOME)/.config/systemd/user/

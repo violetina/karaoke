@@ -1,0 +1,22 @@
+[Unit]
+Description=Karaoke Unified Stage & AI DJ dashboard (FastAPI BFF + Vue 3 SPA)
+Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
+After=network-online.target karaoke-ctrl-api.service karaoke-mcp.service
+Wants=network-online.target karaoke-ctrl-api.service karaoke-mcp.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+Environment=DASHBOARD_PORT=8900
+Environment=DASHBOARD_HOST=0.0.0.0
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.dashboard_api
+Restart=on-failure
+RestartSec=3
+# Confirm the port is actually listening before declaring the unit started.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8900/api/health >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+SyslogIdentifier=karaoke-dashboard
+
+[Install]
+WantedBy=karaoke.target
