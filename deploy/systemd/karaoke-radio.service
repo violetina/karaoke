@@ -1,0 +1,20 @@
+[Unit]
+Description=Karaoke radio mode (songrec recognition and full song processing)
+Documentation=file:///home/tina/karaoke/docs/modes/radio.md
+After=network-online.target karaoke-mq-forward.service
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke --radio
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+SyslogIdentifier=karaoke-radio
+
+[Install]
+WantedBy=karaoke.target

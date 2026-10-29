@@ -29,6 +29,15 @@
       <!-- View Selector -->
       <nav class="nav-tabs">
         <button
+          class="tab-btn radio-btn"
+          :class="{ active: radio.enabled, busy: radioBusy }"
+          :disabled="radioBusy"
+          :title="radioTitle"
+          @click="toggleRadio"
+        >
+          {{ radioBusy ? '⏳ Radio…' : (radio.enabled ? '📻 Radio On' : '📻 Radio Off') }}
+        </button>
+        <button
           class="tab-btn"
           :class="{ active: currentTab === 'unified' }"
           @click="currentTab = 'unified'"
@@ -147,6 +156,40 @@ import PlaylistsPanel from './components/PlaylistsPanel.vue'
 import AiDjChat from './components/AiDjChat.vue'
 
 const currentTab = ref('unified')
+const radio = ref({ enabled: false, status: 'stopped', artist: '', title: '', processing: '' })
+const radioBusy = ref(false)
+const radioTitle = computed(() => {
+  if (radio.value.title) return `Recognized: ${radio.value.artist} — ${radio.value.title}. Full processing is automatic.`
+  if (radio.value.enabled) return 'songrec is listening. Each recognized song starts full processing automatically.'
+  return 'Enable songrec radio recognition and full processing for each recognized song.'
+})
+
+const fetchRadio = async () => {
+  try {
+    const res = await fetch('/api/radio')
+    if (res.ok) radio.value = await res.json()
+  } catch (e) {
+    // retry with the regular dashboard poll
+  }
+}
+
+const toggleRadio = async () => {
+  radioBusy.value = true
+  try {
+    const res = await fetch('/api/radio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !radio.value.enabled }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || 'Could not change radio mode')
+    radio.value = data
+  } catch (e) {
+    window.alert(e.message || 'Could not change radio mode')
+  } finally {
+    radioBusy.value = false
+  }
+}
 
 const health = ref({
   ctrl_api_8765: false,
@@ -360,12 +403,14 @@ const startStageStream = () => {
 
 onMounted(() => {
   fetchHealth()
+  fetchRadio()
   fetchStageState()
   startStageStream()
 
   // Lightweight poll: health + a stage-state backstop if SSE drops.
   pollTimer = setInterval(() => {
     fetchHealth()
+    fetchRadio()
     if (!stageSource) fetchStageState()
   }, 2000)
 })

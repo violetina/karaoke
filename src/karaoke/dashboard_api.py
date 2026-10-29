@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import urllib.parse
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -370,6 +371,64 @@ async def health_check():
         except Exception:
             pass
     return results
+
+
+class RadioModePayload(BaseModel):
+    enabled: bool
+
+
+def _radio_mode_status() -> dict[str, Any]:
+    """Return service state plus the latest songrec match, if any."""
+    from . import live_state
+
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", "karaoke-radio.service"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    active = result.returncode == 0 and result.stdout.strip() == "active"
+    live = live_state.read("radio") if active else None
+    return {
+        "enabled": active,
+        "status": "listening" if active and not (live or {}).get("title") else (
+            "recognized" if active else "stopped"
+        ),
+        "artist": (live or {}).get("artist", ""),
+        "title": (live or {}).get("title", ""),
+        "processing": "Full processing is queued automatically for every recognized song" if active else "",
+    }
+
+
+@app.get("/api/radio")
+async def radio_mode_status():
+    """Report whether dashboard-controlled songrec radio mode is running."""
+    return await asyncio.to_thread(_radio_mode_status)
+
+
+@app.post("/api/radio")
+async def set_radio_mode(body: RadioModePayload):
+    """Start or stop songrec radio mode through its systemd user unit."""
+    action = "start" if body.enabled else "stop"
+
+    def change_state():
+        result = subprocess.run(
+            ["systemctl", "--user", action, "karaoke-radio.service"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"systemctl {action} failed"
+            raise RuntimeError(detail)
+        return _radio_mode_status()
+
+    try:
+        return await asyncio.to_thread(change_state)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 class PlayPayload(BaseModel):
