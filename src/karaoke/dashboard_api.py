@@ -423,7 +423,10 @@ async def set_radio_mode(body: RadioModePayload):
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"systemctl {action} failed"
             raise RuntimeError(detail)
-        return _radio_mode_status()
+        status = _radio_mode_status()
+        if status["enabled"] != body.enabled:
+            raise RuntimeError(f"radio mode did not {action} successfully")
+        return status
 
     try:
         return await asyncio.to_thread(change_state)

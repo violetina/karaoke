@@ -9,7 +9,7 @@ PartOf=karaoke.target
 Type=simple
 WorkingDirectory=/home/tina/karaoke
 Environment=PYTHONPATH=/home/tina/karaoke/src
-ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke --radio
+ExecStart=/home/tina/karaoke/.venv/bin/karaoke --radio
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=15
