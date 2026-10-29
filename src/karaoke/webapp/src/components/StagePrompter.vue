@@ -28,9 +28,14 @@
     <div class="lyrics-box">
       <div class="lyrics-header">
         <span>KARAOKE PROMPTER</span>
-        <span v-if="stage.active_line_index >= 0" class="line-counter">
-          Line {{ stage.active_line_index + 1 }} / {{ stage.lines.length }}
-        </span>
+        <div class="lyrics-timing">
+          <span v-if="nextLineCountdown" class="next-line-countdown">
+            Next line in {{ nextLineCountdown }}
+          </span>
+          <span v-if="stage.active_line_index >= 0" class="line-counter">
+            Line {{ stage.active_line_index + 1 }} / {{ stage.lines.length }}
+          </span>
+        </div>
       </div>
       <div class="lyrics-stage">
         <div v-if="stage.lines && stage.lines.length > 0" class="lyrics-window">
@@ -95,6 +100,13 @@ const tvUrl = 'http://127.0.0.1:8765/tv'
 const moodUrl = 'http://127.0.0.1:8765/mood'
 
 const kioskActive = ref(false)
+
+const nextLineCountdown = computed(() => {
+  if (props.stage.next_line_in == null) return ''
+  const seconds = Number(props.stage.next_line_in)
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  return `${seconds.toFixed(1)}s`
+})
 
 // --- Lyric word highlighting ---------------------------------------------
 // Split an active line into words for per-word highlighting.
@@ -506,6 +518,18 @@ onMounted(() => {
   justify-content: space-between;
   margin-bottom: 8px;
   flex-shrink: 0;
+}
+
+.lyrics-timing {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.next-line-countdown {
+  color: var(--accent-cyan);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.35);
 }
 
 /* The stage centers the fixed window vertically — active line is always mid. */
