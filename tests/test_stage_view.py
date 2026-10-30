@@ -168,6 +168,70 @@ def test_stage_state_flags_instrumental_break_like_the_tui():
         assert state2["gap_progress"] == 0.0
 
 
+def _run_stage_with_queue(playing_artist, playing_title, playing_tid, queue):
+    """Call get_stage_state with a mocked player + active queue."""
+    fake_playback = {
+        "present": True, "position": 2.0, "duration": 180.0,
+        "casting": False, "paused": False, "url": "",
+    }
+    fake_meta = MagicMock(artist=playing_artist, title=playing_title,
+                          album="", url=None, duration=None)
+    fake_ly = MagicMock()
+    fake_ly.synced_raw = ""
+    fake_ly.lines = []
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchone.return_value = None
+
+    with patch("karaoke.player_open.browser_playback", return_value=fake_playback), \
+         patch("karaoke.playerctl.playing_player", return_value="chromium"), \
+         patch("karaoke.playerctl.current_metadata", return_value=fake_meta), \
+         patch("karaoke.playerctl.status", return_value="Playing"), \
+         patch("karaoke.playerctl.art_url", return_value=""), \
+         patch("karaoke.localcache.connect") as mock_conn, \
+         patch("karaoke.localcache.find_track_id", return_value=playing_tid), \
+         patch("karaoke.localcache.get_lyrics_by_track_id", return_value=fake_ly), \
+         patch("karaoke.track_analysis.ensure_schema"), \
+         patch("karaoke.localcache.load_active_queue", return_value=queue):
+        mock_conn.return_value.__enter__.return_value = fake_conn
+        return get_stage_state()
+
+
+def test_up_next_anchors_on_the_playing_track_not_stored_index():
+    """UP NEXT must follow the song actually playing, not a stale current_index.
+
+    The playing track sits at queue row 1 while current_index is still 0, so
+    UP NEXT should list rows AFTER row 1, not after row 0.
+    """
+    queue = {
+        "current_index": 0,
+        "rows": [
+            {"track_id": 10, "artist": "Queen", "title": "Bohemian Rhapsody"},
+            {"track_id": 123, "artist": "Queen", "title": "Don't Stop Me Now"},
+            {"track_id": 11, "artist": "Queen", "title": "We Will Rock You"},
+            {"track_id": 12, "artist": "Queen", "title": "Somebody To Love"},
+        ],
+    }
+    state = _run_stage_with_queue("Queen", "Don't Stop Me Now", 123, queue)
+    titles = [q["title"] for q in state["upcoming_queue"]]
+    assert titles == ["We Will Rock You", "Somebody To Love"]
+
+
+def test_up_next_includes_current_index_row_when_playing_song_is_off_queue():
+    """If the playing song is not in the queue, no row has been consumed yet,
+    so UP NEXT starts at current_index (inclusive), not current_index + 1."""
+    queue = {
+        "current_index": 0,
+        "rows": [
+            {"track_id": 1, "artist": "Ren", "title": "The Tale of Jenny"},
+            {"track_id": 2, "artist": "Inpatient", "title": "Madhouse"},
+            {"track_id": 3, "artist": "Biohazard", "title": "Judgment Night"},
+        ],
+    }
+    state = _run_stage_with_queue("L7", "Fast and Frightening", 999, queue)
+    titles = [q["title"] for q in state["upcoming_queue"]]
+    assert titles == ["The Tale of Jenny", "Madhouse", "Judgment Night"]
+
+
 def test_stage_event_stream_generator():
     async def go():
         gen = stage_event_stream(interval=0.001)

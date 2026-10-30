@@ -303,8 +303,36 @@ def get_stage_state() -> dict[str, Any]:
         if active_q and active_q.get("rows"):
             rows = active_q["rows"]
             cur_idx = int(active_q.get("current_index", 0))
-            # Pick next 3 upcoming tracks
-            for r in rows[cur_idx + 1: cur_idx + 4]:
+
+            # Anchor "UP NEXT" on the song that is actually playing, not on the
+            # stored current_index -- that index only advances when the local
+            # queue is being followed, so after a manual/YT-Music play it goes
+            # stale and UP NEXT lists tracks relative to the wrong row (even
+            # skipping an unplayed row 0). Find the now-playing track in the
+            # queue by track_id, then by artist+title, and list what follows it.
+            def _norm(s: Any) -> str:
+                return str(s or "").strip().casefold()
+
+            anchor = None
+            for i, r in enumerate(rows):
+                if track_id is not None and r.get("track_id") == track_id:
+                    anchor = i
+                    break
+            if anchor is None and (artist or title):
+                for i, r in enumerate(rows):
+                    if _norm(r.get("artist")) == _norm(artist) and _norm(r.get("title")) == _norm(title):
+                        anchor = i
+                        break
+
+            if anchor is not None:
+                # Playing song is in the queue: show the rows after it.
+                start = anchor + 1
+            else:
+                # Playing song is not in the queue (manual/external play): the
+                # current_index row has not been consumed, so include it.
+                start = cur_idx
+
+            for r in rows[start: start + 3]:
                 upcoming_queue.append({
                     "artist": r.get("artist", ""),
                     "title": r.get("title", ""),
