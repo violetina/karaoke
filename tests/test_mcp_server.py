@@ -760,6 +760,28 @@ def test_play_playlist_rejects_bad_position(launcher, dj_and_custom_playlists):
     assert calls == []
 
 
+def test_toggle_audio_video_sets_explicit_mode(monkeypatch):
+    monkeypatch.setattr(player_open, "cdp_toggle_av", lambda mode=None: "video")
+    res = json.loads(mcp_server.toggle_audio_video(mode="video"))
+    assert res == {"status": "ok", "mode": "video"}
+
+
+def test_toggle_audio_video_rejects_bad_mode():
+    res = json.loads(mcp_server.toggle_audio_video(mode="surround"))
+    assert "error" in res
+
+
+def test_toggle_audio_video_reports_no_counterpart(monkeypatch):
+    monkeypatch.setattr(player_open, "cdp_toggle_av", lambda mode=None: "no_av_toggle")
+    res = json.loads(mcp_server.toggle_audio_video())
+    assert res["status"] == "no_counterpart"
+
+
+def test_get_av_mode_reports_current_mode(monkeypatch):
+    monkeypatch.setattr(player_open, "cdp_get_av", lambda: "audio")
+    assert json.loads(mcp_server.get_av_mode()) == {"mode": "audio"}
+
+
 def test_scan_track_complete_track(playable_track, monkeypatch):
     """A fully analysed track returns status 'complete' without doing any work."""
     from karaoke import postprocess_queue, search

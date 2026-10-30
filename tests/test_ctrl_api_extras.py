@@ -196,6 +196,50 @@ def test_player_queue_post(ctrl):
         mock_add.assert_called_once_with("dQw4w9WgXcQ")
 
 
+def test_av_mode_get_reports_active_mode(ctrl):
+    with patch("karaoke.player_open.cdp_get_av", return_value="video"):
+        res = ctrl.get("/api/players/av").json()
+    assert res == {"mode": "video", "has_counterpart": True}
+
+
+def test_av_mode_get_reports_no_counterpart(ctrl):
+    with patch("karaoke.player_open.cdp_get_av", return_value="no_av_toggle"):
+        res = ctrl.get("/api/players/av").json()
+    assert res["mode"] is None
+    assert res["has_counterpart"] is False
+
+
+def test_av_mode_post_sets_explicit_mode(ctrl):
+    with patch("karaoke.player_open.cdp_toggle_av", return_value="audio") as toggle:
+        res = ctrl.post("/api/players/av", json={"mode": "audio"}).json()
+    assert res == {"status": "ok", "mode": "audio"}
+    toggle.assert_called_once_with("audio")
+
+
+def test_av_mode_post_blind_toggle_when_mode_omitted(ctrl):
+    with patch("karaoke.player_open.cdp_toggle_av", return_value="video") as toggle:
+        res = ctrl.post("/api/players/av", json={}).json()
+    assert res == {"status": "ok", "mode": "video"}
+    toggle.assert_called_once_with(None)
+
+
+def test_av_mode_post_rejects_bad_mode(ctrl):
+    res = ctrl.post("/api/players/av", json={"mode": "surround"})
+    assert res.status_code == 422
+
+
+def test_av_mode_post_no_counterpart_is_409(ctrl):
+    with patch("karaoke.player_open.cdp_toggle_av", return_value="no_av_toggle"):
+        res = ctrl.post("/api/players/av", json={})
+    assert res.status_code == 409
+
+
+def test_av_mode_post_unreachable_kiosk_is_503(ctrl):
+    with patch("karaoke.player_open.cdp_toggle_av", return_value="unsupported"):
+        res = ctrl.post("/api/players/av", json={})
+    assert res.status_code == 503
+
+
 # -- mood images & feeling images -----------------------------------------
 
 def test_mood_feeling_image_serves_extended_feelings(ctrl):
