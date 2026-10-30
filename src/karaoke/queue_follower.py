@@ -22,6 +22,7 @@ POLL_INTERVAL_S = 2.0
 LOAD_GRACE_S = 10.0      # let a freshly navigated track load before judging it
 IDLE_STALL_S = 12.0      # window holding nothing this long => treat as ended
 TAIL_S = 1.5
+AUTOPILOT_CHECK_S = 15.0  # how often to check whether to refill (keep going)
 
 
 def _queue_signature(q: Optional[dict[str, Any]]) -> Optional[tuple]:
@@ -65,6 +66,16 @@ def _record_advance(row: dict[str, Any], idx: int) -> None:
         log.debug("queue-follow: record_queue_event failed", exc_info=True)
 
 
+def _maybe_autopilot_refill() -> None:
+    """Top up the queue when 'keep going' is on and it is near its end."""
+    try:
+        from . import collection
+        with localcache.connect() as conn:
+            collection.autopilot_refill(conn)
+    except Exception:
+        log.debug("queue-follow: autopilot refill check failed", exc_info=True)
+
+
 def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - live loop
     """Follow the active queue until the process is stopped."""
     log.info("queue-follow: starting")
@@ -73,8 +84,14 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
     navigated = False
     nav_at = 0.0
     idle_since = 0.0
+    last_autopilot = 0.0
 
     while True:
+        # Keep going: refill the queue with fitting tracks as it nears the end.
+        if time.monotonic() - last_autopilot > AUTOPILOT_CHECK_S:
+            last_autopilot = time.monotonic()
+            _maybe_autopilot_refill()
+
         try:
             q = localcache.load_active_queue()
         except Exception:

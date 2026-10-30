@@ -2,15 +2,26 @@
   <div class="queue-panel-card">
     <div class="qp-header">
       <span class="qp-title">📋 UP NEXT</span>
-      <button
-        class="qp-follow"
-        :class="{ active: following }"
-        @click="toggleFollow"
-        :disabled="followBusy"
-        :title="following ? 'Stop auto-advancing the queue' : 'Play the queue and auto-advance on each track end'"
-      >
-        {{ followBusy ? '…' : (following ? '⏸ Following' : '▶ Follow Queue') }}
-      </button>
+      <div class="qp-actions">
+        <button
+          class="qp-follow qp-keepgoing"
+          :class="{ active: autopilot }"
+          @click="toggleAutopilot"
+          :disabled="autopilotBusy"
+          title="Keep going: auto-add fitting tracks as the queue nears its end"
+        >
+          {{ autopilotBusy ? '…' : (autopilot ? '🔁 Keep going: On' : '🔁 Keep going') }}
+        </button>
+        <button
+          class="qp-follow"
+          :class="{ active: following }"
+          @click="toggleFollow"
+          :disabled="followBusy"
+          :title="following ? 'Stop auto-advancing the queue' : 'Play the queue and auto-advance on each track end'"
+        >
+          {{ followBusy ? '…' : (following ? '⏸ Following' : '▶ Follow Queue') }}
+        </button>
+      </div>
     </div>
 
     <ol class="qp-list" v-if="tracks.length">
@@ -54,12 +65,18 @@ const tracks = computed(() => (props.stage.upcoming_queue || []).slice(0, 4))
 // service (karaoke-queue-follow.service), controlled through /api/follow.
 const following = ref(false)
 const followBusy = ref(false)
+const autopilot = ref(false)
+const autopilotBusy = ref(false)
 let followTimer = null
 
 const checkFollowStatus = async () => {
   try {
     const res = await fetch('/api/follow')
-    if (res.ok) following.value = (await res.json()).enabled
+    if (res.ok) {
+      const data = await res.json()
+      following.value = data.enabled
+      autopilot.value = !!data.autopilot
+    }
   } catch (e) {
     // ignore transient errors
   }
@@ -76,11 +93,30 @@ const toggleFollow = async () => {
       body: JSON.stringify({ enabled: target }),
     })
     if (res.ok) following.value = (await res.json()).enabled
-    else following.value = (await checkFollowStatus(), following.value)
+    else await checkFollowStatus()
   } catch (e) {
     await checkFollowStatus()
   } finally {
     followBusy.value = false
+  }
+}
+
+const toggleAutopilot = async () => {
+  if (autopilotBusy.value) return
+  autopilotBusy.value = true
+  const target = !autopilot.value
+  try {
+    const res = await fetch('/api/queue/autopilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: target }),
+    })
+    if (res.ok) autopilot.value = !!(await res.json()).autopilot
+    else await checkFollowStatus()
+  } catch (e) {
+    await checkFollowStatus()
+  } finally {
+    autopilotBusy.value = false
   }
 }
 
@@ -108,6 +144,21 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
+  gap: 8px;
+}
+
+.qp-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.qp-keepgoing.active {
+  background: var(--accent-gold);
+  border-color: var(--accent-gold);
+  color: #2a1e00;
 }
 
 .qp-title {

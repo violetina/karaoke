@@ -455,6 +455,7 @@ def _follow_mode_status() -> dict[str, Any]:
     index = 0
     total = 0
     current = None
+    autopilot = False
     try:
         q = localcache.load_active_queue()
         if q and q.get("rows"):
@@ -462,9 +463,12 @@ def _follow_mode_status() -> dict[str, Any]:
             name = q.get("name", "") or ""
             index = int(q.get("current_index", 0) or 0)
             total = len(rows)
+            autopilot = bool(q.get("autopilot"))
             if 0 <= index < total:
                 cur = rows[index]
                 current = {"artist": cur.get("artist", ""), "title": cur.get("title", "")}
+        elif q:
+            autopilot = bool(q.get("autopilot"))
     except Exception as exc:
         _log.debug("follow status: queue read failed: %s", exc)
 
@@ -474,6 +478,7 @@ def _follow_mode_status() -> dict[str, Any]:
         "queue_name": name,
         "index": index,
         "total": total,
+        "autopilot": autopilot,
         "current": current,
     }
 
@@ -482,6 +487,26 @@ def _follow_mode_status() -> dict[str, Any]:
 async def follow_mode_status():
     """Report whether the dashboard-controlled queue follower is running."""
     return await asyncio.to_thread(_follow_mode_status)
+
+
+class AutopilotPayload(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/queue/autopilot")
+async def set_queue_autopilot(body: AutopilotPayload):
+    """Toggle 'keep going': auto-append fitting tracks as the queue nears its end."""
+    from . import localcache
+
+    def work():
+        localcache.set_queue_autopilot(body.enabled)
+        return {"autopilot": body.enabled}
+
+    try:
+        return await asyncio.to_thread(work)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @app.post("/api/follow")

@@ -1178,6 +1178,13 @@ def ensure_queue_schema(conn: Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_queue_events_ts ON queue_events(ts);
             """
         )
+        # Migration: the single-row queue state carries an autopilot flag so
+        # "keep going" survives restarts and is readable by the follower
+        # process. ADD COLUMN IF NOT EXISTS is a no-op once applied.
+        conn.execute(
+            "ALTER TABLE active_queue_state "
+            "ADD COLUMN IF NOT EXISTS autopilot BOOLEAN DEFAULT FALSE"
+        )
         conn.commit()
         ensure_saved_searches_and_playlists_schema(conn)
     except psycopg.Error as exc:
@@ -2176,7 +2183,8 @@ def load_active_queue(conn: Optional[Connection] = None) -> Optional[dict[str, A
     try:
         ensure_queue_schema(c)
         row = c.execute(
-            "SELECT playlist_id, name, current_index, updated_at, items_json FROM active_queue_state WHERE id = 1"
+            "SELECT playlist_id, name, current_index, updated_at, items_json, "
+            "COALESCE(autopilot, FALSE) AS autopilot FROM active_queue_state WHERE id = 1"
         ).fetchone()
         if not row:
             return None
@@ -2189,8 +2197,35 @@ def load_active_queue(conn: Optional[Connection] = None) -> Optional[dict[str, A
             "name": str(row["name"] or ""),
             "current_index": int(row["current_index"] or 0),
             "updated_at": float(row["updated_at"] or 0.0),
+            "autopilot": bool(row["autopilot"]),
             "rows": items,
         }
+    finally:
+        if own:
+            c.close()
+
+
+def set_queue_autopilot(enabled: bool, conn: Optional[Connection] = None) -> None:
+    """Set the active queue's 'keep going' autopilot flag.
+
+    Updates only the flag on the single queue-state row, leaving the loaded
+    queue untouched. A row is created when none exists yet so the toggle can be
+    set before a queue is loaded.
+    """
+    import time
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_queue_schema(c)
+        c.execute(
+            """
+            INSERT INTO active_queue_state (id, playlist_id, name, current_index, updated_at, items_json, autopilot)
+            VALUES (1, '', '', 0, %s, '[]', %s)
+            ON CONFLICT(id) DO UPDATE SET autopilot = excluded.autopilot
+            """,
+            (time.time(), bool(enabled)),
+        )
+        c.commit()
     finally:
         if own:
             c.close()

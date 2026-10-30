@@ -65,3 +65,26 @@ def test_follow_toggle_surfaces_systemd_failure(monkeypatch):
     res = client.post("/api/follow", json={"enabled": True})
     assert res.status_code == 503
     assert res.json()["detail"] == "unit failed"
+
+
+def test_follow_status_reports_autopilot(monkeypatch):
+    monkeypatch.setattr(
+        api.subprocess, "run",
+        lambda *a, **k: CompletedProcess(a[0], 0, stdout="active\n", stderr=""),
+    )
+    q = dict(_QUEUE, autopilot=True)
+    monkeypatch.setattr("karaoke.localcache.load_active_queue", lambda: q)
+
+    assert client.get("/api/follow").json()["autopilot"] is True
+
+
+def test_autopilot_toggle_persists_flag(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("karaoke.localcache.set_queue_autopilot",
+                        lambda enabled, **k: seen.update(enabled=enabled))
+
+    res = client.post("/api/queue/autopilot", json={"enabled": True})
+    assert res.status_code == 200
+    assert res.json()["autopilot"] is True
+    assert seen["enabled"] is True
+

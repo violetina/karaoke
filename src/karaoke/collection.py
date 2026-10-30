@@ -27,6 +27,11 @@ MAX_QUEUE = 50
 
 COLLECTION_QUEUE_ID = "graph-collection"
 
+#: Autopilot ("keep going"): when fewer than this many tracks remain after the
+#: current one, append this many more that fit the queue.
+AUTOPILOT_THRESHOLD = 5
+AUTOPILOT_ADD = 5
+
 
 def rows_for(track_ids: list[int], conn) -> list[dict[str, Any]]:
     """Queue rows for tracks, in the given order, with their best YouTube URL.
@@ -175,4 +180,58 @@ def enqueue_next(track_id: int, conn) -> dict[str, Any]:
     return {"status": "queued", "position": insert_at + 1,
             "queue_name": active.get("name", ""),
             "artist": row["artist"], "title": row["title"]}
+
+
+def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
+                     add: int = AUTOPILOT_ADD) -> dict[str, Any]:
+    """Append fitting tracks when autopilot is on and the queue is near its end.
+
+    Seeds the whole-queue "keep the vibe going" suggester on the queue's tail
+    and appends up to ``add`` tracks that fit, so continuous play never runs
+    dry. Returns ``{"refilled": n, ...}``; a no-op (refilled=0) when autopilot
+    is off, there is no queue, or there is still runway left.
+    """
+    active = localcache.load_active_queue(conn=conn)
+    if not active or not active.get("rows"):
+        return {"refilled": 0, "reason": "no_queue"}
+    if not active.get("autopilot"):
+        return {"refilled": 0, "reason": "disabled"}
+
+    rows = active["rows"]
+    cur_idx = int(active.get("current_index", 0) or 0)
+    remaining = len(rows) - 1 - cur_idx
+    if remaining > threshold:
+        return {"refilled": 0, "reason": "has_runway", "remaining": remaining}
+
+    # Seed on the queue's tail (recent + upcoming context), not the whole queue:
+    # bounded OpenSearch work, and it keeps the vibe close to where we are now.
+    seed_ids = [int(r["track_id"]) for r in rows[-10:] if r.get("track_id")]
+    if not seed_ids:
+        return {"refilled": 0, "reason": "no_seeds"}
+
+    from . import queue_suggest
+    try:
+        picks = queue_suggest.suggest_for_queue(seed_ids, limit=add)
+    except Exception:
+        log.warning("autopilot: suggestion failed", exc_info=True)
+        return {"refilled": 0, "reason": "suggest_error"}
+    if not picks:
+        return {"refilled": 0, "reason": "no_suggestions"}
+
+    existing = {int(r["track_id"]) for r in rows if r.get("track_id")}
+    new_ids = [p.track_id for p in picks if p.track_id not in existing]
+    new_rows = [r for r in rows_for(new_ids, conn) if r.get("url")]
+    if not new_rows:
+        return {"refilled": 0, "reason": "no_playable"}
+
+    merged = list(rows) + new_rows
+    localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
+                                 active.get("name") or "Karaoke: Dashboard Queue",
+                                 merged, current_index=cur_idx, conn=conn)
+    localcache.record_queue_event("autopilot_refill", queue_index=len(merged),
+                                  metadata={"added": len(new_rows), "source": "autopilot"},
+                                  conn=conn)
+    log.info("autopilot: appended %d tracks (queue now %d)", len(new_rows), len(merged))
+    return {"refilled": len(new_rows), "total": len(merged)}
+
 
