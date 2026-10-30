@@ -33,17 +33,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
-import tempfile
-from pathlib import Path
 from typing import Any, Optional
 
-import soundfile as sf
-
 from karaoke import av_align, localcache
-from karaoke.caption_sync import sync_audio_video_counterparts
-from karaoke.logger import log
 from karaoke.postprocess_worker import run_download_logic
 from karaoke.ytmusic_client import YTMusicClient
 
@@ -64,31 +57,29 @@ def _resolve_track_id(conn: Any, artist: str, title: str) -> Optional[int]:
     return row["track_id"] if row else None
 
 
-def _decode_mono(path: Path, sr: int) -> Any:
-    """Decode any container (including webm/opus, which soundfile can't open
-    directly) to mono PCM at the target sample rate via ffmpeg."""
-    with tempfile.TemporaryDirectory() as d:
-        wav_path = Path(d) / "out.wav"
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-             "-ac", "1", "-ar", str(sr), str(wav_path)],
-            check=True,
-        )
-        y, _ = sf.read(wav_path, dtype="float32")
-        return y
+def _independent_caption_offset(conn: Any, track_id: int, video_id: Optional[str]) -> tuple[Optional[float], str]:
+    """Compute a caption-based offset directly, independent of
+    sync_audio_video_counterparts -- which now prefers the waveform method
+    per PLAN-av-sync.md's order of preference, so calling it here would just
+    echo the waveform result back for any track with a distinct video id,
+    making the comparison this script exists for trivially zero."""
+    from karaoke.caption_sync import fetch_video_caption_lyrics
+    from karaoke.lyrics import align_audio_and_video_lyrics
 
-
-def _caption_offset(conn: Any, track_id: int, client: YTMusicClient) -> tuple[Optional[float], str]:
-    """Return (offset, source) where source explains if it was cached or freshly computed."""
     existing = localcache.get_sync_offset(track_id, conn, mode="video")
-    if existing is not None and existing != 0.0:
-        return existing, "cached track_sync_offsets"
+    audio_lyrics = localcache.get_lyrics_by_track_id(track_id, conn, media_type="audio")
+    if not (audio_lyrics and audio_lyrics.has_synced):
+        return existing, "no synced audio lyrics to compare against"
+    if not video_id:
+        return existing, "no video id to fetch captions from"
     try:
-        res = sync_audio_video_counterparts(track_id, conn, client=client)
-        return res.get("offset"), "freshly computed via sync_audio_video_counterparts"
+        cap_lyrics = fetch_video_caption_lyrics(f"https://www.youtube.com/watch?v={video_id}")
     except Exception as exc:
-        log.debug("caption offset failed for track %s: %s", track_id, exc)
-        return None, f"error: {exc}"
+        return existing, f"caption fetch error: {exc}"
+    if not (cap_lyrics and cap_lyrics.has_synced):
+        return existing, "video has no synced captions"
+    offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, cap_lyrics.synced_raw)
+    return offset, "freshly computed from captions directly (independent of sync_audio_video_counterparts)"
 
 
 def evaluate_track(artist: str, title: str, track_id: int, conn: Any, client: YTMusicClient) -> dict[str, Any]:
@@ -107,14 +98,14 @@ def evaluate_track(artist: str, title: str, track_id: int, conn: Any, client: YT
         report["status"] = "download_failed"
         return report
 
-    audio_y = _decode_mono(audio_path, av_align.TARGET_SR)
-    video_y = _decode_mono(video_path, av_align.TARGET_SR)
+    audio_y = av_align.load_mono(audio_path, av_align.TARGET_SR)
+    video_y = av_align.load_mono(video_path, av_align.TARGET_SR)
     sr = av_align.TARGET_SR
 
     result = av_align.estimate_offset(audio_y, video_y, sr)
     report["waveform"] = result
 
-    caption_offset, caption_source = _caption_offset(conn, track_id, client)
+    caption_offset, caption_source = _independent_caption_offset(conn, track_id, video_id)
     report["caption_offset"] = caption_offset
     report["caption_source"] = caption_source
 

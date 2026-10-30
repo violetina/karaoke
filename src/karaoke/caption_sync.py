@@ -359,6 +359,51 @@ def fetch_video_caption_lyrics(
         return None
 
 
+def _try_waveform_offset(track: dict, client: Any) -> Optional[dict[str, Any]]:
+    """Resolve both Audio and Video ids and attempt the waveform offset.
+
+    Always returns the resolved ids when the lookup itself succeeds (even if
+    the offset could not be trusted), so the caller can reuse the video id
+    instead of looking it up a second time. The 'offset'/'confidence'/'kind'
+    keys are only present when av_align found a usable match -- that is what
+    callers check before trusting this over the caption-based path.
+    """
+    from . import av_align
+    from .logger import log
+    from .postprocess_worker import run_download_logic
+
+    try:
+        versions = client.get_audio_and_video_versions(track["artist"], track["title"])
+    except Exception as exc:
+        log.debug("waveform av-sync: version lookup failed for %s - %s: %s",
+                 track.get("artist"), track.get("title"), exc)
+        return None
+    audio_id, video_id = versions.get("audio_video_id"), versions.get("video_video_id")
+    if not video_id:
+        return None
+    info: dict[str, Any] = {"audio_id": audio_id, "video_id": video_id}
+    if not audio_id or audio_id == video_id:
+        return info  # no distinct counterpart to compare against
+
+    try:
+        audio_path = run_download_logic(f"https://www.youtube.com/watch?v={audio_id}", None)
+        video_path = run_download_logic(f"https://www.youtube.com/watch?v={video_id}", None)
+        if not audio_path or not video_path:
+            return info
+        audio_y = av_align.load_mono(audio_path, av_align.TARGET_SR)
+        video_y = av_align.load_mono(video_path, av_align.TARGET_SR)
+        result = av_align.estimate_offset(audio_y, video_y, av_align.TARGET_SR)
+    except Exception as exc:
+        log.debug("waveform av-sync: alignment failed for track %s: %s", track.get("track_id"), exc)
+        return info
+    if result is None or result.kind == "low_confidence":
+        return info
+    info["offset"] = result.offset_s
+    info["confidence"] = result.confidence
+    info["kind"] = result.kind
+    return info
+
+
 def sync_audio_video_counterparts(
     track_id: int,
     conn: Any,
@@ -394,14 +439,37 @@ def sync_audio_video_counterparts(
     video_sources = cur.fetchall()
     video_url = video_sources[0]["url"] if video_sources else None
 
-    if not video_url and client:
-        try:
-            versions = client.get_audio_and_video_versions(track["artist"], track["title"])
-            if versions.get("video_video_id"):
-                video_url = f"https://www.youtube.com/watch?v={versions['video_video_id']}"
-                localcache.add_source(track_id, "youtube", video_url, conn=conn)
-        except Exception:
+    waveform_info = None
+    if client:
+        already_known = localcache.get_sync_offset(track_id, conn, mode="video")
+        if already_known is not None and already_known != 0.0:
+            # Already has a trustworthy offset from an earlier run (either
+            # method) -- skip the two extra downloads this needs. Re-running
+            # it on every postprocess call (this function can run twice per
+            # track in the existing chain) would double the network cost of
+            # every single processed track for no new information.
             pass
+        else:
+            try:
+                waveform_info = _try_waveform_offset(dict(track), client)
+            except Exception as exc:
+                from .logger import log
+                log.debug("postprocess: waveform av-sync failed for track %s: %s", track_id, exc)
+        if waveform_info and waveform_info.get("offset") is not None:
+            localcache.set_sync_offset(track_id, waveform_info["offset"], conn, mode="video")
+
+    if not video_url and client:
+        if waveform_info and waveform_info.get("video_id"):
+            video_url = f"https://www.youtube.com/watch?v={waveform_info['video_id']}"
+            localcache.add_track_source(track["artist"], track["title"], url=video_url, kind="youtube", conn=conn)
+        else:
+            try:
+                versions = client.get_audio_and_video_versions(track["artist"], track["title"])
+                if versions.get("video_video_id"):
+                    video_url = f"https://www.youtube.com/watch?v={versions['video_video_id']}"
+                    localcache.add_track_source(track["artist"], track["title"], url=video_url, kind="youtube", conn=conn)
+            except Exception:
+                pass
 
     if not video_lyrics and video_url:
         cap_lyrics = fetch_video_caption_lyrics(video_url, cookies_from_browser=cookies_from_browser)
@@ -411,8 +479,8 @@ def sync_audio_video_counterparts(
             )
             video_lyrics = cap_lyrics
 
-    offset = None
-    if audio_lyrics and audio_lyrics.has_synced and video_lyrics and video_lyrics.has_synced:
+    offset = waveform_info["offset"] if waveform_info and waveform_info.get("offset") is not None else None
+    if offset is None and audio_lyrics and audio_lyrics.has_synced and video_lyrics and video_lyrics.has_synced:
         offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, video_lyrics.synced_raw)
         if offset is not None:
             localcache.set_sync_offset(track_id, offset, conn, mode="video")
@@ -450,10 +518,14 @@ def sync_audio_video_counterparts(
         audio_lyrics = d_lyrics
         offset = saved_video_offset
 
+    used_waveform = bool(waveform_info and waveform_info.get("offset") is not None
+                        and offset == waveform_info["offset"])
     return {
         "status": "ok",
         "track_id": track_id,
         "has_audio_lyrics": bool(audio_lyrics and audio_lyrics.has_synced),
         "has_video_lyrics": bool(video_lyrics and video_lyrics.has_synced),
         "offset": offset,
+        "method": "waveform" if used_waveform else ("captions" if offset is not None else None),
+        "confidence": waveform_info.get("confidence") if used_waveform and waveform_info else None,
     }

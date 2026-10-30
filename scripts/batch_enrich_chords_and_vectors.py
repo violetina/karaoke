@@ -276,7 +276,8 @@ def process_one_track(
     if sync_av:
         try:
             from karaoke.caption_sync import sync_audio_video_counterparts
-            av_res = sync_audio_video_counterparts(track_id, conn)
+            from karaoke.ytmusic_client import YTMusicClient
+            av_res = sync_audio_video_counterparts(track_id, conn, client=YTMusicClient())
             if av_res.get("offset") is not None:
                 status["av_sync"] = True
                 status["av_offset"] = av_res["offset"]

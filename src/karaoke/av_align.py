@@ -46,6 +46,30 @@ class AlignmentResult:
     windows: list[tuple[float, float, float]] = field(default_factory=list)  # (audio_t_s, lag_s, confidence)
 
 
+def load_mono(path: "str | Path", sr: int = TARGET_SR) -> np.ndarray:
+    """Decode any audio/video container to mono PCM at the target sample rate.
+
+    Goes through ffmpeg rather than soundfile directly: soundfile's libsndfile
+    backend cannot open webm/opus containers (confirmed live against real
+    YouTube downloads), which is what the local cache stores.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path as _Path
+
+    import soundfile as sf
+
+    with tempfile.TemporaryDirectory() as d:
+        wav_path = _Path(d) / "out.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+             "-ac", "1", "-ar", str(sr), str(wav_path)],
+            check=True,
+        )
+        y, _ = sf.read(wav_path, dtype="float32")
+        return y
+
+
 def onset_envelope(y: np.ndarray, sr: int = TARGET_SR, hop_length: int = HOP_LENGTH) -> np.ndarray:
     """Gain-invariant onset-strength envelope, z-scored.
 
