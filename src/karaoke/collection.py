@@ -123,3 +123,56 @@ def play(name: str, track_ids: list[int], conn) -> dict[str, Any]:
                       prefer_audio=True)
         return {"status": "playing", "mode": "first_song_only", "count": len(playable),
                 "skipped": skipped, "message": f"YouTube Music queue unavailable: {exc}"}
+
+
+def enqueue_next(track_id: int, conn) -> dict[str, Any]:
+    """Insert a track into the active karaoke queue so it plays next.
+
+    This is what the dashboard graph's right-click "Queue next" uses: it adds
+    the song to the LOCAL queue (the one the stage's Up Next and the queue
+    follower track), inserting it right after the current position rather than
+    pushing it into YouTube Music's own transient player queue. A fresh queue
+    is created when none is loaded.
+    """
+    built = rows_for([int(track_id)], conn)
+    if not built:
+        return {"status": "error", "message": "Track not found in library"}
+    row = built[0]
+
+    active = localcache.load_active_queue(conn=conn)
+    if not active or not active.get("rows"):
+        name = "Karaoke: Dashboard Queue"
+        localcache.save_active_queue(COLLECTION_QUEUE_ID, name, [row],
+                                     current_index=0, conn=conn)
+        localcache.record_queue_event("enqueued", track_id=row["track_id"],
+                                      artist=row["artist"], title=row["title"],
+                                      queue_index=0,
+                                      metadata={"source": "graph-queue-next"},
+                                      conn=conn)
+        return {"status": "queued", "position": 1, "created": True,
+                "queue_name": name, "artist": row["artist"], "title": row["title"]}
+
+    rows = list(active["rows"])
+    cur_idx = int(active.get("current_index", 0) or 0)
+    insert_at = min(len(rows), max(0, cur_idx) + 1)
+
+    # Don't double-add when the song is already the very next row.
+    if insert_at - 1 >= 0 and insert_at - 1 < len(rows) \
+            and rows[insert_at - 1].get("track_id") == row["track_id"] \
+            and insert_at - 1 != cur_idx:
+        return {"status": "queued", "position": insert_at,
+                "queue_name": active.get("name", ""), "duplicate": True,
+                "artist": row["artist"], "title": row["title"]}
+
+    rows.insert(insert_at, row)
+    localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
+                                 active.get("name") or "Karaoke: Dashboard Queue",
+                                 rows, current_index=cur_idx, conn=conn)
+    localcache.record_queue_event("enqueued", track_id=row["track_id"],
+                                  artist=row["artist"], title=row["title"],
+                                  queue_index=insert_at,
+                                  metadata={"source": "graph-queue-next"}, conn=conn)
+    return {"status": "queued", "position": insert_at + 1,
+            "queue_name": active.get("name", ""),
+            "artist": row["artist"], "title": row["title"]}
+

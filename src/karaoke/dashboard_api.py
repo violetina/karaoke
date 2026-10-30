@@ -837,44 +837,31 @@ async def dj_add_song(body: SongActionPayload):
 
 @app.post("/api/song/queue")
 async def queue_song(body: SongActionPayload):
-    """Enqueue a song into the live YouTube Music player queue (CDP), if possible."""
-    import anyio
-    from . import localcache
-    from .ytmusic_playlist import extract_video_id
+    """Add a song to the local karaoke queue so it plays next.
 
-    def resolve_video_id():
-        vid = body.video_id or (extract_video_id(body.url) if body.url else "")
-        if vid:
-            return vid
-        track_id = body.track_id
-        if track_id is None and body.query:
-            from .mcp_server import search_songs
-            matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
-            if matches:
-                track_id = matches[0].get("track_id")
-        if track_id is not None:
-            with localcache.connect() as conn:
-                url = _best_source_url_for_track(track_id, conn)
-                return extract_video_id(url) if url else ""
-        return ""
+    Inserts the track into the active queue (the one the stage's Up Next and the
+    queue follower track), right after the current position -- not YouTube
+    Music's transient player queue.
+    """
+    import anyio
+    from . import collection, localcache
+
+    def work():
+        with localcache.connect() as conn:
+            track_id = body.track_id
+            if track_id is None and body.artist and body.title:
+                track_id = localcache.find_track_id(body.artist, body.title, conn)
+            if track_id is None and body.query:
+                from .mcp_server import search_songs
+                matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
+                if matches:
+                    track_id = matches[0].get("track_id")
+            if track_id is None:
+                return {"status": "error", "message": "Could not find this song in the library"}
+            return collection.enqueue_next(int(track_id), conn)
 
     try:
-        video_id = await anyio.to_thread.run_sync(resolve_video_id)
-        if not video_id:
-            return {"status": "error", "message": "No queueable YouTube source for this song"}
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            r = await client.post(
-                f"{CTRL_API_URL}/api/players/queue",
-                json={"video_id": video_id, "position": "next"},
-            )
-            if r.status_code == 200:
-                # Our contract with the frontend is status == "queued". The
-                # ctrl-api payload carries its own status == "ok", so spread it
-                # FIRST and let our status win -- otherwise the success response
-                # reads "ok", the frontend's queued-check fails, and the user
-                # sees "Could not queue this song" on a track that WAS queued.
-                return {**r.json(), "status": "queued"}
-            return {"status": "error", "message": f"Queue failed ({r.status_code})"}
+        return await anyio.to_thread.run_sync(work)
     except Exception as e:
         _log.warning("queue_song failed: %s", e)
         return {"status": "error", "error": str(e)}
