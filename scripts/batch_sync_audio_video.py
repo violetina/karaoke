@@ -107,6 +107,7 @@ def _get_thread_client():
 def process_one_track(
     candidate: dict[str, Any],
     cookies_from_browser: Optional[str] = None,
+    enable_whisper_fallback: bool = False,
 ) -> dict[str, Any]:
     track_id = candidate["track_id"]
     artist = candidate["artist"]
@@ -135,6 +136,7 @@ def process_one_track(
             conn,
             client=_get_thread_client(),
             cookies_from_browser=cookies_from_browser,
+            enable_whisper_fallback=enable_whisper_fallback,
         )
         status["has_audio"] = res.get("has_audio_lyrics", False)
         status["has_video"] = res.get("has_video_lyrics", False)
@@ -210,10 +212,12 @@ def run_batch_sync(
     candidates: list[dict[str, Any]],
     workers: int = 4,
     cookies_from_browser: Optional[str] = None,
+    enable_whisper_fallback: bool = False,
 ) -> dict[str, int]:
     print(f"\n{'='*70}")
     print(f"  AUDIO VS VIDEO COUNTERPART SYNCHRONIZATION")
-    print(f"  Candidates: {len(candidates)} | Workers: {workers}")
+    print(f"  Candidates: {len(candidates)} | Workers: {workers}"
+         f"{' | Whisper fallback: ON' if enable_whisper_fallback else ''}")
     print(f"{'='*70}\n")
 
     stats = {
@@ -266,12 +270,13 @@ def run_batch_sync(
 
     if workers <= 1:
         for item in candidates:
-            res = process_one_track(item, cookies_from_browser=cookies_from_browser)
+            res = process_one_track(item, cookies_from_browser=cookies_from_browser,
+                                    enable_whisper_fallback=enable_whisper_fallback)
             handle_result(res)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(process_one_track, item, cookies_from_browser)
+                executor.submit(process_one_track, item, cookies_from_browser, enable_whisper_fallback)
                 for item in candidates
             ]
             for fut in as_completed(futures):
@@ -299,6 +304,10 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-process already checked tracks")
     parser.add_argument("--track-id", type=int, default=None, help="Process single track ID")
     parser.add_argument("--cookies-from-browser", default=None, help="Browser name for cookies (e.g. chrome)")
+    parser.add_argument("--enable-whisper-fallback", action="store_true",
+                        help="Opt in to the Whisper last-resort anchor for tracks the waveform and "
+                             "caption methods both miss. Off by default: expensive (full-track "
+                             "transcription), CPU-bound, and not fully deterministic between runs.")
     args = parser.parse_args()
 
     conn = localcache.connect()
@@ -321,6 +330,7 @@ def main() -> int:
         candidates,
         workers=args.workers,
         cookies_from_browser=args.cookies_from_browser,
+        enable_whisper_fallback=args.enable_whisper_fallback,
     )
     return 0
 

@@ -404,17 +404,60 @@ def _try_waveform_offset(track: dict, client: Any) -> Optional[dict[str, Any]]:
     return info
 
 
+def _try_whisper_offset(track: dict, audio_lrc: str, video_url: str) -> Optional[float]:
+    """Last-resort offset estimate: transcribe the video's audio with Whisper
+    and fuzzy-match it against the already-known SYNCED audio lyrics, via the
+    same algorithm align_audio_and_video_lyrics uses for real captions.
+
+    A coarse anchor only, not a third confident method: faster-whisper is not
+    fully deterministic even at temperature=0 (model batching/threading still
+    introduces jitter), so expect tens of seconds of drift between runs on
+    the same track -- never treat this as a stable constant the way the
+    waveform or caption offsets are.
+    """
+    from .lyrics import align_audio_and_video_lyrics
+    from .logger import log
+    from .postprocess_worker import run_download_logic
+    from .whisper_sync import transcribe_to_lrc
+
+    video_path = run_download_logic(video_url, None)
+    if not video_path:
+        return None
+    try:
+        video_lrc = transcribe_to_lrc(str(video_path), temperature=0.0)
+    except Exception as exc:
+        log.debug("whisper av-sync: transcription failed for track %s: %s",
+                 track.get("track_id"), exc)
+        return None
+    if not video_lrc.strip():
+        return None
+    return align_audio_and_video_lyrics(audio_lrc, video_lrc)
+
+
 def sync_audio_video_counterparts(
     track_id: int,
     conn: Any,
     client: Optional[Any] = None,
     cookies_from_browser: Optional[str] = None,
+    enable_whisper_fallback: bool = False,
 ) -> dict[str, Any]:
     """Inspect and synchronize Audio vs Video lyrics and offsets for a track.
 
     1. Checks for existing audio lyrics (LRCLIB, etc.) and video lyrics (YouTube captions).
     2. If counterpart video is known/available, fetches captions and calculates time offset.
     3. Persists both audio and video lyrics, and saves the video offset in `track_sync_offsets`.
+
+    Order of preference per PLAN-av-sync.md: waveform offset (when two
+    distinct Audio/Video ids resolve and av_align is confident) wins; then
+    the existing caption-based alignment; then, only when
+    ``enable_whisper_fallback=True``, a Whisper transcript of the video's
+    audio as a coarse last-resort anchor. Whisper defaults OFF: almost no
+    tracks have real video captions (1 of ~11,000 in the audio-lyrics
+    library, per the plan's own data read), so leaving it on by default
+    would silently start full-track Whisper transcription for nearly every
+    postprocessed track -- an expensive, CPU-bound, non-deterministic path
+    that should be opted into (a dedicated backfill run), not switched on
+    for the whole pipeline by default.
     """
     from . import localcache
     from .lyrics import align_audio_and_video_lyrics, shift_lrc, sync_video_from_audio, sync_audio_from_video
@@ -480,12 +523,26 @@ def sync_audio_video_counterparts(
             video_lyrics = cap_lyrics
 
     offset = waveform_info["offset"] if waveform_info and waveform_info.get("offset") is not None else None
-    if offset is None and audio_lyrics and audio_lyrics.has_synced and video_lyrics and video_lyrics.has_synced:
+    # get_lyrics_by_track_id(media_type="video") falls back to ANY approved
+    # lyrics row when none is specifically typed 'video' (its own documented
+    # behavior) -- for the very common case of a track with only one lyrics
+    # row (audio: ~10,929 of ~10,930 per the plan's own data read), that
+    # silently hands back the audio row mislabeled as video. Left unguarded,
+    # the branch below would then "align" the audio lyrics against
+    # themselves and store a meaningless offset of ~0.0 -- a likely
+    # explanation for the Data section's "1236 are exactly 0.0, probably
+    # 'nothing found' defaults": they may actually be this self-alignment
+    # artifact, not a deliberate default.
+    real_video_lyrics = bool(video_lyrics) and not (
+        audio_lyrics and video_lyrics.synced_raw == audio_lyrics.synced_raw
+        and video_lyrics.source == audio_lyrics.source
+    )
+    if offset is None and audio_lyrics and audio_lyrics.has_synced and real_video_lyrics and video_lyrics.has_synced:
         offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, video_lyrics.synced_raw)
         if offset is not None:
             localcache.set_sync_offset(track_id, offset, conn, mode="video")
 
-    elif audio_lyrics and audio_lyrics.has_synced and not video_lyrics:
+    elif audio_lyrics and audio_lyrics.has_synced and not real_video_lyrics:
         saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video")
         if saved_video_offset is not None and saved_video_offset != 0.0:
             derived_video_lrc = sync_video_from_audio(audio_lyrics.synced_raw, saved_video_offset)
@@ -503,6 +560,11 @@ def sync_audio_video_counterparts(
             offset = saved_video_offset
 
     elif video_lyrics and video_lyrics.has_synced and not audio_lyrics:
+        # Same class of fallback issue applies here in reverse (audio_lyrics
+        # could be the video row mislabeled), but this branch requires real
+        # video lyrics to exist at all -- currently 1 track in the whole
+        # library per the plan's data read, so left as-is; not exercised
+        # enough to be worth the same guard without a real case to test it.
         saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video") or 0.0
         derived_audio_lrc = sync_audio_from_video(video_lyrics.synced_raw, saved_video_offset)
         from .lyrics import Lyrics, parse_lrc
@@ -518,14 +580,43 @@ def sync_audio_video_counterparts(
         audio_lyrics = d_lyrics
         offset = saved_video_offset
 
+    used_whisper = False
+    if (offset is None and enable_whisper_fallback and video_url
+            and audio_lyrics and audio_lyrics.has_synced and not real_video_lyrics):
+        whisper_offset = _try_whisper_offset(dict(track), audio_lyrics.synced_raw, video_url)
+        if whisper_offset is not None:
+            localcache.set_sync_offset(track_id, whisper_offset, conn, mode="video")
+            derived_video_lrc = sync_video_from_audio(audio_lyrics.synced_raw, whisper_offset)
+            from .lyrics import Lyrics, parse_lrc
+            d_lyrics = Lyrics(
+                plain=audio_lyrics.plain,
+                synced_raw=derived_video_lrc,
+                source="derived_from_audio_whisper_anchor",
+                lines=parse_lrc(derived_video_lrc),
+            )
+            localcache.put_cached_lyrics(
+                track["artist"], track["title"], d_lyrics, media_type="video", conn=conn
+            )
+            video_lyrics = d_lyrics
+            offset = whisper_offset
+            used_whisper = True
+
     used_waveform = bool(waveform_info and waveform_info.get("offset") is not None
                         and offset == waveform_info["offset"])
+    if used_waveform:
+        method = "waveform"
+    elif used_whisper:
+        method = "whisper"
+    elif offset is not None:
+        method = "captions"
+    else:
+        method = None
     return {
         "status": "ok",
         "track_id": track_id,
         "has_audio_lyrics": bool(audio_lyrics and audio_lyrics.has_synced),
         "has_video_lyrics": bool(video_lyrics and video_lyrics.has_synced),
         "offset": offset,
-        "method": "waveform" if used_waveform else ("captions" if offset is not None else None),
+        "method": method,
         "confidence": waveform_info.get("confidence") if used_waveform and waveform_info else None,
     }

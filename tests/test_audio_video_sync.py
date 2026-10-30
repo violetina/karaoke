@@ -3,7 +3,7 @@ import pytest
 from types import SimpleNamespace
 
 from karaoke import av_align, detect, localcache
-from karaoke.caption_sync import _try_waveform_offset, sync_audio_video_counterparts
+from karaoke.caption_sync import _try_waveform_offset, _try_whisper_offset, sync_audio_video_counterparts
 from karaoke.lyrics import (
     Lyrics,
     align_audio_and_video_lyrics,
@@ -314,5 +314,115 @@ def test_sync_skips_waveform_download_when_offset_already_known(tmp_path, monkey
 
         assert download_calls == [], "should not download audio for the waveform method when an offset is already known"
         assert res["offset"] == 3.5
+    finally:
+        conn.close()
+
+
+def _make_audio_only_track(conn, artist, title):
+    """Like _make_av_track but with no video lyrics row at all -- deleting the
+    video row after _make_av_track's insert doesn't work for this purpose:
+    get_lyrics_by_track_id's media_type='video' lookup falls back to ANY
+    approved lyrics row when none is specifically typed 'video' (documented,
+    intentional behavior for untyped single-lyrics tracks), so it would just
+    hand back the audio row relabeled as 'video'."""
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id", (artist, title))
+    track_id = cur.fetchone()["track_id"]
+    audio_lrc = "[00:10.00] Line one\n[00:20.00] Line two"
+    localcache.put_cached_lyrics(
+        artist, title,
+        Lyrics(plain="Line one\nLine two", synced_raw=audio_lrc, source="lrclib"),
+        media_type="audio", conn=conn,
+    )
+    return track_id
+
+
+def test_try_whisper_offset_returns_aligned_offset(monkeypatch):
+    audio_lrc = "[00:10.00] Line one\n[00:20.00] Line two"
+    video_lrc = "[00:17.00] Line one\n[00:27.00] Line two"  # +7s vs audio
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", lambda path, **kw: video_lrc)
+
+    offset = _try_whisper_offset({"track_id": 1}, audio_lrc, "https://www.youtube.com/watch?v=VID")
+
+    assert offset == 7.0
+
+
+def test_try_whisper_offset_none_when_download_fails(monkeypatch):
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: None)
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_none_on_empty_transcript(monkeypatch):
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", lambda path, **kw: "   ")
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_none_on_transcription_exception(monkeypatch):
+    def boom(path, **kw):
+        raise RuntimeError("model failed")
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", boom)
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_uses_fixed_temperature(monkeypatch):
+    seen_kwargs = {}
+
+    def fake_transcribe(path, **kw):
+        seen_kwargs.update(kw)
+        return "[00:10.00] x"
+
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", fake_transcribe)
+    _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+
+    assert seen_kwargs.get("temperature") == 0.0
+
+
+def test_sync_whisper_fallback_disabled_by_default(tmp_path, monkeypatch):
+    """Whisper must not run unless the caller explicitly opts in -- almost no
+    tracks have real video captions, so leaving it on by default would start
+    full-track transcription for nearly the whole library."""
+    conn = localcache.connect(tmp_path / "whisper_off.db")
+    try:
+        track_id = _make_audio_only_track(conn, "NoWhisperBand", "NoWhisperTrack")
+
+        whisper_calls = []
+        monkeypatch.setattr(
+            "karaoke.caption_sync._try_whisper_offset",
+            lambda *a, **kw: whisper_calls.append(1) or 9.0,
+        )
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "SAME", "video_video_id": "SAME"}
+        )
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert whisper_calls == []
+        assert res["offset"] is None
+        assert res["method"] is None
+    finally:
+        conn.close()
+
+
+def test_sync_whisper_fallback_used_as_last_resort_when_enabled(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "whisper_on.db")
+    try:
+        track_id = _make_audio_only_track(conn, "WhisperBand", "WhisperTrack")
+
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "SAME", "video_video_id": "SAME"}
+        )
+        monkeypatch.setattr("karaoke.caption_sync._try_whisper_offset", lambda track, lrc, url: 11.0)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client, enable_whisper_fallback=True)
+
+        assert res["offset"] == 11.0
+        assert res["method"] == "whisper"
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == 11.0
     finally:
         conn.close()
