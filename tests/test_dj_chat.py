@@ -160,6 +160,35 @@ def test_dj_chat_vibe_for_current_playing_song(sample_tracks):
     assert screen.initial_prompt == "/vibe"
 
 
+def test_suggest_seeds_on_resolved_track_id_not_just_artist_title(monkeypatch):
+    """The playing song must never come back as its own next suggestion.
+
+    get_now_playing() resolves a precise track_id for the playing song.
+    cmd_suggest must forward that id as the seed; forwarding only artist/title
+    lets suggest_next_tracks re-resolve the seed by a loose ILIKE and land on a
+    different library row, leaving the actual current track in the pool where
+    CLAP similarity returns it as the top "next".
+    """
+    from karaoke import dj_chat, mcp_server
+
+    monkeypatch.setattr(mcp_server, "get_now_playing", lambda: json.dumps({
+        "status": "playing", "artist": "Queen", "title": "Bohemian Rhapsody",
+        "track_id": 101,
+    }))
+
+    captured = {}
+
+    def fake_suggest(track_id=None, artist=None, title=None, strategy="flow", limit=5):
+        captured["track_id"] = track_id
+        return json.dumps({"seed": {"track_id": track_id, "artist": artist,
+                                    "title": title}, "suggestions": []})
+
+    monkeypatch.setattr(mcp_server, "suggest_next_tracks", fake_suggest)
+
+    DJChatSession().ask("/suggest")
+    assert captured["track_id"] == 101
+
+
 def test_dj_chat_chords():
     session = DJChatSession()
     reply = session.ask("/chords 8A")

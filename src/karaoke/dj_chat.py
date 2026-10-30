@@ -247,6 +247,13 @@ class DJChatSession:
         artist = None
         title = None
         if now_data.get("status") == "playing":
+            # Prefer the track_id get_now_playing already resolved for the
+            # playing song. Passing only artist/title lets suggest_next_tracks
+            # re-resolve the seed with a loose ILIKE, which can land on a
+            # different library row (a duplicate/remaster) than the one
+            # playing -- leaving the actual current track in the candidate
+            # pool, where CLAP similarity then returns it as the top "next".
+            seed_id = now_data.get("track_id")
             artist = now_data.get("artist")
             title = now_data.get("title")
 
