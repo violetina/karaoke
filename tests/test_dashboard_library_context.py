@@ -1,7 +1,26 @@
 """Read-only dashboard song metadata lookup."""
 from unittest.mock import MagicMock, patch
 
-from karaoke.dashboard_api import embedded_mood, song_library_context
+from karaoke.dashboard_api import (
+    _dj_chat_system_prompt,
+    embedded_mood,
+    song_library_context,
+)
+
+
+def test_dj_chat_prompt_forbids_suggesting_current_song():
+    """The AI DJ booth must never offer the song already on stage as 'next'.
+
+    The local model parrots the current track back on a 'suggest next song'
+    prompt unless the system prompt explicitly rules it out.
+    """
+    prompt = _dj_chat_system_prompt("Method Man", "Built For This")
+    assert "ALREADY PLAYING" in prompt
+    assert "never suggest" in prompt.lower()
+    assert "must be a DIFFERENT track" in prompt
+    # The current track identity is still named so the model knows what to avoid.
+    assert "Built For This" in prompt
+    assert "Method Man" in prompt
 
 
 def test_embedded_mood_reuses_live_canvas_and_in_square_chords():

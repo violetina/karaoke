@@ -1170,14 +1170,15 @@ class ChatRequest(BaseModel):
     current_title: Optional[str] = None
 
 
-@app.post("/api/dj/chat")
-async def dj_chat_endpoint(body: ChatRequest):
-    """Server-Sent Events streaming chat with local Ollama model."""
-    user_msg = body.message.strip()
-    now_artist = body.current_artist or "Unknown Artist"
-    now_title = body.current_title or "Unknown Track"
+def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
+    """Build the AI DJ system prompt.
 
-    system_prompt = (
+    The booth must never recommend the song already on stage. A small local
+    model asked to "suggest next song" happily parrots back the current track
+    unless the prompt explicitly rules it out, which is why the DJ booth kept
+    offering the song that was already playing.
+    """
+    return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
         f"The track currently on stage is '{now_title}' by {now_artist}. "
         f"You have deep knowledge of music history, bands, side-projects, BPM, and Camelot keys. "
@@ -1185,10 +1186,22 @@ async def dj_chat_endpoint(body: ChatRequest):
         f"If the user asks about an artist, highlight their story or side-projects. "
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything. "
+        f"The song '{now_title}' by {now_artist} is ALREADY PLAYING: never suggest, "
+        f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track. "
         f"Only if explicitly asked to queue a track, offer [QUEUE: Artist - Track Title] "
         f"as a suggestion the user must confirm with a button. "
         f"You may use [FOCUS: Artist Name] for artist inspection."
     )
+
+
+@app.post("/api/dj/chat")
+async def dj_chat_endpoint(body: ChatRequest):
+    """Server-Sent Events streaming chat with local Ollama model."""
+    user_msg = body.message.strip()
+    now_artist = body.current_artist or "Unknown Artist"
+    now_title = body.current_title or "Unknown Track"
+
+    system_prompt = _dj_chat_system_prompt(now_artist, now_title)
 
     ollama_payload = {
         "model": OLLAMA_MODEL,
