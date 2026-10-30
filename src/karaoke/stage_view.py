@@ -332,7 +332,7 @@ def get_stage_state() -> dict[str, Any]:
                 # current_index row has not been consumed, so include it.
                 start = cur_idx
 
-            for r in rows[start: start + 3]:
+            for r in rows[start: start + 4]:
                 upcoming_queue.append({
                     "artist": r.get("artist", ""),
                     "title": r.get("title", ""),

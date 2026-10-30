@@ -106,6 +106,13 @@
             @play-track="handlePlayTrack"
           />
 
+          <!-- Up-next queue (next 4, follows the playing track) -->
+          <QueuePanel
+            :stage="stageState"
+            @select-artist="handleSelectArtist"
+          />
+
+
           <!-- Artist Wikidata Knowledge Info-Box -->
           <ArtistInfoBox
             :artist="artistInfo"
@@ -149,6 +156,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import StagePrompter from './components/StagePrompter.vue'
 import PlayerControls from './components/PlayerControls.vue'
+import QueuePanel from './components/QueuePanel.vue'
 import RelationsGraph from './components/RelationsGraph.vue'
 import ArtistInfoBox from './components/ArtistInfoBox.vue'
 import SongList from './components/SongList.vue'
