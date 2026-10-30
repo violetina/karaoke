@@ -212,6 +212,9 @@ def get_stage_state() -> dict[str, Any]:
 
     # 2. Look up lyrics and audio analysis from local database
     lines: list[dict[str, Any]] = []
+    # Reuse the player's timeline so the dashboard detects instrumental breaks
+    # exactly the way the TUI does (LyricTimeline.in_gap / gap_progress).
+    timeline = None
     bpm: Optional[float] = None
     key: Optional[str] = None
     energy: Optional[float] = None
@@ -249,6 +252,13 @@ def get_stage_state() -> dict[str, Any]:
                                 "text": txt,
                                 "words": [],
                             })
+
+                    if cached_ly and (cached_ly.synced_raw or cached_ly.lines):
+                        try:
+                            from .player import timeline_from_lyrics
+                            timeline = timeline_from_lyrics(cached_ly)
+                        except Exception as exc:
+                            log.debug("stage_view: timeline build failed: %s", exc)
 
                     # Look up BPM, key, energy
                     try:
@@ -314,6 +324,20 @@ def get_stage_state() -> dict[str, Any]:
         elif t > position_s:
             next_line_in = round(t - position_s, 1)
             break
+
+    # Instrumental break: mirror the TUI's rest marker. The timeline flags the
+    # stretch between the (capped) end of the active line and the next line's
+    # start when it is at least GAP_MIN_S long, so the prompter can show a
+    # musical-note countdown instead of a frozen lyric during the break.
+    in_gap = False
+    gap_progress = 0.0
+    if timeline is not None:
+        try:
+            if timeline.in_gap(position_s):
+                in_gap = True
+                gap_progress = round(timeline.gap_progress(position_s), 3)
+        except Exception as exc:
+            log.debug("stage_view: gap detection failed: %s", exc)
     
     mood = "neutral"
     mood_alt: Optional[str] = None
@@ -391,6 +415,8 @@ def get_stage_state() -> dict[str, Any]:
         **_chord_state(track_id, position_s, duration),
         "active_line_index": active_line_idx,
         "next_line_in": next_line_in,
+        "in_gap": in_gap,
+        "gap_progress": gap_progress,
         "lines": lines,
         "upcoming_queue": upcoming_queue,
         "timestamp": time.time(),

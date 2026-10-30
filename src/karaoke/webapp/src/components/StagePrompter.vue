@@ -38,6 +38,18 @@
         </div>
       </div>
       <div class="lyrics-stage">
+        <!-- Instrumental break: musical-note rest marker, like the TUI. -->
+        <div v-if="inBreak" class="music-break">
+          <div class="music-break-note">♪</div>
+          <div class="music-break-label">Instrumental break</div>
+          <div class="music-break-bar">
+            <div class="music-break-fill" :style="{ width: gapPercent }"></div>
+            <span class="music-break-dot" :style="{ left: gapPercent }">•</span>
+          </div>
+          <div v-if="nextLineCountdown" class="music-break-countdown">
+            Next line in {{ nextLineCountdown }}
+          </div>
+        </div>
         <div v-if="stage.lines && stage.lines.length > 0" class="lyrics-window">
           <div
             v-for="item in lyricWindow"
@@ -107,6 +119,17 @@ const nextLineCountdown = computed(() => {
   if (!Number.isFinite(seconds) || seconds < 0) return ''
   return `${seconds.toFixed(1)}s`
 })
+
+// Instrumental break: the stage state flags a long no-lyric stretch (same
+// GAP_MIN_S rule as the TUI). Show a musical-note rest marker instead of a
+// frozen lyric line, with a progress bar counting down to the next line.
+const inBreak = computed(() => !!props.stage.in_gap)
+const gapPercent = computed(() => {
+  const p = Number(props.stage.gap_progress)
+  if (!Number.isFinite(p)) return '0%'
+  return `${Math.min(100, Math.max(0, p * 100)).toFixed(1)}%`
+})
+
 
 // --- Lyric word highlighting ---------------------------------------------
 // Split an active line into words for per-word highlighting.
@@ -541,6 +564,70 @@ onMounted(() => {
   align-items: center;
   overflow: hidden;
 }
+
+/* Instrumental break rest marker (mirrors the TUI's ♪ gap bar). */
+.music-break {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  width: 100%;
+}
+
+.music-break-note {
+  font-size: 2.6rem;
+  line-height: 1;
+  color: var(--accent-cyan);
+  text-shadow: 0 0 14px rgba(0, 242, 254, 0.55);
+  animation: music-break-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes music-break-pulse {
+  0%, 100% { transform: translateY(0) scale(1); opacity: 0.85; }
+  50% { transform: translateY(-4px) scale(1.12); opacity: 1; }
+}
+
+.music-break-label {
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.music-break-bar {
+  position: relative;
+  width: min(60%, 320px);
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.music-break-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(0, 242, 254, 0.5);
+  transition: width 0.2s linear;
+}
+
+.music-break-dot {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--accent-cyan);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: left 0.2s linear;
+}
+
+.music-break-countdown {
+  font-size: 0.85rem;
+  color: var(--accent-cyan);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.35);
+}
+
 
 .lyrics-window {
   display: flex;

@@ -111,6 +111,63 @@ def test_get_stage_state_with_playback_and_lyrics():
         assert state["upcoming_queue"][0]["title"] == "Don't Stop Me Now"
 
 
+def test_stage_state_flags_instrumental_break_like_the_tui():
+    """A long no-lyric stretch must expose in_gap/gap_progress for the prompter.
+
+    Mirrors the TUI's LyricTimeline.in_gap rest marker: between the end of a
+    line and a next line that is >= GAP_MIN_S away, the stage reports the break
+    so the dashboard can show a musical-note countdown instead of a frozen line.
+    """
+    fake_playback = {
+        "present": True,
+        "position": 25.0,  # inside the 10s -> 40s instrumental break
+        "duration": 200.0,
+        "casting": False,
+        "paused": False,
+        "url": "https://music.youtube.com/watch?v=xyz",
+    }
+    fake_meta = MagicMock(artist="Pink Floyd", title="Any Colour You Like",
+                          album="Dark Side", url=None, duration=None)
+
+    raw_lrc = (
+        "[00:10.00]Opening line before the solo\n"
+        "[00:40.00]Back to the words\n"
+        "[00:45.00]And one more line\n"
+    )
+    fake_ly = MagicMock()
+    fake_ly.synced_raw = raw_lrc
+    fake_ly.lines = [(10.0, "Opening line before the solo"),
+                     (40.0, "Back to the words"), (45.0, "And one more line")]
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchone.return_value = {
+        "bpm": 120.0, "detected_key": "D Major", "energy": 0.5,
+    }
+
+    with patch("karaoke.player_open.browser_playback", return_value=fake_playback), \
+         patch("karaoke.playerctl.playing_player", return_value="chromium"), \
+         patch("karaoke.playerctl.current_metadata", return_value=fake_meta), \
+         patch("karaoke.playerctl.status", return_value="Playing"), \
+         patch("karaoke.playerctl.art_url", return_value=""), \
+         patch("karaoke.localcache.connect") as mock_conn, \
+         patch("karaoke.localcache.find_track_id", return_value=321), \
+         patch("karaoke.localcache.get_lyrics_by_track_id", return_value=fake_ly), \
+         patch("karaoke.track_analysis.ensure_schema"), \
+         patch("karaoke.localcache.load_active_queue", return_value=None):
+
+        mock_conn.return_value.__enter__.return_value = fake_conn
+
+        state = get_stage_state()
+        assert state["in_gap"] is True
+        assert 0.0 < state["gap_progress"] <= 1.0
+
+        # Once the next line starts, the break is over.
+        fake_playback["position"] = 41.0
+        state2 = get_stage_state()
+        assert state2["in_gap"] is False
+        assert state2["gap_progress"] == 0.0
+
+
 def test_stage_event_stream_generator():
     async def go():
         gen = stage_event_stream(interval=0.001)
