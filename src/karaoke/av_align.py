@@ -23,9 +23,14 @@ import numpy as np
 TARGET_SR = 22050
 HOP_LENGTH = 512          # ~23 ms at 22.05 kHz, inside the 20-40 ms band the plan calls for
 WINDOW_S = 25.0           # per-window lag estimation window
-COARSE_PREFIX_S = 30.0    # only this much of the reference track feeds the coarse pass --
-                          # a speed change drifts the alignment over a long correlation,
-                          # which blunts the peak and tanks confidence (found empirically)
+COARSE_PREFIX_CANDIDATES_S = (20.0, 45.0, 75.0)  # tried short-to-long; the best (highest-
+                          # confidence) one wins. A single fixed prefix can't serve both
+                          # cases found empirically: a real pair (Balthazar - Bunker) needed
+                          # ~60s of real content past a quiet intro before the true lag's
+                          # peak (~14x any competitor) cleared MIN_CONFIDENCE, but a speed
+                          # change drifts the alignment over a long correlation and blunts
+                          # the peak, so a synthetic time-stretch needed a SHORT prefix to
+                          # stay confident. Trying several and keeping the best threads that.
 COARSE_SEARCH_S = 90.0    # coarse search covers cold opens up to this long
 NARROW_BAND_S = 3.0       # +/- band around the coarse lag for the per-window search
 MIN_CONFIDENCE = 0.15     # peak-to-second-peak margin below this => unreliable
@@ -110,8 +115,13 @@ def estimate_offset(audio_y: np.ndarray, video_y: np.ndarray,
     frame_s = HOP_LENGTH / sr
 
     coarse_max_lag = int(COARSE_SEARCH_S / frame_s)
-    prefix_frames = int(COARSE_PREFIX_S / frame_s)
-    coarse_lag_frames, coarse_conf = _xcorr_lag(a_env[:prefix_frames], v_env, coarse_max_lag)
+    best: tuple[int, float] = (0, -1.0)
+    for prefix_s in COARSE_PREFIX_CANDIDATES_S:
+        prefix_frames = int(prefix_s / frame_s)
+        cand_lag, cand_conf = _xcorr_lag(a_env[:prefix_frames], v_env, coarse_max_lag)
+        if cand_conf > best[1]:
+            best = (cand_lag, cand_conf)
+    coarse_lag_frames, coarse_conf = best
     coarse_offset_s = coarse_lag_frames * frame_s
 
     if coarse_conf < MIN_CONFIDENCE:
