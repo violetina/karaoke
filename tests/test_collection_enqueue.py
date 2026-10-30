@@ -114,3 +114,32 @@ def test_autopilot_refill_appends_fitting_tracks_near_end():
     assert [r["track_id"] for r in saved["rows"]] == [0, 1, 2, 3, 4, 5, 101, 102]
     assert saved["current_index"] == 4   # playing position preserved
 
+
+# --- advance_active_queue (queue-aware Next/Previous) ---------------------
+
+def test_advance_active_queue_moves_index_forward():
+    rows = [{"track_id": i, "artist": "A", "title": f"T{i}"} for i in range(5)]
+    saved = {}
+    with patch.object(collection.localcache, "load_active_queue",
+                      return_value=_queue(rows, 2, False)), \
+         patch.object(collection.localcache, "save_active_queue",
+                      side_effect=lambda *a, **k: saved.update(current_index=k["current_index"])):
+        res = collection.advance_active_queue(object(), 1)
+    assert res["index"] == 3 and res["moved"] is True
+    assert saved["current_index"] == 3
+
+
+def test_advance_active_queue_clamps_at_end():
+    rows = [{"track_id": i, "artist": "A", "title": f"T{i}"} for i in range(3)]
+    with patch.object(collection.localcache, "load_active_queue",
+                      return_value=_queue(rows, 2, False)), \
+         patch.object(collection.localcache, "save_active_queue"):
+        res = collection.advance_active_queue(object(), 1)
+    assert res["index"] == 2 and res["moved"] is False
+
+
+def test_advance_active_queue_none_without_queue():
+    with patch.object(collection.localcache, "load_active_queue", return_value=None):
+        assert collection.advance_active_queue(object(), 1) is None
+
+

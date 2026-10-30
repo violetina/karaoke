@@ -88,3 +88,40 @@ def test_autopilot_toggle_persists_flag(monkeypatch):
     assert res.json()["autopilot"] is True
     assert seen["enabled"] is True
 
+
+def test_next_advances_local_queue_when_following(monkeypatch):
+    """With Follow on, Next moves the local queue index (no playerctl detour)."""
+    monkeypatch.setattr(api, "_follow_service_active", lambda: True)
+    monkeypatch.setattr("karaoke.localcache.connect",
+                        lambda *a, **k: __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock())
+    monkeypatch.setattr("karaoke.collection.advance_active_queue",
+                        lambda conn, delta: {"index": 3, "row": {"artist": "A", "title": "T3"},
+                                             "moved": True})
+
+    data = client.post("/api/players/next").json()
+    assert data["queue"] is True
+    assert data["index"] == 3
+    assert data["action"] == "next"
+
+
+def test_next_falls_back_to_player_when_not_following(monkeypatch):
+    """With Follow off, Next proxies to the player's own skip over ctrl-api."""
+    monkeypatch.setattr(api, "_follow_service_active", lambda: False)
+
+    class _Resp:
+        def json(self):
+            return {"status": "ok", "action": "next"}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _Resp()
+
+    monkeypatch.setattr(api.httpx, "AsyncClient", _Client)
+
+    data = client.post("/api/players/next").json()
+    assert data == {"status": "ok", "action": "next"}
+    assert "queue" not in data
+
+

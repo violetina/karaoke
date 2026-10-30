@@ -235,3 +235,25 @@ def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
     return {"refilled": len(new_rows), "total": len(merged)}
 
 
+def advance_active_queue(conn, delta: int = 1) -> Optional[dict[str, Any]]:
+    """Move the active queue's current_index by ``delta`` (clamped to range).
+
+    Used by the dashboard's queue-aware Next/Previous: it just moves the index;
+    the queue follower, which treats current_index as the source of truth,
+    navigates to the new row on its next tick -- a single load, no detour
+    through YouTube Music's own autoplay. Returns the new index and row, or
+    None when there is no active queue.
+    """
+    active = localcache.load_active_queue(conn=conn)
+    if not active or not active.get("rows"):
+        return None
+    rows = active["rows"]
+    cur = int(active.get("current_index", 0) or 0)
+    new_idx = max(0, min(len(rows) - 1, cur + delta))
+    if new_idx != cur:
+        localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
+                                     active.get("name") or "Karaoke: Dashboard Queue",
+                                     rows, current_index=new_idx, conn=conn)
+    return {"index": new_idx, "row": rows[new_idx], "moved": new_idx != cur}
+
+

@@ -18,7 +18,7 @@ from .logger import log
 from .player_open import (browser_playback, open_song_url, track_finished,
                           track_idle)
 
-POLL_INTERVAL_S = 2.0
+POLL_INTERVAL_S = 1.0    # snappy pickup of manual Next/Previous (index changes)
 LOAD_GRACE_S = 10.0      # let a freshly navigated track load before judging it
 IDLE_STALL_S = 12.0      # window holding nothing this long => treat as ended
 TAIL_S = 1.5
@@ -77,11 +77,17 @@ def _maybe_autopilot_refill() -> None:
 
 
 def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - live loop
-    """Follow the active queue until the process is stopped."""
+    """Follow the active queue until the process is stopped.
+
+    The DB's ``current_index`` is the single source of truth for which row
+    should be playing. The follower navigates whenever it changes -- whether an
+    ended track advanced it or a manual Next/Previous (dashboard) moved it -- so
+    a skip is a single, immediate navigation to the right song instead of a
+    double load (YouTube Music autoplay, then a correction).
+    """
     log.info("queue-follow: starting")
     sig: Optional[tuple] = None
-    idx = 0
-    navigated = False
+    launched_idx: Optional[int] = None   # row index we last navigated to
     nav_at = 0.0
     idle_since = 0.0
     last_autopilot = 0.0
@@ -102,41 +108,41 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
         rows = (q or {}).get("rows") or []
         if not q or not rows:
             sig = None
-            navigated = False
+            launched_idx = None
             time.sleep(poll_interval)
             continue
 
+        # A replaced queue (different identity) forces a re-launch even if the
+        # stored index happens to match the last one we played.
         new_sig = _queue_signature(q)
         if new_sig != sig:
-            # Fresh or replaced queue: resume from its stored index.
             sig = new_sig
-            idx = int(q.get("current_index", 0) or 0)
-            navigated = False
+            launched_idx = None
             idle_since = 0.0
-            log.info("queue-follow: following '%s' (%d rows) from index %d",
-                     q.get("name"), len(rows), idx)
+            log.info("queue-follow: following '%s' (%d rows)", q.get("name"), len(rows))
 
-        if idx >= len(rows):
+        cur_idx = int(q.get("current_index", 0) or 0)
+        if cur_idx >= len(rows):
             # End of queue: wait in case it is extended, do not loop playback.
             time.sleep(poll_interval)
             continue
 
-        row = rows[idx]
+        row = rows[cur_idx]
 
-        # Start the current row if we have not navigated to it yet.
-        if not navigated:
+        # The target row changed (track ended and advanced it, or a manual
+        # Next/Previous moved current_index): navigate to it now.
+        if cur_idx != launched_idx:
             if _play_row(row):
-                _save_index(q, idx)
-                _record_advance(row, idx)
-                log.info("queue-follow: playing [%d] %s - %s", idx,
+                _record_advance(row, cur_idx)
+                log.info("queue-follow: playing [%d] %s - %s", cur_idx,
                          row.get("artist"), row.get("title"))
-                navigated = True
+                launched_idx = cur_idx
                 nav_at = time.monotonic()
                 idle_since = 0.0
             else:
-                # No source: skip to the next row.
-                idx += 1
-                _save_index(q, idx)
+                # No source: skip past it.
+                _save_index(q, cur_idx + 1)
+                launched_idx = cur_idx  # don't retry this row
             time.sleep(poll_interval)
             continue
 
@@ -183,13 +189,12 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
                 time.sleep(poll_interval)
                 continue
 
-        # Track finished: advance to the next row.
-        idx += 1
-        _save_index(q, idx)
-        navigated = False
+        # Track finished: advance current_index. Next loop sees the change and
+        # navigates to the new row.
+        _save_index(q, cur_idx + 1)
         idle_since = 0.0
-        if idx < len(rows):
-            log.info("queue-follow: advancing to index %d", idx)
+        if cur_idx + 1 < len(rows):
+            log.info("queue-follow: advancing to index %d", cur_idx + 1)
         else:
             log.info("queue-follow: reached end of queue")
         time.sleep(poll_interval)

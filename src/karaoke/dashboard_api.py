@@ -609,8 +609,41 @@ async def player_pause():
             return {"status": "error", "error": str(e)}
 
 
+def _follow_service_active() -> bool:
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "is-active", "karaoke-queue-follow.service"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def _skip_local_queue(delta: int):
+    """Advance the local queue when the follower owns playback; else None.
+
+    Only when Follow Queue is running: move current_index and let the follower
+    navigate to the new row (one load). When it is off, Next/Previous fall back
+    to the player's own skip so ad-hoc/radio playback is unaffected.
+    """
+    if not _follow_service_active():
+        return None
+    from . import collection, localcache
+    with localcache.connect() as conn:
+        res = collection.advance_active_queue(conn, delta)
+    if res is None:
+        return None
+    return {"status": "ok", "action": "next" if delta > 0 else "previous",
+            "queue": True, "index": res["index"],
+            "artist": res["row"].get("artist"), "title": res["row"].get("title")}
+
+
 @app.post("/api/players/next")
 async def player_next():
+    skipped = await asyncio.to_thread(_skip_local_queue, 1)
+    if skipped is not None:
+        return skipped
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
             r = await client.post(f"{CTRL_API_URL}/api/players/next", json={})
@@ -621,6 +654,9 @@ async def player_next():
 
 @app.post("/api/players/previous")
 async def player_previous():
+    skipped = await asyncio.to_thread(_skip_local_queue, -1)
+    if skipped is not None:
+        return skipped
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
             r = await client.post(f"{CTRL_API_URL}/api/players/previous", json={})
