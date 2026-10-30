@@ -791,7 +791,12 @@ async def queue_song(body: SongActionPayload):
                 json={"video_id": video_id, "position": "next"},
             )
             if r.status_code == 200:
-                return {"status": "queued", **r.json()}
+                # Our contract with the frontend is status == "queued". The
+                # ctrl-api payload carries its own status == "ok", so spread it
+                # FIRST and let our status win -- otherwise the success response
+                # reads "ok", the frontend's queued-check fails, and the user
+                # sees "Could not queue this song" on a track that WAS queued.
+                return {**r.json(), "status": "queued"}
             return {"status": "error", "message": f"Queue failed ({r.status_code})"}
     except Exception as e:
         _log.warning("queue_song failed: %s", e)

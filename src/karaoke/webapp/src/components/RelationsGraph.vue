@@ -392,7 +392,7 @@ const ctxQueue = async () => {
   showToast('➕ Queueing…')
   const r = await postSongAction('/api/song/queue', song)
   if (r.status === 'queued') showToast(`➕ Queued ${song.title || song.artist}`)
-  else showToast(r.message || 'Could not queue this song', 'warn')
+  else showToast(r.message || r.error || 'Could not queue this song', 'warn')
 }
 
 const ctxDjAdd = async () => {
