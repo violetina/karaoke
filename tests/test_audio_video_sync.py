@@ -3,7 +3,12 @@ import pytest
 from types import SimpleNamespace
 
 from karaoke import av_align, detect, localcache
-from karaoke.caption_sync import _try_waveform_offset, _try_whisper_offset, sync_audio_video_counterparts
+from karaoke.caption_sync import (
+    _durations_compatible,
+    _try_waveform_offset,
+    _try_whisper_offset,
+    sync_audio_video_counterparts,
+)
 from karaoke.lyrics import (
     Lyrics,
     align_audio_and_video_lyrics,
@@ -276,6 +281,52 @@ def test_sync_prefers_waveform_over_captions_when_both_available(tmp_path, monke
         conn.close()
 
 
+def test_sync_waveform_offset_not_relabeled_as_cached_when_video_lyrics_missing(tmp_path, monkeypatch):
+    """Regression: when a track has only audio lyrics (the common case --
+    not real_video_lyrics), the branch that derives video lyrics from a
+    stored offset must not clobber a freshly-computed waveform result's
+    method attribution. Found live via preprocessing the AV Sync Candidates
+    playlist against production Postgres: track_sync_offsets.offset_s is a
+    REAL (float4) column, so round-tripping a freshly-set float64 offset
+    through get_sync_offset can read back a slightly different value,
+    silently flipping `offset == waveform_info["offset"]` to False and
+    mislabeling a correct, fresh waveform result as "cached". Simulated here
+    by making a re-read return an obviously wrong number: if the code looks
+    up an offset again instead of reusing what it just computed, this test
+    catches it immediately rather than relying on float imprecision."""
+    conn = localcache.connect(tmp_path / "waveform_not_clobbered.db")
+    try:
+        track_id = _make_audio_only_track(conn, "FreshWaveBand", "FreshWaveTrack")
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+        )
+        fake_result = av_align.AlignmentResult(offset_s=12.5, slope=0.0, confidence=0.7, kind="constant")
+        monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/path")
+        monkeypatch.setattr(av_align, "load_mono", lambda path, sr: "fake-signal")
+        monkeypatch.setattr(av_align, "estimate_offset", lambda a, v, sr: fake_result)
+        monkeypatch.setattr("karaoke.caption_sync._durations_compatible", lambda a, v, t=None: True)
+        call_count = {"n": 0}
+        def wrong_on_second_read(tid, c, mode=None):
+            # First call is the function's own "already known?" pre-check
+            # (must see nothing yet, or it skips the waveform attempt
+            # entirely); any call after that is the bug under test re-reading
+            # instead of reusing what was just computed.
+            call_count["n"] += 1
+            if tid == track_id and call_count["n"] > 1:
+                return 999.0  # proves the code took this path instead of reusing the in-memory offset
+            return None
+        monkeypatch.setattr(localcache, "get_sync_offset", wrong_on_second_read)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert res["offset"] == 12.5
+        assert res["method"] == "waveform"
+        assert res["confidence"] == 0.7
+        assert res["has_video_lyrics"] is True  # still derived+stored for display
+    finally:
+        conn.close()
+
+
 def test_sync_falls_back_to_captions_without_distinct_ids(tmp_path, monkeypatch):
     conn = localcache.connect(tmp_path / "waveform_fallback.db")
     try:
@@ -426,3 +477,78 @@ def test_sync_whisper_fallback_used_as_last_resort_when_enabled(tmp_path, monkey
         assert localcache.get_sync_offset(track_id, conn, mode="video") == 11.0
     finally:
         conn.close()
+
+
+def test_durations_compatible_true_for_normal_difference(monkeypatch):
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 300.0 if "AID" in url else 320.0},
+    )
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_durations_compatible_false_when_video_much_longer(monkeypatch):
+    """Mirrors the real Thriller case: a 13-minute short-film video against
+    a 6-minute audio release -- no offset can fix a different recording."""
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 358.0 if "AID" in url else 822.0},
+    )
+    assert _durations_compatible("AID", "VID") is False
+
+
+def test_durations_compatible_false_when_video_much_shorter(monkeypatch):
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 300.0 if "AID" in url else 60.0},
+    )
+    assert _durations_compatible("AID", "VID") is False
+
+
+def test_durations_compatible_true_for_a_long_intro_within_bounds():
+    """A long-but-plausible intro (close to av_align's own search bound)
+    must not be rejected before the real correlation even gets to try."""
+    from karaoke import av_align
+
+    with_patch = {"audio": 300.0, "video": 300.0 + av_align.COARSE_SEARCH_S - 1}
+
+    def fake_fetch(url, **kw):
+        return {"duration": with_patch["audio"] if "AID" in url else with_patch["video"]}
+
+    import karaoke.youtube as youtube_mod
+    orig = youtube_mod.fetch_metadata
+    youtube_mod.fetch_metadata = fake_fetch
+    try:
+        assert _durations_compatible("AID", "VID") is True
+    finally:
+        youtube_mod.fetch_metadata = orig
+
+
+def test_durations_compatible_true_when_metadata_unavailable(monkeypatch):
+    monkeypatch.setattr("karaoke.youtube.fetch_metadata", lambda url, **kw: {"duration": None})
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_durations_compatible_true_on_metadata_error(monkeypatch):
+    def boom(url, **kw):
+        raise RuntimeError("network error")
+    monkeypatch.setattr("karaoke.youtube.fetch_metadata", boom)
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_try_waveform_offset_skips_download_on_duration_mismatch(monkeypatch):
+    """The duration guard must run BEFORE any download -- that's the whole
+    point (not burning effort on a video that's clearly a different
+    recording)."""
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+    )
+    monkeypatch.setattr("karaoke.caption_sync._durations_compatible", lambda a, v, t=None: False)
+    download_calls = []
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic",
+                        lambda url, cb: download_calls.append(url) or "/fake/path")
+
+    info = _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client)
+
+    assert download_calls == []
+    assert info == {"audio_id": "AID", "video_id": "VID", "skipped_reason": "duration_mismatch"}

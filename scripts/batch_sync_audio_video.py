@@ -58,15 +58,27 @@ def find_candidates(
     limit: int = 50,
     force: bool = False,
     track_id: Optional[int] = None,
+    track_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     """Query tracks eligible for audio vs video counterpart synchronization."""
     cur = conn.cursor()
+    if track_ids:
+        cur.execute(
+            """
+            SELECT t.track_id, t.artist, t.title, s.url
+            FROM tracks t
+            JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
+            WHERE t.track_id = ANY(%s)
+            """,
+            (list(track_ids),),
+        )
+        return [dict(r) for r in cur.fetchall()]
     if track_id is not None:
         cur.execute(
             """
             SELECT t.track_id, t.artist, t.title, s.url
             FROM tracks t
-            JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%youtube.com/watch%')
+            JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
             WHERE t.track_id = %s
             LIMIT 1
             """,
@@ -302,7 +314,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=50, help="Max tracks to process (default: 50)")
     parser.add_argument("--workers", type=int, default=4, help="Number of worker threads (default: 4)")
     parser.add_argument("--force", action="store_true", help="Re-process already checked tracks")
-    parser.add_argument("--track-id", type=int, default=None, help="Process single track ID")
+    parser.add_argument("--track-id", type=int, action="append", default=None,
+                        help="Process this track ID (repeatable: --track-id 1 --track-id 2)")
     parser.add_argument("--cookies-from-browser", default=None, help="Browser name for cookies (e.g. chrome)")
     parser.add_argument("--enable-whisper-fallback", action="store_true",
                         help="Opt in to the Whisper last-resort anchor for tracks the waveform and "
@@ -317,7 +330,7 @@ def main() -> int:
         conn,
         limit=args.limit,
         force=args.force,
-        track_id=args.track_id,
+        track_ids=args.track_id,
     )
     conn.close()
 
