@@ -126,6 +126,7 @@ def transcribe_to_words(
     language: Optional[str] = None,
     compute_type: str = "int8",
     vad_filter: bool = False,
+    temperature: Optional[Any] = None,
 ) -> list[Word]:
     """Transcribe an audio file to timestamped words using faster-whisper.
 
@@ -134,11 +135,21 @@ def transcribe_to_words(
     OFF by default: faster-whisper's Silero VAD over-filters singing/quiet
     intros and can discard the entire track.
 
+    `temperature` is left at faster-whisper's own default (a fallback ladder)
+    unless a caller passes one explicitly -- a scalar like `0.0` disables that
+    ladder for a more reproducible transcript (still not fully deterministic
+    across installs/hardware), which callers that need stable anchor
+    timestamps across repeated runs (rather than top transcription quality)
+    should pass.
+
     Word timings are the useful product — Whisper's *words* on music are
     unreliable, but its *rhythm* is good. Callers that hold the real lyrics can
     align them onto these timings; see :mod:`karaoke.lyric_align`.
     """
     model = _model(model_size, compute_type)
+    transcribe_kwargs: dict[str, Any] = {}
+    if temperature is not None:
+        transcribe_kwargs["temperature"] = temperature
     segments, _info = model.transcribe(
         audio_path,
         initial_prompt=text,
@@ -151,6 +162,7 @@ def transcribe_to_words(
         # is where the worst artifacts come from on music: an intro or an
         # instrumental break gets a plausible-looking line attached to it.
         hallucination_silence_threshold=2.0,
+        **transcribe_kwargs,
     )
     words: list[Word] = []
     for seg in segments:
@@ -173,6 +185,7 @@ def transcribe_to_lrc(
     language: Optional[str] = None,
     compute_type: str = "int8",
     vad_filter: bool = False,
+    temperature: Optional[Any] = None,
 ) -> str:
     """Transcribe an audio file to LRC text using faster-whisper.
 
@@ -184,7 +197,7 @@ def transcribe_to_lrc(
     """
     words = transcribe_to_words(
         audio_path, text=text, model_size=model_size, language=language,
-        compute_type=compute_type, vad_filter=vad_filter,
+        compute_type=compute_type, vad_filter=vad_filter, temperature=temperature,
     )
     lines = _dedup_adjacent(group_words_to_lines(words))
     # Where Whisper is the only source of words there is nothing to corroborate

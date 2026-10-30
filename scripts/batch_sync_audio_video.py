@@ -29,7 +29,7 @@ from karaoke.logger import log
 
 
 def ensure_log_table(conn: Any) -> None:
-    """Ensure the status tracking table exists."""
+    """Ensure the status tracking table exists, with the method/confidence columns."""
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS av_sync_log (
@@ -39,6 +39,12 @@ def ensure_log_table(conn: Any) -> None:
             checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # method/confidence distinguish a waveform-verified row from an old
+    # caption-only one, so find_candidates can re-evaluate the caption-only
+    # rows under the (more reliable, per the real-pair validation) waveform
+    # method instead of treating every past row as settled.
+    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS method TEXT")
+    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION")
     cur.execute("""
         INSERT INTO av_sync_log (track_id, status, offset_s)
         SELECT track_id, 'synced', offset_s FROM track_sync_offsets
@@ -74,7 +80,7 @@ def find_candidates(
         JOIN lyrics l ON l.track_id = t.track_id AND l.synced_lyrics IS NOT NULL AND length(l.synced_lyrics) > 0
         JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
         LEFT JOIN av_sync_log a ON a.track_id = t.track_id
-        WHERE (%s OR a.track_id IS NULL)
+        WHERE (%s OR a.track_id IS NULL OR a.method IS DISTINCT FROM 'waveform')
         ORDER BY t.track_id ASC
         LIMIT %s
     """
@@ -91,9 +97,17 @@ def _get_thread_conn():
     return _thread_local.conn
 
 
+def _get_thread_client():
+    if not hasattr(_thread_local, "yt_client"):
+        from karaoke.ytmusic_client import YTMusicClient
+        _thread_local.yt_client = YTMusicClient()
+    return _thread_local.yt_client
+
+
 def process_one_track(
     candidate: dict[str, Any],
     cookies_from_browser: Optional[str] = None,
+    enable_whisper_fallback: bool = False,
 ) -> dict[str, Any]:
     track_id = candidate["track_id"]
     artist = candidate["artist"]
@@ -120,25 +134,31 @@ def process_one_track(
         res = sync_audio_video_counterparts(
             track_id,
             conn,
+            client=_get_thread_client(),
             cookies_from_browser=cookies_from_browser,
+            enable_whisper_fallback=enable_whisper_fallback,
         )
         status["has_audio"] = res.get("has_audio_lyrics", False)
         status["has_video"] = res.get("has_video_lyrics", False)
         status["offset"] = res.get("offset")
+        status["method"] = res.get("method")
+        status["confidence"] = res.get("confidence")
 
         cur = conn.cursor()
         if res.get("offset") is not None:
             status["status"] = "synced"
             cur.execute(
                 """
-                INSERT INTO av_sync_log (track_id, status, offset_s, checked_at)
-                VALUES (%s, 'synced', %s, CURRENT_TIMESTAMP)
+                INSERT INTO av_sync_log (track_id, status, offset_s, method, confidence, checked_at)
+                VALUES (%s, 'synced', %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (track_id) DO UPDATE SET
                     status = EXCLUDED.status,
                     offset_s = EXCLUDED.offset_s,
+                    method = EXCLUDED.method,
+                    confidence = EXCLUDED.confidence,
                     checked_at = CURRENT_TIMESTAMP
                 """,
-                (track_id, res["offset"]),
+                (track_id, res["offset"], res.get("method"), res.get("confidence")),
             )
         elif not status["has_video"]:
             status["status"] = "no_captions"
@@ -192,10 +212,12 @@ def run_batch_sync(
     candidates: list[dict[str, Any]],
     workers: int = 4,
     cookies_from_browser: Optional[str] = None,
+    enable_whisper_fallback: bool = False,
 ) -> dict[str, int]:
     print(f"\n{'='*70}")
     print(f"  AUDIO VS VIDEO COUNTERPART SYNCHRONIZATION")
-    print(f"  Candidates: {len(candidates)} | Workers: {workers}")
+    print(f"  Candidates: {len(candidates)} | Workers: {workers}"
+         f"{' | Whisper fallback: ON' if enable_whisper_fallback else ''}")
     print(f"{'='*70}\n")
 
     stats = {
@@ -219,7 +241,9 @@ def run_batch_sync(
 
         if res["status"] == "synced":
             stats["synced"] += 1
-            tag_str = f"✓ Offset: {res['offset']:+6.2f}s"
+            method_tag = f" [{res.get('method') or '?'}"
+            method_tag += f" {res['confidence']:.2f}]" if res.get("confidence") is not None else "]"
+            tag_str = f"✓ Offset: {res['offset']:+6.2f}s{method_tag}"
         elif res["status"] == "no_captions":
             stats["no_captions"] += 1
             tag_str = "⊘ No video captions"
@@ -246,12 +270,13 @@ def run_batch_sync(
 
     if workers <= 1:
         for item in candidates:
-            res = process_one_track(item, cookies_from_browser=cookies_from_browser)
+            res = process_one_track(item, cookies_from_browser=cookies_from_browser,
+                                    enable_whisper_fallback=enable_whisper_fallback)
             handle_result(res)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(process_one_track, item, cookies_from_browser)
+                executor.submit(process_one_track, item, cookies_from_browser, enable_whisper_fallback)
                 for item in candidates
             ]
             for fut in as_completed(futures):
@@ -279,6 +304,10 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-process already checked tracks")
     parser.add_argument("--track-id", type=int, default=None, help="Process single track ID")
     parser.add_argument("--cookies-from-browser", default=None, help="Browser name for cookies (e.g. chrome)")
+    parser.add_argument("--enable-whisper-fallback", action="store_true",
+                        help="Opt in to the Whisper last-resort anchor for tracks the waveform and "
+                             "caption methods both miss. Off by default: expensive (full-track "
+                             "transcription), CPU-bound, and not fully deterministic between runs.")
     args = parser.parse_args()
 
     conn = localcache.connect()
@@ -301,6 +330,7 @@ def main() -> int:
         candidates,
         workers=args.workers,
         cookies_from_browser=args.cookies_from_browser,
+        enable_whisper_fallback=args.enable_whisper_fallback,
     )
     return 0
 

@@ -410,10 +410,38 @@ def cdp_previous_track() -> bool:
     return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
 
 
+def cdp_get_av() -> str:
+    """Read the active Audio (Song) vs Video mode on YouTube Music over CDP.
+
+    Returns "audio", "video", or "no_av_toggle" when the playing item has no
+    counterpart (the toggle component is absent, or present but reports no
+    counterpart for the current queue item).
+    """
+    js = """(() => {
+      const t = document.querySelector('ytmusic-av-toggle');
+      if (!t || !t.hasAttribute('selected-queue-item-has-counterpart')) return "no_av_toggle";
+      if (t.getAttribute('is-video-playback-mode-selected') === 'true') return "video";
+      if (t.getAttribute('is-audio-playback-mode-selected') === 'true') return "audio";
+      return "unknown";
+    })()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    val = reply.get("result", {}).get("result", {}).get("value") if reply else None
+    return str(val or "unsupported")
+
+
 def cdp_toggle_av(mode: str | None = None) -> str:
-    """Toggle or set Audio (Song) vs Video mode on YouTube Music over CDP."""
+    """Toggle or set Audio (Song) vs Video mode on YouTube Music over CDP.
+
+    The blind-toggle branch (``mode=None``) reads the real state from
+    ``ytmusic-av-toggle``'s own ``is-video-playback-mode-selected`` attribute,
+    not the song/video buttons' ``.selected`` class or ``aria-selected`` --
+    verified live, those never reflect the actual mode (always false/null), so
+    reading them made the blind toggle always land on audio regardless of the
+    starting state.
+    """
     target_mode = mode or ""
     js = f"""(() => {{
+      const toggle = document.querySelector('ytmusic-av-toggle');
       const songBtn = document.querySelector('ytmusic-av-toggle .song-button, button.song-button');
       const videoBtn = document.querySelector('ytmusic-av-toggle .video-button, button.video-button');
       if (!songBtn || !videoBtn) return "no_av_toggle";
@@ -425,13 +453,13 @@ def cdp_toggle_av(mode: str | None = None) -> str:
         videoBtn.click();
         return "video";
       }}
-      const isSongActive = songBtn.classList.contains('selected') || songBtn.getAttribute('aria-selected') === 'true';
-      if (isSongActive) {{
-        videoBtn.click();
-        return "video";
-      }} else {{
+      const isVideoActive = toggle && toggle.getAttribute('is-video-playback-mode-selected') === 'true';
+      if (isVideoActive) {{
         songBtn.click();
         return "audio";
+      }} else {{
+        videoBtn.click();
+        return "video";
       }}
     }})()"""
     reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)

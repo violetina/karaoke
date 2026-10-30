@@ -271,3 +271,47 @@ def test_cdp_set_ytmusic_autoplay_returns_none_without_a_reply(monkeypatch):
     assert player_open.cdp_set_ytmusic_autoplay(True) is None
 
 
+def test_cdp_get_av_reads_current_mode(monkeypatch):
+    monkeypatch.setattr(player_open, "_cdp_send",
+                        lambda *a, **k: {"result": {"result": {"value": "video"}}})
+    assert player_open.cdp_get_av() == "video"
+
+
+def test_cdp_get_av_reports_no_counterpart(monkeypatch):
+    monkeypatch.setattr(player_open, "_cdp_send",
+                        lambda *a, **k: {"result": {"result": {"value": "no_av_toggle"}}})
+    assert player_open.cdp_get_av() == "no_av_toggle"
+
+
+def test_cdp_toggle_av_explicit_mode_ignores_current_state(monkeypatch):
+    sent = []
+
+    def fake_cdp_send(method, params, *, timeout=2.0, force=False):
+        sent.append(params.get("expression", ""))
+        return {"result": {"result": {"value": "audio"}}}
+
+    monkeypatch.setattr(player_open, "_cdp_send", fake_cdp_send)
+    assert player_open.cdp_toggle_av("audio") == "audio"
+    assert "songBtn.click()" in sent[0]
+
+
+def test_cdp_toggle_av_blind_toggle_reads_the_toggle_component_not_the_buttons(monkeypatch):
+    """Regression: the blind toggle used to read the song/video buttons'
+    .selected class / aria-selected, which never reflect real state (always
+    false/null on the live page), so it always landed on audio regardless of
+    where playback actually was. It must read ytmusic-av-toggle's own
+    is-video-playback-mode-selected attribute instead."""
+    sent = []
+
+    def fake_cdp_send(method, params, *, timeout=2.0, force=False):
+        sent.append(params.get("expression", ""))
+        return {"result": {"result": {"value": "<probe>"}}}
+
+    monkeypatch.setattr(player_open, "_cdp_send", fake_cdp_send)
+    player_open.cdp_toggle_av()  # no mode -> blind toggle
+    expr = sent[0]
+    assert "is-video-playback-mode-selected" in expr
+    assert "classList.contains('selected')" not in expr
+    assert "aria-selected" not in expr
+
+

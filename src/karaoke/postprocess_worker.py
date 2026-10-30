@@ -173,7 +173,9 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
         if res.status == "upgraded":
             try:
                 from .caption_sync import sync_audio_video_counterparts
-                sync_audio_video_counterparts(track_id, conn, cookies_from_browser=cookies_from_browser)
+                from .ytmusic_client import YTMusicClient
+                sync_audio_video_counterparts(track_id, conn, client=YTMusicClient(),
+                                              cookies_from_browser=cookies_from_browser)
             except Exception as exc:
                 log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
         if res.status == "no-captions":
@@ -356,7 +358,8 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
              "" if trustworthy else " — worth a listen")
     try:
         from .caption_sync import sync_audio_video_counterparts
-        sync_audio_video_counterparts(track_id, conn)
+        from .ytmusic_client import YTMusicClient
+        sync_audio_video_counterparts(track_id, conn, client=YTMusicClient())
     except Exception as exc:
         log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
     return True

@@ -896,6 +896,43 @@ def play_playlist(
 
 
 @dj_mcp.tool()
+def toggle_audio_video(mode: Optional[str] = None) -> str:
+    """Read or switch the kiosk between Audio (Song) and Video mode on YouTube Music.
+
+    Some tracks have both an audio release and a video edit; YouTube Music can
+    play either. Call with no mode to just report which one is active.
+
+    Args:
+        mode: 'audio' or 'video' to switch to it; omit to blind-toggle to the
+            other mode, or to just read the current mode via get_av_mode below.
+    """
+    from .player_open import cdp_toggle_av
+
+    if mode is not None and mode not in ("audio", "video"):
+        return json.dumps({"error": "mode must be 'audio', 'video', or omitted"})
+    result = cdp_toggle_av(mode)
+    if result == "no_av_toggle":
+        return json.dumps({"status": "no_counterpart",
+                            "message": "This track has no audio/video counterpart to toggle."})
+    if result == "unsupported":
+        return json.dumps({"status": "error", "message": "Could not reach the kiosk player."})
+    return json.dumps({"status": "ok", "mode": result})
+
+
+@dj_mcp.tool()
+def get_av_mode() -> str:
+    """Report whether the kiosk is currently playing the Audio or Video version.
+
+    Returns 'audio', 'video', or 'no_av_toggle' when the playing track has no
+    audio/video counterpart (nothing to switch between).
+    """
+    from .player_open import cdp_get_av
+
+    mode = cdp_get_av()
+    return json.dumps({"mode": mode})
+
+
+@dj_mcp.tool()
 def add_to_dj_playlist(
     track_id: Optional[int] = None,
     artist: Optional[str] = None,

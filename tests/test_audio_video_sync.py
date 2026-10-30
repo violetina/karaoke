@@ -2,8 +2,8 @@
 import pytest
 from types import SimpleNamespace
 
-from karaoke import detect, localcache
-from karaoke.caption_sync import sync_audio_video_counterparts
+from karaoke import av_align, detect, localcache
+from karaoke.caption_sync import _try_waveform_offset, _try_whisper_offset, sync_audio_video_counterparts
 from karaoke.lyrics import (
     Lyrics,
     align_audio_and_video_lyrics,
@@ -172,5 +172,257 @@ def test_sync_audio_video_counterparts_workflow(tmp_path):
         # Video offset was automatically stored
         saved_vid_offset = localcache.get_sync_offset(track_id, conn, mode="video")
         assert saved_vid_offset == 3.5
+    finally:
+        conn.close()
+
+
+def _make_av_track(conn, artist, title, audio_offset_s=0.0, video_offset_s=3.5):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id", (artist, title))
+    track_id = cur.fetchone()["track_id"]
+    audio_lrc = "[00:10.00] Line one\n[00:20.00] Line two"
+    localcache.put_cached_lyrics(
+        artist, title,
+        Lyrics(plain="Line one\nLine two", synced_raw=audio_lrc, source="lrclib"),
+        media_type="audio", conn=conn,
+    )
+    v_one = 10.0 + video_offset_s
+    v_two = 20.0 + video_offset_s
+    video_lrc = f"[{int(v_one)//60:02d}:{v_one%60:05.2f}] Line one\n[{int(v_two)//60:02d}:{v_two%60:05.2f}] Line two"
+    localcache.put_cached_lyrics(
+        artist, title,
+        Lyrics(plain="Line one\nLine two", synced_raw=video_lrc, source="youtube_caption"),
+        media_type="video", conn=conn,
+    )
+    return track_id
+
+
+def test_try_waveform_offset_returns_offset_on_confident_match(monkeypatch):
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+    )
+    fake_result = av_align.AlignmentResult(offset_s=9.0, slope=0.0, confidence=0.9, kind="constant")
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/path")
+    monkeypatch.setattr(av_align, "load_mono", lambda path, sr: "fake-signal")
+    monkeypatch.setattr(av_align, "estimate_offset", lambda a, v, sr: fake_result)
+
+    info = _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client)
+
+    assert info["offset"] == 9.0
+    assert info["confidence"] == 0.9
+    assert info["kind"] == "constant"
+    assert info["audio_id"] == "AID" and info["video_id"] == "VID"
+
+
+def test_try_waveform_offset_returns_ids_only_when_low_confidence(monkeypatch):
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+    )
+    fake_result = av_align.AlignmentResult(offset_s=0.0, slope=0.0, confidence=0.01, kind="low_confidence")
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/path")
+    monkeypatch.setattr(av_align, "load_mono", lambda path, sr: "fake-signal")
+    monkeypatch.setattr(av_align, "estimate_offset", lambda a, v, sr: fake_result)
+
+    info = _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client)
+
+    assert "offset" not in info
+    assert info["video_id"] == "VID"
+
+
+def test_try_waveform_offset_none_when_no_video_id():
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": None}
+    )
+    assert _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client) is None
+
+
+def test_try_waveform_offset_ids_only_when_not_distinct():
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "SAME", "video_video_id": "SAME"}
+    )
+    info = _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client)
+    assert info == {"audio_id": "SAME", "video_id": "SAME"}
+
+
+def test_try_waveform_offset_none_on_lookup_exception():
+    def boom(a, t):
+        raise RuntimeError("network down")
+    fake_client = SimpleNamespace(get_audio_and_video_versions=boom)
+    assert _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client) is None
+
+
+def test_sync_prefers_waveform_over_captions_when_both_available(tmp_path, monkeypatch):
+    """Both lyrics exist (captions would give offset 3.5), but a confident
+    waveform match must win per PLAN-av-sync.md's order of preference."""
+    conn = localcache.connect(tmp_path / "waveform_wins.db")
+    try:
+        track_id = _make_av_track(conn, "WaveBand", "WaveTrack", video_offset_s=3.5)
+
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+        )
+        fake_result = av_align.AlignmentResult(offset_s=9.0, slope=0.0, confidence=0.9, kind="constant")
+        monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/path")
+        monkeypatch.setattr(av_align, "load_mono", lambda path, sr: "fake-signal")
+        monkeypatch.setattr(av_align, "estimate_offset", lambda a, v, sr: fake_result)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert res["offset"] == 9.0
+        assert res["method"] == "waveform"
+        assert res["confidence"] == 0.9
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == 9.0
+    finally:
+        conn.close()
+
+
+def test_sync_falls_back_to_captions_without_distinct_ids(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "waveform_fallback.db")
+    try:
+        track_id = _make_av_track(conn, "CapBand", "CapTrack", video_offset_s=3.5)
+
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "ID1", "video_video_id": "ID1"}
+        )
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert res["offset"] == 3.5
+        assert res["method"] == "captions"
+        assert res["confidence"] is None
+    finally:
+        conn.close()
+
+
+def test_sync_skips_waveform_download_when_offset_already_known(tmp_path, monkeypatch):
+    """Avoid the two extra downloads on a track that's already synced --
+    sync_audio_video_counterparts runs more than once per track in the
+    existing postprocess chain. The cheap video-id lookup (for finding
+    captions, a separate concern) may still legitimately run."""
+    conn = localcache.connect(tmp_path / "waveform_skip.db")
+    try:
+        track_id = _make_av_track(conn, "KnownBand", "KnownTrack", video_offset_s=3.5)
+        localcache.set_sync_offset(track_id, 3.5, conn, mode="video")
+
+        download_calls = []
+        monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic",
+                            lambda url, cb: download_calls.append(url) or "/fake/path")
+
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+        )
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert download_calls == [], "should not download audio for the waveform method when an offset is already known"
+        assert res["offset"] == 3.5
+    finally:
+        conn.close()
+
+
+def _make_audio_only_track(conn, artist, title):
+    """Like _make_av_track but with no video lyrics row at all -- deleting the
+    video row after _make_av_track's insert doesn't work for this purpose:
+    get_lyrics_by_track_id's media_type='video' lookup falls back to ANY
+    approved lyrics row when none is specifically typed 'video' (documented,
+    intentional behavior for untyped single-lyrics tracks), so it would just
+    hand back the audio row relabeled as 'video'."""
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id", (artist, title))
+    track_id = cur.fetchone()["track_id"]
+    audio_lrc = "[00:10.00] Line one\n[00:20.00] Line two"
+    localcache.put_cached_lyrics(
+        artist, title,
+        Lyrics(plain="Line one\nLine two", synced_raw=audio_lrc, source="lrclib"),
+        media_type="audio", conn=conn,
+    )
+    return track_id
+
+
+def test_try_whisper_offset_returns_aligned_offset(monkeypatch):
+    audio_lrc = "[00:10.00] Line one\n[00:20.00] Line two"
+    video_lrc = "[00:17.00] Line one\n[00:27.00] Line two"  # +7s vs audio
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", lambda path, **kw: video_lrc)
+
+    offset = _try_whisper_offset({"track_id": 1}, audio_lrc, "https://www.youtube.com/watch?v=VID")
+
+    assert offset == 7.0
+
+
+def test_try_whisper_offset_none_when_download_fails(monkeypatch):
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: None)
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_none_on_empty_transcript(monkeypatch):
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", lambda path, **kw: "   ")
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_none_on_transcription_exception(monkeypatch):
+    def boom(path, **kw):
+        raise RuntimeError("model failed")
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", boom)
+    offset = _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+    assert offset is None
+
+
+def test_try_whisper_offset_uses_fixed_temperature(monkeypatch):
+    seen_kwargs = {}
+
+    def fake_transcribe(path, **kw):
+        seen_kwargs.update(kw)
+        return "[00:10.00] x"
+
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/video.webm")
+    monkeypatch.setattr("karaoke.whisper_sync.transcribe_to_lrc", fake_transcribe)
+    _try_whisper_offset({"track_id": 1}, "[00:10.00] x", "https://y/v")
+
+    assert seen_kwargs.get("temperature") == 0.0
+
+
+def test_sync_whisper_fallback_disabled_by_default(tmp_path, monkeypatch):
+    """Whisper must not run unless the caller explicitly opts in -- almost no
+    tracks have real video captions, so leaving it on by default would start
+    full-track transcription for nearly the whole library."""
+    conn = localcache.connect(tmp_path / "whisper_off.db")
+    try:
+        track_id = _make_audio_only_track(conn, "NoWhisperBand", "NoWhisperTrack")
+
+        whisper_calls = []
+        monkeypatch.setattr(
+            "karaoke.caption_sync._try_whisper_offset",
+            lambda *a, **kw: whisper_calls.append(1) or 9.0,
+        )
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "SAME", "video_video_id": "SAME"}
+        )
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert whisper_calls == []
+        assert res["offset"] is None
+        assert res["method"] is None
+    finally:
+        conn.close()
+
+
+def test_sync_whisper_fallback_used_as_last_resort_when_enabled(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "whisper_on.db")
+    try:
+        track_id = _make_audio_only_track(conn, "WhisperBand", "WhisperTrack")
+
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "SAME", "video_video_id": "SAME"}
+        )
+        monkeypatch.setattr("karaoke.caption_sync._try_whisper_offset", lambda track, lrc, url: 11.0)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client, enable_whisper_fallback=True)
+
+        assert res["offset"] == 11.0
+        assert res["method"] == "whisper"
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == 11.0
     finally:
         conn.close()

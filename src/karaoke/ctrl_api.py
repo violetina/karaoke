@@ -129,6 +129,12 @@ class SeekRequest(BaseModel):
     player: Optional[str] = None
 
 
+class AvTogglePayload(BaseModel):
+    """Set Audio (Song) vs Video mode on YouTube Music over CDP; omit to blind-toggle."""
+
+    mode: Optional[str] = None  # "audio" | "video" | None (toggle)
+
+
 class QueueItemRequest(BaseModel):
     """Enqueue a video ID into the web player queue over CDP."""
 
@@ -747,6 +753,33 @@ def player_seek(req: SeekRequest) -> dict[str, Any]:
                             detail="No player could handle 'seek'")
     return {"status": "ok", "action": "seek", "offset_s": req.offset_s,
             "player": req.player or ""}
+
+
+@app.get("/api/players/av")
+def get_av_mode() -> dict[str, Any]:
+    """Read the active Audio (Song) vs Video mode on YouTube Music over CDP."""
+    from . import player_open
+
+    mode = player_open.cdp_get_av()
+    if mode not in ("audio", "video"):
+        return {"mode": None, "has_counterpart": False, "detail": mode}
+    return {"mode": mode, "has_counterpart": True}
+
+
+@app.post("/api/players/av")
+def set_av_mode(req: AvTogglePayload) -> dict[str, Any]:
+    """Set (or blind-toggle) Audio (Song) vs Video mode on YouTube Music over CDP."""
+    from . import player_open
+
+    if req.mode not in (None, "audio", "video"):
+        raise HTTPException(status_code=422, detail="mode must be 'audio', 'video', or omitted")
+    result = player_open.cdp_toggle_av(req.mode)
+    if result == "no_av_toggle":
+        raise HTTPException(status_code=409,
+                            detail="This track has no audio/video counterpart to toggle")
+    if result == "unsupported":
+        raise HTTPException(status_code=503, detail="Could not reach the kiosk player over CDP")
+    return {"status": "ok", "mode": result}
 
 
 @app.get("/api/players/queue")
