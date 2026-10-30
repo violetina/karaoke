@@ -3,7 +3,12 @@ import pytest
 from types import SimpleNamespace
 
 from karaoke import av_align, detect, localcache
-from karaoke.caption_sync import _try_waveform_offset, _try_whisper_offset, sync_audio_video_counterparts
+from karaoke.caption_sync import (
+    _durations_compatible,
+    _try_waveform_offset,
+    _try_whisper_offset,
+    sync_audio_video_counterparts,
+)
 from karaoke.lyrics import (
     Lyrics,
     align_audio_and_video_lyrics,
@@ -426,3 +431,78 @@ def test_sync_whisper_fallback_used_as_last_resort_when_enabled(tmp_path, monkey
         assert localcache.get_sync_offset(track_id, conn, mode="video") == 11.0
     finally:
         conn.close()
+
+
+def test_durations_compatible_true_for_normal_difference(monkeypatch):
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 300.0 if "AID" in url else 320.0},
+    )
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_durations_compatible_false_when_video_much_longer(monkeypatch):
+    """Mirrors the real Thriller case: a 13-minute short-film video against
+    a 6-minute audio release -- no offset can fix a different recording."""
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 358.0 if "AID" in url else 822.0},
+    )
+    assert _durations_compatible("AID", "VID") is False
+
+
+def test_durations_compatible_false_when_video_much_shorter(monkeypatch):
+    monkeypatch.setattr(
+        "karaoke.youtube.fetch_metadata",
+        lambda url, **kw: {"duration": 300.0 if "AID" in url else 60.0},
+    )
+    assert _durations_compatible("AID", "VID") is False
+
+
+def test_durations_compatible_true_for_a_long_intro_within_bounds():
+    """A long-but-plausible intro (close to av_align's own search bound)
+    must not be rejected before the real correlation even gets to try."""
+    from karaoke import av_align
+
+    with_patch = {"audio": 300.0, "video": 300.0 + av_align.COARSE_SEARCH_S - 1}
+
+    def fake_fetch(url, **kw):
+        return {"duration": with_patch["audio"] if "AID" in url else with_patch["video"]}
+
+    import karaoke.youtube as youtube_mod
+    orig = youtube_mod.fetch_metadata
+    youtube_mod.fetch_metadata = fake_fetch
+    try:
+        assert _durations_compatible("AID", "VID") is True
+    finally:
+        youtube_mod.fetch_metadata = orig
+
+
+def test_durations_compatible_true_when_metadata_unavailable(monkeypatch):
+    monkeypatch.setattr("karaoke.youtube.fetch_metadata", lambda url, **kw: {"duration": None})
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_durations_compatible_true_on_metadata_error(monkeypatch):
+    def boom(url, **kw):
+        raise RuntimeError("network error")
+    monkeypatch.setattr("karaoke.youtube.fetch_metadata", boom)
+    assert _durations_compatible("AID", "VID") is True
+
+
+def test_try_waveform_offset_skips_download_on_duration_mismatch(monkeypatch):
+    """The duration guard must run BEFORE any download -- that's the whole
+    point (not burning effort on a video that's clearly a different
+    recording)."""
+    fake_client = SimpleNamespace(
+        get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+    )
+    monkeypatch.setattr("karaoke.caption_sync._durations_compatible", lambda a, v, t=None: False)
+    download_calls = []
+    monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic",
+                        lambda url, cb: download_calls.append(url) or "/fake/path")
+
+    info = _try_waveform_offset({"artist": "A", "title": "T", "track_id": 1}, fake_client)
+
+    assert download_calls == []
+    assert info == {"audio_id": "AID", "video_id": "VID", "skipped_reason": "duration_mismatch"}

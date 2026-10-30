@@ -367,6 +367,16 @@ def _try_waveform_offset(track: dict, client: Any) -> Optional[dict[str, Any]]:
     instead of looking it up a second time. The 'offset'/'confidence'/'kind'
     keys are only present when av_align found a usable match -- that is what
     callers check before trusting this over the caption-based path.
+
+    A cheap duration check runs before either file is downloaded: a video
+    far longer or shorter than the audio release is usually a live
+    performance, a full concert, an extended DJ edit, or some other genuinely
+    different recording -- not just a song with a longer intro -- and no
+    offset can fix a different recording (PLAN-av-sync.md's own risk note).
+    Found live on Michael Jackson's "Thriller": its famous 13-minute short
+    film has no real correlation peak anywhere near where the song actually
+    starts, so burning a full download + correlation on it only to land on
+    low_confidence is wasted effort this check avoids up front.
     """
     from . import av_align
     from .logger import log
@@ -385,6 +395,10 @@ def _try_waveform_offset(track: dict, client: Any) -> Optional[dict[str, Any]]:
     if not audio_id or audio_id == video_id:
         return info  # no distinct counterpart to compare against
 
+    if not _durations_compatible(audio_id, video_id, track.get("track_id")):
+        info["skipped_reason"] = "duration_mismatch"
+        return info
+
     try:
         audio_path = run_download_logic(f"https://www.youtube.com/watch?v={audio_id}", None)
         video_path = run_download_logic(f"https://www.youtube.com/watch?v={video_id}", None)
@@ -402,6 +416,57 @@ def _try_waveform_offset(track: dict, client: Any) -> Optional[dict[str, Any]]:
     info["confidence"] = result.confidence
     info["kind"] = result.kind
     return info
+
+
+# A video within this much LONGER than the audio release is still plausibly
+# "just a long intro" and worth the full correlation -- av_align's own
+# COARSE_SEARCH_S bounds how far an intro offset can be found anyway, so a
+# gap wider than that isn't something the aligner could locate regardless of
+# how hard it tried; tied directly to it so the two can't drift apart. A
+# video much SHORTER than the audio is equally suspicious (a trimmed
+# teaser/edit, or a mismatched "video" search result -- ytmusic_client's own
+# fallback to filter_type="videos" can land on a lyric video or a different
+# cut). Both bounds are deliberately generous: this is meant to catch clear
+# mismatches (a live concert film, a full-length documentary-style video),
+# not to second-guess a normal few-tens-of-seconds intro difference.
+MAX_DURATION_RATIO_SHORTER = 0.5  # video shorter than half the audio's length
+
+
+def _durations_compatible(audio_id: str, video_id: str, track_id: Any = None) -> bool:
+    """Cheap pre-check using only yt-dlp metadata (no download): is this
+    plausibly the same recording with a different intro, or something else
+    entirely (a live version, a full concert, a mismatched search result)?
+
+    Returns True (proceed) whenever either duration is unavailable -- metadata
+    lookup failing isn't evidence of a mismatch, and the actual correlation's
+    own confidence gate is still there as a backstop either way.
+    """
+    from . import av_align
+    from .logger import log
+    from .youtube import fetch_metadata
+
+    try:
+        audio_meta = fetch_metadata(f"https://www.youtube.com/watch?v={audio_id}", download=False)
+        video_meta = fetch_metadata(f"https://www.youtube.com/watch?v={video_id}", download=False)
+    except Exception as exc:
+        log.debug("waveform av-sync: duration metadata lookup failed for track %s: %s", track_id, exc)
+        return True
+
+    audio_dur, video_dur = audio_meta.get("duration"), video_meta.get("duration")
+    if not audio_dur or not video_dur:
+        return True
+
+    if video_dur - audio_dur > av_align.COARSE_SEARCH_S:
+        log.debug("waveform av-sync: skipping track %s, video %.0fs vs audio %.0fs "
+                 "(too much longer -- likely a live/extended version, not just an intro)",
+                 track_id, video_dur, audio_dur)
+        return False
+    if video_dur < audio_dur * MAX_DURATION_RATIO_SHORTER:
+        log.debug("waveform av-sync: skipping track %s, video %.0fs vs audio %.0fs "
+                 "(too much shorter -- likely a trimmed edit or mismatched search result)",
+                 track_id, video_dur, audio_dur)
+        return False
+    return True
 
 
 def _try_whisper_offset(track: dict, audio_lrc: str, video_url: str) -> Optional[float]:
