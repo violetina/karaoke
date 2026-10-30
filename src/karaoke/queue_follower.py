@@ -15,8 +15,8 @@ from typing import Any, Optional
 
 from . import localcache
 from .logger import log
-from .player_open import (browser_playback, open_song_url, track_finished,
-                          track_idle)
+from .player_open import (browser_playback, cdp_set_ytmusic_autoplay,
+                          open_song_url, track_finished, track_idle)
 
 POLL_INTERVAL_S = 1.0    # snappy pickup of manual Next/Previous (index changes)
 LOAD_GRACE_S = 10.0      # let a freshly navigated track load before judging it
@@ -67,10 +67,23 @@ def _record_advance(row: dict[str, Any], idx: int) -> None:
 
 
 def _maybe_autopilot_refill() -> None:
-    """Top up the queue when 'keep going' is on and it is near its end."""
+    """Top up the queue when 'keep going' is on and it is near its end.
+
+    Also keeps YouTube Music's own queue-panel Autoplay toggle forced off
+    while autopilot is on: YT Music can reset it after a navigation, and if
+    it stays on, YT Music may jump to its own mix/radio suggestion at the
+    same moment the follower advances to the correct next row, disturbing
+    the queue.
+    """
     try:
         from . import collection
         with localcache.connect() as conn:
+            q = localcache.load_active_queue(conn=conn)
+            if q and q.get("autopilot"):
+                try:
+                    cdp_set_ytmusic_autoplay(False)
+                except Exception:
+                    log.debug("queue-follow: could not force autoplay off", exc_info=True)
             collection.autopilot_refill(conn)
     except Exception:
         log.debug("queue-follow: autopilot refill check failed", exc_info=True)

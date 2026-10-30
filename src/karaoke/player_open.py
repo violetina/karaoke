@@ -461,6 +461,35 @@ def cdp_toggle_repeat() -> bool:
     return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
 
 
+def cdp_set_ytmusic_autoplay(enabled: bool) -> "bool | None":
+    """Force YouTube Music's own queue-panel 'Autoplay' (automix) toggle.
+
+    That toggle controls whether YT Music auto-continues into its own mix/
+    radio suggestions when the active item ends. With a local queue driving
+    playback (the queue follower / Keep Going autopilot), it must stay off:
+    otherwise YT Music can load its own next track at the same moment the
+    follower advances to the correct queue row, racing it.
+
+    Idempotent (reads ``aria-pressed`` and clicks only on a mismatch) and
+    locale-independent (keyed by the stable element id, not visible text).
+    Returns the resulting state, or ``None`` when the control was not found
+    (e.g. the queue/player page was never opened in this kiosk session).
+    """
+    want = "true" if enabled else "false"
+    js = f"""(() => {{
+      const t = document.querySelector('#automix');
+      if (!t) return null;
+      const current = t.getAttribute('aria-pressed') === 'true';
+      const want = {want};
+      if (current !== want) {{ t.click(); }}
+      return want;
+    }})()"""
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    if not reply:
+        return None
+    return reply.get("result", {}).get("result", {}).get("value")
+
+
 def cdp_queue_next_video(video_id: str) -> bool:
     """Insert a video ID directly as 'Play Next' in YouTube Music's web player queue via CDP."""
     if not video_id:

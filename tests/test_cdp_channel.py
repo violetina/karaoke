@@ -251,3 +251,23 @@ def test_cdp_seek(monkeypatch):
     assert any("-5.0" in expr and "currentTime" in expr for expr in sent_expressions)
 
 
+def test_cdp_set_ytmusic_autoplay_sends_desired_state(monkeypatch):
+    """cdp_set_ytmusic_autoplay evaluates a script keyed on the stable id."""
+    sent_expressions = []
+
+    def fake_cdp_send(method, params, *, timeout=2.0, force=False):
+        if method == "Runtime.evaluate":
+            sent_expressions.append(params.get("expression", ""))
+            return {"result": {"result": {"value": False}}}
+        return None
+
+    monkeypatch.setattr(player_open, "_cdp_send", fake_cdp_send)
+    assert player_open.cdp_set_ytmusic_autoplay(False) is False
+    assert any("#automix" in expr and "false" in expr for expr in sent_expressions)
+
+
+def test_cdp_set_ytmusic_autoplay_returns_none_without_a_reply(monkeypatch):
+    monkeypatch.setattr(player_open, "_cdp_send", lambda *a, **k: None)
+    assert player_open.cdp_set_ytmusic_autoplay(True) is None
+
+

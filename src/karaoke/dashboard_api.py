@@ -500,6 +500,15 @@ async def set_queue_autopilot(body: AutopilotPayload):
 
     def work():
         localcache.set_queue_autopilot(body.enabled)
+        if body.enabled:
+            # YT Music's own Autoplay/automix must stay off so it can't jump to
+            # its own mix suggestion and fight the local queue. Best-effort:
+            # the kiosk may be unreachable, which must not fail this toggle.
+            try:
+                from .player_open import cdp_set_ytmusic_autoplay
+                cdp_set_ytmusic_autoplay(False)
+            except Exception as exc:
+                _log.debug("autopilot: could not force YT Music autoplay off: %s", exc)
         return {"autopilot": body.enabled}
 
     try:

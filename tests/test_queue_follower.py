@@ -38,3 +38,25 @@ def test_save_index_persists_current_index():
         save.assert_called_once()
         _, kwargs = save.call_args
         assert kwargs["current_index"] == 3
+
+
+def test_autopilot_tick_forces_ytmusic_autoplay_off_when_enabled():
+    q = {"playlist_id": "p1", "name": "Hip Hop", "autopilot": True, "rows": [{"track_id": 1}]}
+    with patch.object(qf.localcache, "connect") as connect, \
+         patch.object(qf.localcache, "load_active_queue", return_value=q), \
+         patch.object(qf, "cdp_set_ytmusic_autoplay") as set_autoplay, \
+         patch("karaoke.collection.autopilot_refill"):
+        connect.return_value.__enter__.return_value = object()
+        qf._maybe_autopilot_refill()
+    set_autoplay.assert_called_once_with(False)
+
+
+def test_autopilot_tick_leaves_ytmusic_alone_when_disabled():
+    q = {"playlist_id": "p1", "name": "Hip Hop", "autopilot": False, "rows": [{"track_id": 1}]}
+    with patch.object(qf.localcache, "connect") as connect, \
+         patch.object(qf.localcache, "load_active_queue", return_value=q), \
+         patch.object(qf, "cdp_set_ytmusic_autoplay") as set_autoplay, \
+         patch("karaoke.collection.autopilot_refill"):
+        connect.return_value.__enter__.return_value = object()
+        qf._maybe_autopilot_refill()
+    set_autoplay.assert_not_called()

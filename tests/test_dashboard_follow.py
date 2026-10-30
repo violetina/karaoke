@@ -82,11 +82,44 @@ def test_autopilot_toggle_persists_flag(monkeypatch):
     seen = {}
     monkeypatch.setattr("karaoke.localcache.set_queue_autopilot",
                         lambda enabled, **k: seen.update(enabled=enabled))
+    monkeypatch.setattr("karaoke.player_open.cdp_set_ytmusic_autoplay", lambda enabled: enabled)
 
     res = client.post("/api/queue/autopilot", json={"enabled": True})
     assert res.status_code == 200
     assert res.json()["autopilot"] is True
     assert seen["enabled"] is True
+
+
+def test_autopilot_on_forces_ytmusic_autoplay_off(monkeypatch):
+    monkeypatch.setattr("karaoke.localcache.set_queue_autopilot", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr("karaoke.player_open.cdp_set_ytmusic_autoplay", calls.append)
+
+    client.post("/api/queue/autopilot", json={"enabled": True})
+    assert calls == [False]
+
+
+def test_autopilot_off_does_not_touch_ytmusic_autoplay(monkeypatch):
+    monkeypatch.setattr("karaoke.localcache.set_queue_autopilot", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr("karaoke.player_open.cdp_set_ytmusic_autoplay", calls.append)
+
+    client.post("/api/queue/autopilot", json={"enabled": False})
+    assert calls == []
+
+
+def test_autopilot_toggle_survives_unreachable_kiosk(monkeypatch):
+    """The toggle must still succeed when the CDP call to the kiosk fails."""
+    monkeypatch.setattr("karaoke.localcache.set_queue_autopilot", lambda *a, **k: None)
+
+    def boom(enabled):
+        raise RuntimeError("kiosk unreachable")
+
+    monkeypatch.setattr("karaoke.player_open.cdp_set_ytmusic_autoplay", boom)
+
+    res = client.post("/api/queue/autopilot", json={"enabled": True})
+    assert res.status_code == 200
+    assert res.json()["autopilot"] is True
 
 
 def test_next_advances_local_queue_when_following(monkeypatch):
