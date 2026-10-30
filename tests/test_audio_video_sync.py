@@ -281,6 +281,52 @@ def test_sync_prefers_waveform_over_captions_when_both_available(tmp_path, monke
         conn.close()
 
 
+def test_sync_waveform_offset_not_relabeled_as_cached_when_video_lyrics_missing(tmp_path, monkeypatch):
+    """Regression: when a track has only audio lyrics (the common case --
+    not real_video_lyrics), the branch that derives video lyrics from a
+    stored offset must not clobber a freshly-computed waveform result's
+    method attribution. Found live via preprocessing the AV Sync Candidates
+    playlist against production Postgres: track_sync_offsets.offset_s is a
+    REAL (float4) column, so round-tripping a freshly-set float64 offset
+    through get_sync_offset can read back a slightly different value,
+    silently flipping `offset == waveform_info["offset"]` to False and
+    mislabeling a correct, fresh waveform result as "cached". Simulated here
+    by making a re-read return an obviously wrong number: if the code looks
+    up an offset again instead of reusing what it just computed, this test
+    catches it immediately rather than relying on float imprecision."""
+    conn = localcache.connect(tmp_path / "waveform_not_clobbered.db")
+    try:
+        track_id = _make_audio_only_track(conn, "FreshWaveBand", "FreshWaveTrack")
+        fake_client = SimpleNamespace(
+            get_audio_and_video_versions=lambda a, t: {"audio_video_id": "AID", "video_video_id": "VID"}
+        )
+        fake_result = av_align.AlignmentResult(offset_s=12.5, slope=0.0, confidence=0.7, kind="constant")
+        monkeypatch.setattr("karaoke.postprocess_worker.run_download_logic", lambda url, cb: "/fake/path")
+        monkeypatch.setattr(av_align, "load_mono", lambda path, sr: "fake-signal")
+        monkeypatch.setattr(av_align, "estimate_offset", lambda a, v, sr: fake_result)
+        monkeypatch.setattr("karaoke.caption_sync._durations_compatible", lambda a, v, t=None: True)
+        call_count = {"n": 0}
+        def wrong_on_second_read(tid, c, mode=None):
+            # First call is the function's own "already known?" pre-check
+            # (must see nothing yet, or it skips the waveform attempt
+            # entirely); any call after that is the bug under test re-reading
+            # instead of reusing what was just computed.
+            call_count["n"] += 1
+            if tid == track_id and call_count["n"] > 1:
+                return 999.0  # proves the code took this path instead of reusing the in-memory offset
+            return None
+        monkeypatch.setattr(localcache, "get_sync_offset", wrong_on_second_read)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=fake_client)
+
+        assert res["offset"] == 12.5
+        assert res["method"] == "waveform"
+        assert res["confidence"] == 0.7
+        assert res["has_video_lyrics"] is True  # still derived+stored for display
+    finally:
+        conn.close()
+
+
 def test_sync_falls_back_to_captions_without_distinct_ids(tmp_path, monkeypatch):
     conn = localcache.connect(tmp_path / "waveform_fallback.db")
     try:

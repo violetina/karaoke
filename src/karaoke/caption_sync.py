@@ -505,6 +505,7 @@ def sync_audio_video_counterparts(
     client: Optional[Any] = None,
     cookies_from_browser: Optional[str] = None,
     enable_whisper_fallback: bool = False,
+    force_waveform: bool = False,
 ) -> dict[str, Any]:
     """Inspect and synchronize Audio vs Video lyrics and offsets for a track.
 
@@ -523,6 +524,15 @@ def sync_audio_video_counterparts(
     postprocessed track -- an expensive, CPU-bound, non-deterministic path
     that should be opted into (a dedicated backfill run), not switched on
     for the whole pipeline by default.
+
+    ``force_waveform=True`` bypasses the "already has a known offset" skip
+    (normally there to avoid two extra downloads on every repeat call) and
+    re-attempts the waveform method even when something is already stored.
+    Use it to re-verify a track whose stored offset predates the waveform
+    method: the library's pre-existing caption-derived offsets, some of
+    which turned out to be spurious text-matches once checked against the
+    waveform (see PLAN-av-sync.md's Data section and the Balthazar "Bunker"
+    case found during real-pair validation).
     """
     from . import localcache
     from .lyrics import align_audio_and_video_lyrics, shift_lrc, sync_video_from_audio, sync_audio_from_video
@@ -550,7 +560,7 @@ def sync_audio_video_counterparts(
     waveform_info = None
     if client:
         already_known = localcache.get_sync_offset(track_id, conn, mode="video")
-        if already_known is not None and already_known != 0.0:
+        if already_known is not None and already_known != 0.0 and not force_waveform:
             # Already has a trustworthy offset from an earlier run (either
             # method) -- skip the two extra downloads this needs. Re-running
             # it on every postprocess call (this function can run twice per
@@ -602,13 +612,21 @@ def sync_audio_video_counterparts(
         audio_lyrics and video_lyrics.synced_raw == audio_lyrics.synced_raw
         and video_lyrics.source == audio_lyrics.source
     )
+    had_fresh_offset = offset is not None  # set above from a successful waveform match
+    reused_cached_offset = False
     if offset is None and audio_lyrics and audio_lyrics.has_synced and real_video_lyrics and video_lyrics.has_synced:
         offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, video_lyrics.synced_raw)
         if offset is not None:
             localcache.set_sync_offset(track_id, offset, conn, mode="video")
 
     elif audio_lyrics and audio_lyrics.has_synced and not real_video_lyrics:
-        saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video")
+        # Reuse the waveform offset we already have (had_fresh_offset) rather
+        # than re-reading it back from storage -- re-reading would be the
+        # same number here regardless, but conflating "freshly computed this
+        # call" with "pulled from a possibly-stale prior run" is exactly the
+        # labeling bug this had_fresh_offset flag exists to avoid (the
+        # method classification below depends on telling them apart).
+        saved_video_offset = offset if had_fresh_offset else localcache.get_sync_offset(track_id, conn, mode="video")
         if saved_video_offset is not None and saved_video_offset != 0.0:
             derived_video_lrc = sync_video_from_audio(audio_lyrics.synced_raw, saved_video_offset)
             from .lyrics import Lyrics, parse_lrc
@@ -623,6 +641,8 @@ def sync_audio_video_counterparts(
             )
             video_lyrics = d_lyrics
             offset = saved_video_offset
+            if not had_fresh_offset:
+                reused_cached_offset = True
 
     elif video_lyrics and video_lyrics.has_synced and not audio_lyrics:
         # Same class of fallback issue applies here in reverse (audio_lyrics
@@ -630,7 +650,7 @@ def sync_audio_video_counterparts(
         # video lyrics to exist at all -- currently 1 track in the whole
         # library per the plan's data read, so left as-is; not exercised
         # enough to be worth the same guard without a real case to test it.
-        saved_video_offset = localcache.get_sync_offset(track_id, conn, mode="video") or 0.0
+        saved_video_offset = offset if had_fresh_offset else (localcache.get_sync_offset(track_id, conn, mode="video") or 0.0)
         derived_audio_lrc = sync_audio_from_video(video_lyrics.synced_raw, saved_video_offset)
         from .lyrics import Lyrics, parse_lrc
         d_lyrics = Lyrics(
@@ -644,6 +664,8 @@ def sync_audio_video_counterparts(
         )
         audio_lyrics = d_lyrics
         offset = saved_video_offset
+        if not had_fresh_offset:
+            reused_cached_offset = True
 
     used_whisper = False
     if (offset is None and enable_whisper_fallback and video_url
@@ -672,6 +694,13 @@ def sync_audio_video_counterparts(
         method = "waveform"
     elif used_whisper:
         method = "whisper"
+    elif reused_cached_offset:
+        # The number came from track_sync_offsets, not a fresh computation
+        # this call -- its real provenance (waveform/captions/whisper/manual)
+        # isn't known here without a separate av_sync_log lookup (maintained
+        # only by the batch script, not this function), so it's reported
+        # honestly as "cached" rather than guessed at.
+        method = "cached"
     elif offset is not None:
         method = "captions"
     else:
