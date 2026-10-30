@@ -1,0 +1,19 @@
+[Unit]
+Description=Karaoke queue follower (drives the local queue through the kiosk, advancing on track end)
+After=network-online.target karaoke-kiosk.service karaoke-ctrl-api.service
+Wants=karaoke-kiosk.service
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+Environment=PYTHONPATH=/home/tina/karaoke/src
+ExecStart=/home/tina/karaoke/.venv/bin/karaoke --follow-queue
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+SyslogIdentifier=karaoke-queue-follow
+
+[Install]
+WantedBy=karaoke.target

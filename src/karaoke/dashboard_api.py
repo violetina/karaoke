@@ -434,6 +434,83 @@ async def set_radio_mode(body: RadioModePayload):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+class FollowModePayload(BaseModel):
+    enabled: bool
+
+
+def _follow_mode_status() -> dict[str, Any]:
+    """Return queue-follower service state plus the row it is on."""
+    from . import localcache
+
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", "karaoke-queue-follow.service"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    active = result.returncode == 0 and result.stdout.strip() == "active"
+
+    name = ""
+    index = 0
+    total = 0
+    current = None
+    try:
+        q = localcache.load_active_queue()
+        if q and q.get("rows"):
+            rows = q["rows"]
+            name = q.get("name", "") or ""
+            index = int(q.get("current_index", 0) or 0)
+            total = len(rows)
+            if 0 <= index < total:
+                cur = rows[index]
+                current = {"artist": cur.get("artist", ""), "title": cur.get("title", "")}
+    except Exception as exc:
+        _log.debug("follow status: queue read failed: %s", exc)
+
+    return {
+        "enabled": active,
+        "status": "following" if active else "stopped",
+        "queue_name": name,
+        "index": index,
+        "total": total,
+        "current": current,
+    }
+
+
+@app.get("/api/follow")
+async def follow_mode_status():
+    """Report whether the dashboard-controlled queue follower is running."""
+    return await asyncio.to_thread(_follow_mode_status)
+
+
+@app.post("/api/follow")
+async def set_follow_mode(body: FollowModePayload):
+    """Start or stop the local-queue follower through its systemd user unit."""
+    action = "start" if body.enabled else "stop"
+
+    def change_state():
+        result = subprocess.run(
+            ["systemctl", "--user", action, "karaoke-queue-follow.service"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"systemctl {action} failed"
+            raise RuntimeError(detail)
+        status = _follow_mode_status()
+        if status["enabled"] != body.enabled:
+            raise RuntimeError(f"queue follower did not {action} successfully")
+        return status
+
+    try:
+        return await asyncio.to_thread(change_state)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 class PlayPayload(BaseModel):
     artist: Optional[str] = None
     title: Optional[str] = None

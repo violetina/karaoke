@@ -2,7 +2,15 @@
   <div class="queue-panel-card">
     <div class="qp-header">
       <span class="qp-title">📋 UP NEXT</span>
-      <span class="qp-count" v-if="tracks.length">{{ tracks.length }} queued</span>
+      <button
+        class="qp-follow"
+        :class="{ active: following }"
+        @click="toggleFollow"
+        :disabled="followBusy"
+        :title="following ? 'Stop auto-advancing the queue' : 'Play the queue and auto-advance on each track end'"
+      >
+        {{ followBusy ? '…' : (following ? '⏸ Following' : '▶ Follow Queue') }}
+      </button>
     </div>
 
     <ol class="qp-list" v-if="tracks.length">
@@ -27,7 +35,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   stage: {
@@ -41,6 +49,49 @@ defineEmits(['select-artist'])
 // The stage state already resolves the next tracks (anchored on the song that
 // is actually playing). Show up to 4.
 const tracks = computed(() => (props.stage.upcoming_queue || []).slice(0, 4))
+
+// --- Follow Queue: drive the local queue through the kiosk via the follower
+// service (karaoke-queue-follow.service), controlled through /api/follow.
+const following = ref(false)
+const followBusy = ref(false)
+let followTimer = null
+
+const checkFollowStatus = async () => {
+  try {
+    const res = await fetch('/api/follow')
+    if (res.ok) following.value = (await res.json()).enabled
+  } catch (e) {
+    // ignore transient errors
+  }
+}
+
+const toggleFollow = async () => {
+  if (followBusy.value) return
+  followBusy.value = true
+  const target = !following.value
+  try {
+    const res = await fetch('/api/follow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: target }),
+    })
+    if (res.ok) following.value = (await res.json()).enabled
+    else following.value = (await checkFollowStatus(), following.value)
+  } catch (e) {
+    await checkFollowStatus()
+  } finally {
+    followBusy.value = false
+  }
+}
+
+onMounted(() => {
+  checkFollowStatus()
+  followTimer = setInterval(checkFollowStatus, 5000)
+})
+onBeforeUnmount(() => {
+  if (followTimer) clearInterval(followTimer)
+})
+
 </script>
 
 <style scoped>
@@ -69,6 +120,34 @@ const tracks = computed(() => (props.stage.upcoming_queue || []).slice(0, 4))
 .qp-count {
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+
+.qp-follow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text-primary, #fff);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.qp-follow:hover:not(:disabled) {
+  border-color: var(--accent-cyan);
+}
+
+.qp-follow.active {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  color: #06212a;
+}
+
+.qp-follow:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .qp-list {

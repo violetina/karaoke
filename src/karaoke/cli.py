@@ -75,6 +75,8 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
                     help="continuously sync to desktop player position via playerctl (MPRIS)")
     ap.add_argument("--radio", "-r", action="store_true",
                     help="continuously follow live audio (mic): re-identify + re-sync as songs change")
+    ap.add_argument("--follow-queue", action="store_true",
+                    help="drive the active local karaoke queue through the kiosk, advancing on track end")
     ap.add_argument("--record", "-R", "--rec", dest="record", action="store_true",
                     help="record live audio alongside radio mode (or sample capture)")
     ap.add_argument("--radio-sessions", action="store_true",
@@ -115,6 +117,11 @@ def karaoke_main(argv: Optional[list[str]] = None) -> int:
     # Forward pre-bias for live recognition (mic/radio) modes only. Spotify has an
     # exact position and text/file modes start from a keypress, so no lead there.
     lead = DEFAULT_LEAD_S if args.lead is None else args.lead
+
+    # Drive the local karaoke queue through the kiosk, advancing on track end.
+    if getattr(args, "follow_queue", False):
+        from .queue_follower import run as follow_queue_run
+        return follow_queue_run()
 
     # Continuous radio mode: self-contained loop, no single-song resolution.
     if args.radio:
