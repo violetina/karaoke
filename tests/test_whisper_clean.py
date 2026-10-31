@@ -141,11 +141,36 @@ def test_does_not_strip_when_no_metadata_given():
 
 
 def test_stops_at_first_non_matching_line_even_mid_intro():
-    """Only a genuine, unbroken prefix run is dropped."""
+    """Only a genuine, unbroken prefix run is dropped, and only once it has
+    covered the required number of distinct fields before hitting a
+    non-matching line."""
+    lines = [
+        (1.0, "Morphine"),
+        (2.0, "Like Swimming"),
+        (5.0, "a real opening lyric"),
+        (6.0, "Morphine"),  # would match again, but comes after a real line
+    ]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Morphine", album="Like Swimming")
+    assert out == lines[2:]
+
+
+def test_single_field_match_alone_is_not_enough():
+    """A lone line matching just one field (e.g. a self-referential lyric
+    that happens to be the artist's own name) must not be stripped -- only a
+    run covering 2+ distinct metadata fields is specific enough to be a real
+    spoken tag rather than an ordinary coincidence."""
     lines = [
         (1.0, "Morphine"),
         (5.0, "a real opening lyric"),
-        (6.0, "Like Swimming"),  # would match album, but comes after a real line
     ]
     out = wc.drop_spoken_metadata_intro(lines, artist="Morphine", album="Like Swimming")
+    assert out == lines
+
+
+def test_single_metadata_field_given_requires_exact_match_only():
+    """With only one field supplied (e.g. no album on file), the 2-distinct
+    requirement relaxes to whatever was actually given -- otherwise this
+    could never fire at all for such tracks."""
+    lines = [(1.0, "Morphine"), (5.0, "a real opening lyric")]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Morphine")
     assert out == lines[1:]

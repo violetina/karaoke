@@ -96,18 +96,25 @@ def _normalize_for_match(text: str) -> str:
     return _NON_WORD.sub("", (text or "").strip().lower())
 
 
-def _is_metadata_line(text: str, metadata_norms: list[str]) -> bool:
+def _is_metadata_line(text: str, metadata_norms: list[Optional[str]]) -> Optional[int]:
+    """Return the index of the metadata field this line matches, or None."""
     norm = _normalize_for_match(text)
     if not norm:
-        return False
-    for m in metadata_norms:
+        return None
+    for i, m in enumerate(metadata_norms):
         if not m:
             continue
-        if m in norm or norm in m:
-            return True
-        if SequenceMatcher(None, norm, m).ratio() >= 0.7:
-            return True
-    return False
+        # A real lyric routinely CONTAINS the title/artist as a sub-phrase
+        # inside a longer sentence ("Riptide" opens "...down to the
+        # riptide") -- that is completely ordinary songwriting, not a
+        # spoken tag, so plain substring containment is deliberately NOT
+        # used here. A spoken announcement line IS essentially just the
+        # bare field (near-exact match after normalization); requiring a
+        # high overall similarity ratio naturally penalizes a short field
+        # being swallowed by a much longer real sentence.
+        if norm == m or SequenceMatcher(None, norm, m).ratio() >= 0.85:
+            return i
+    return None
 
 
 def drop_spoken_metadata_intro(
@@ -122,26 +129,42 @@ def drop_spoken_metadata_intro(
     Some audio files (promo samples, certain CD rips) open with a spoken
     voice-over announcing the artist/album/title before the song starts --
     faster-whisper transcribes it faithfully (it is real speech), but it is
-    never genuine lyric content: no song opens by reciting its own metadata,
-    one field per line. This only matters where Whisper is the *only* source
-    of words (the ``source="whisper"`` full-transcription fallback with no
-    known-good lyrics text to align against) -- found live on Morphine's "I
-    Know You (Pt. III)", whose first three "lyric" lines were literally
-    "Morphine" / "Like Swimming" / "I Know You (Pt. III)", which silently
-    threw off every real line's sync by several seconds.
+    never genuine lyric content. Found live on Morphine's "I Know You (Pt.
+    III)", whose first three "lyric" lines were literally "Morphine" / "Like
+    Swimming" / "I Know You (Pt. III)", which silently threw off every real
+    line's sync by several seconds.
 
-    Only strips a genuine PREFIX run (stops at the first non-matching line),
-    and only when that whole run sits within ``max_intro_s`` of the start --
-    a long or late match is more likely a coincidental lyric than a promo
-    tag, so it is left alone rather than risking real content.
+    A single line matching just the title is deliberately NOT enough on its
+    own to trigger this: plenty of real songs open with a line that IS (or
+    closely echoes) their own title -- "Hey Joe" opens with "Hey Joe",
+    "Computer Love" opens with "Computer Love", and a first scan of this
+    exact library turned up dozens of these before this guard was added.
+    What a real song essentially never does is recite two or more DIFFERENT
+    metadata fields (artist, then album, then title) as separate declarative
+    lines in a row -- so this only strips the leading run when it covers at
+    least 2 distinct fields (or every field given, if fewer than 2 were
+    supplied). Also capped to the first ``max_intro_s`` of the track and
+    requires a genuine, unbroken prefix (stops at the first non-matching
+    line) -- a long or late match is more likely a coincidental lyric than a
+    promo tag, so it is left alone rather than risking real content.
     """
-    metadata_norms = [_normalize_for_match(m) for m in (artist, title, album) if m and m.strip()]
-    if not metadata_norms or not lines:
+    fields = [artist, title, album]
+    metadata_norms = [_normalize_for_match(m) if m and m.strip() else None for m in fields]
+    required_distinct = min(2, sum(1 for m in metadata_norms if m))
+    if required_distinct == 0 or not lines:
         return lines
 
     cut = 0
+    matched_fields: set[int] = set()
     for t, text in lines:
-        if t > max_intro_s or not _is_metadata_line(text, metadata_norms):
+        if t > max_intro_s:
             break
+        field_idx = _is_metadata_line(text, metadata_norms)
+        if field_idx is None:
+            break
+        matched_fields.add(field_idx)
         cut += 1
-    return lines[cut:] if cut else lines
+
+    if cut and len(matched_fields) >= required_distinct:
+        return lines[cut:]
+    return lines
