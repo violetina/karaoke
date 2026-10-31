@@ -240,6 +240,33 @@ def test_av_mode_post_unreachable_kiosk_is_503(ctrl):
     assert res.status_code == 503
 
 
+# -- admin clients -----------------------------------------------------
+
+def test_admin_clients_reports_webui_and_playback_sessions(ctrl):
+    fake_ss_output = "ESTAB 0 0 127.0.0.1:8001 127.0.0.1:55512\nESTAB 0 0 127.0.0.1:8001 127.0.0.1:55514\n"
+    fake_run = MagicMock(stdout=fake_ss_output)
+    with patch("subprocess.run", return_value=fake_run), \
+         patch("karaoke.ctrl_api.list_play_sessions",
+              return_value={"sessions": [{"session_id": 1, "title": "Song A", "status": "playing"}]}):
+        res = ctrl.get("/api/admin/clients")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["webui_count"] == 2
+    assert body["playback_count"] == 1
+    assert len(body["clients"]) == 3
+    assert any(c["kind"] == "playback" and c["detail"] == "Song A" for c in body["clients"])
+
+
+def test_admin_clients_tolerates_ss_failure(ctrl):
+    with patch("subprocess.run", side_effect=FileNotFoundError("no ss binary")), \
+         patch("karaoke.ctrl_api.list_play_sessions", return_value={"sessions": []}):
+        res = ctrl.get("/api/admin/clients")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["webui_count"] == 0
+    assert body["clients"] == []
+
+
 # -- mood images & feeling images -----------------------------------------
 
 def test_mood_feeling_image_serves_extended_feelings(ctrl):

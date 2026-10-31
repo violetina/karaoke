@@ -958,6 +958,49 @@ def get_error_logs(lines: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {exc}")
 
 
+@app.get("/api/admin/clients")
+def get_admin_clients() -> dict[str, Any]:
+    """Connected clients: Web TUI (textual-serve) tabs and active playback sessions.
+
+    Mirrors admin_tui.py's own _webui_clients/_playback_clients: the web TUI has
+    no HTTP status endpoint of its own, so established connections to its port
+    are counted via `ss` (best-effort, never fatal when `ss` is missing or the
+    server is down). Playback sessions reuse the same /api/play/sessions data
+    the TUI itself calls through ApiClient.list_play_sessions().
+    """
+    import subprocess as _subprocess
+
+    webui_port = int(os.environ.get("KARAOKE_WEBTUI_PORT", "8001"))
+    web: list[dict[str, Any]] = []
+    try:
+        out = _subprocess.run(
+            ["ss", "-Htn", "state", "established", f"( sport = :{webui_port} )"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        for i, line in enumerate((out or "").splitlines(), start=1):
+            parts = line.split()
+            peer = parts[-1] if parts else "?"
+            web.append({"kind": "web-ui", "client": f"tab {i}", "detail": peer, "status": "connected"})
+    except Exception:
+        pass
+
+    play: list[dict[str, Any]] = []
+    try:
+        for s in list_play_sessions().get("sessions", []):
+            title = s.get("title") or s.get("url") or s.get("session_id", "?")
+            play.append({
+                "kind": "playback",
+                "client": str(s.get("session_id", "?"))[:16],
+                "detail": str(title)[:40],
+                "status": s.get("status", ""),
+            })
+    except Exception:
+        pass
+
+    return {"status": "ok", "webui_port": webui_port, "clients": web + play,
+            "webui_count": len(web), "playback_count": len(play)}
+
+
 # -- stage / tv prompter view --------------------------------------------
 
 

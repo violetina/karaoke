@@ -32,6 +32,7 @@ logging.basicConfig(level=logging.INFO)
 
 CTRL_API_URL = os.environ.get("KARAOKE_CTRL_API_URL", "http://127.0.0.1:8765")
 MCP_API_URL = os.environ.get("KARAOKE_MCP_API_URL", "http://127.0.0.1:8888")
+LIB_API_URL = os.environ.get("KARAOKE_LIB_API_URL", "http://127.0.0.1:8000")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9200")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen3:0.6b")
@@ -1383,6 +1384,171 @@ async def dj_chat_endpoint(body: ChatRequest):
                 yield {"event": "error", "data": json.dumps({"error": f"Ollama connection error: {str(e)}"})}
 
     return EventSourceResponse(chat_event_stream())
+
+
+# ---------------------------------------------------------------------------
+# Backstage (admin TUI concepts, ported to the dashboard)
+# ---------------------------------------------------------------------------
+# Proxies the same host-side control API / library API endpoints
+# src/karaoke/admin_tui.py already drives directly in-process, so the
+# dashboard surfaces worker health, connected clients, recent events/error
+# logs, the lyrics staging queue, radio session import, and basic recording
+# control without needing a terminal. Heavier pipeline actions the TUI runs
+# in-process (folder scan ingestion, vector rebuild, Whisper alignment,
+# audio backfill) are NOT wired here yet -- those still need the TUI/CLI.
+
+@app.get("/api/backstage/workers")
+async def backstage_workers():
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/workers/status")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "available": False}
+
+
+class BackstageScalePayload(BaseModel):
+    target: int
+
+
+@app.post("/api/backstage/workers/scale")
+async def backstage_scale_workers(body: BackstageScalePayload):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(f"{CTRL_API_URL}/api/workers/scale", json={"target": body.target})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/backstage/clients")
+async def backstage_clients():
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/admin/clients")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "clients": []}
+
+
+@app.get("/api/backstage/logs/errors")
+async def backstage_error_logs(lines: int = Query(50, ge=1, le=500)):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/logs/errors", params={"lines": lines})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "logs": []}
+
+
+@app.get("/api/backstage/events/recent")
+async def backstage_recent_events(limit: int = Query(50, ge=1, le=200)):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/events/recent", params={"limit": limit})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "events": []}
+
+
+@app.get("/api/backstage/radio/sessions")
+async def backstage_radio_sessions(limit: int = Query(50, ge=1, le=200)):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{LIB_API_URL}/api/radio/sessions", params={"limit": limit})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "sessions": []}
+
+
+@app.post("/api/backstage/radio/sessions/{session_id}/import")
+async def backstage_import_radio_session(session_id: int):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(f"{CTRL_API_URL}/api/radio/sessions/{session_id}/import")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/backstage/record/status")
+async def backstage_record_status():
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/record/status")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+class BackstageRecordStartPayload(BaseModel):
+    source: Optional[str] = None
+    keep_audio: bool = False
+    note: Optional[str] = None
+
+
+@app.post("/api/backstage/record/start")
+async def backstage_record_start(body: BackstageRecordStartPayload):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(f"{CTRL_API_URL}/api/record/start", json=body.model_dump())
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+class BackstageRecordStopPayload(BaseModel):
+    recording_id: Optional[int] = None
+
+
+@app.post("/api/backstage/record/stop")
+async def backstage_record_stop(body: BackstageRecordStopPayload):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(f"{CTRL_API_URL}/api/record/stop", json=body.model_dump())
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/backstage/kiosk/restart")
+async def backstage_restart_kiosk():
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            r = await client.post(f"{CTRL_API_URL}/api/players/window/restart", json={})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/backstage/staging/queue")
+async def backstage_staging_queue(status: str = "pending", limit: int = Query(20, ge=1, le=100)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(f"{LIB_API_URL}/api/staging/queue", params={"status": status, "limit": limit})
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e), "items": []}
+
+
+@app.post("/api/backstage/staging/queue/{item_id}/approve")
+async def backstage_staging_approve(item_id: int):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(f"{LIB_API_URL}/api/staging/queue/{item_id}/approve")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/backstage/staging/queue/{item_id}/reject")
+async def backstage_staging_reject(item_id: int):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(f"{LIB_API_URL}/api/staging/queue/{item_id}/reject")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
 
 # ---------------------------------------------------------------------------

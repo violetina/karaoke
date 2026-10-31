@@ -65,6 +65,13 @@
         >
           🌌 Full Constellation (:8888)
         </button>
+        <button
+          class="tab-btn"
+          :class="{ active: currentTab === 'backstage' }"
+          @click="currentTab = 'backstage'"
+        >
+          🎛️ Backstage
+        </button>
       </nav>
     </header>
 
@@ -146,6 +153,9 @@
       <div v-if="currentTab === 'graph'" class="iframe-view">
         <iframe src="http://127.0.0.1:8888/graph" frameborder="0"></iframe>
       </div>
+      <div v-if="currentTab === 'backstage'" class="backstage-view">
+        <BackstagePanel />
+      </div>
     </main>
 
 
@@ -162,6 +172,7 @@ import ArtistInfoBox from './components/ArtistInfoBox.vue'
 import SongList from './components/SongList.vue'
 import PlaylistsPanel from './components/PlaylistsPanel.vue'
 import AiDjChat from './components/AiDjChat.vue'
+import BackstagePanel from './components/BackstagePanel.vue'
 
 const currentTab = ref('unified')
 const radio = ref({ enabled: false, status: 'stopped', artist: '', title: '', processing: '' })
@@ -587,6 +598,12 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   border: none;
+}
+
+.backstage-view {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
 }
 
 @media (max-width: 1024px) {
