@@ -59,7 +59,7 @@ text/event-stream"`, or just hit `/health`.
 |---|---|---|
 | `search_songs` | Search tracks in the library with Camelot codes, BPM, energy, and lyrics | `query`, `genre`, `key`, `min_bpm`, `max_bpm`, `only_synced_lyrics` |
 | `get_now_playing` | Inspect currently playing audio on Spotify/Chromium/VLC/MPRIS | — |
-| `suggest_next_tracks` | Suggest next tracks ranked by fit (sound timbre + mood handover) under strategy constraints | `track_id`, `strategy` (`flow` [default], `harmonic`, `energy_up`, `cool_down`, `mood`, `structural`, `acoustic`), `limit`, `exclude_playlist` |
+| `suggest_next_tracks` | Suggest next tracks ranked by fit (sound timbre + mood handover) under strategy constraints — see [Next-song suggestion weights](next-song-suggestion.md) for the exact per-strategy formulas | `track_id`, `strategy` (`flow` [default], `harmonic`, `energy_up`, `cool_down`, `mood`, `structural`, `acoustic`), `limit`, `exclude_playlist` |
 | `analyze_lyric_vibe` | Lyric mood arc, sentiment breakdown, and singer delivery tips | `track_id` |
 | `get_dj_stats` | Play counts, top artists, crowd favorites, and discovery history | — |
 | `play_track` | Trigger playback via the host karaoke player | `track_id`, `prefer_audio_only` |

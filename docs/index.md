@@ -29,6 +29,7 @@ It combines local music metadata, LRCLIB synced lyrics, optional Whisper transcr
 - [Workflow](workflow.md): operational project flow.
 - [Smart playlists](smart-playlists.md): auto-generated Genre: and Smart: playlists refreshed with mood and CLAP flow.
 - [Karaoke DJ & MCP](mcp-server.md): MCP server, AI DJ booth, and Cytoscape similarity graph.
+- [Next-song suggestion weights](next-song-suggestion.md): the DJ booth's per-strategy fit formulas and the queue autopilot's whole-queue scoring, both validated against real radio DJ transitions.
 - [Troubleshooting](troubleshooting.md): known runtime and setup issues.
 
 ## Quick start
