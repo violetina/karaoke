@@ -9,6 +9,31 @@
     </div>
 
     <div class="bs-grid">
+      <!-- Playback controls (main kiosk / YouTube Music player) -->
+      <div class="bs-card">
+        <div class="bs-card-header">
+          <span class="bs-card-title">⏯️ Playback Controls</span>
+          <button class="bs-mini-btn" @click="fetchNowPlaying" title="Refresh">↻</button>
+        </div>
+        <div class="bs-stat-row" v-if="nowPlaying.metadata">
+          <span>Now playing</span>
+          <span class="bs-stat-value">{{ nowPlaying.metadata.artist }} — {{ nowPlaying.metadata.title }}</span>
+        </div>
+        <div class="bs-stat-row">
+          <span>Status</span>
+          <span class="bs-pill" :class="{ ok: nowPlaying.status === 'Playing' }">{{ nowPlaying.status || 'unknown' }}</span>
+        </div>
+        <div class="bs-actions">
+          <button class="bs-btn" @click="playerAction('previous')" title="Previous">⏮</button>
+          <button class="bs-btn active" @click="playerAction('play-pause')" title="Play/Pause">
+            {{ nowPlaying.status === 'Playing' ? '⏸' : '▶' }}
+          </button>
+          <button class="bs-btn" @click="playerAction('next')" title="Next">⏭</button>
+          <button class="bs-btn" @click="playerSeek(-10)" title="Back 10s">« 10s</button>
+          <button class="bs-btn" @click="playerSeek(10)" title="Forward 10s">10s »</button>
+        </div>
+      </div>
+
       <!-- Radio -->
       <div class="bs-card">
         <div class="bs-card-header">
@@ -434,6 +459,7 @@ const stagingItems = ref([])
 const events = ref([])
 const errorLogs = ref([])
 const radio = ref({ enabled: false, status: 'stopped', artist: '', title: '', processing: '' })
+const nowPlaying = ref({ status: '', metadata: null })
 
 const scaleBusy = ref(false)
 const recordBusy = ref(false)
@@ -480,6 +506,36 @@ const fetchRadio = async () => {
     const res = await fetch('/api/radio')
     if (res.ok) radio.value = await res.json()
   } catch (e) { /* ignore */ }
+}
+
+const fetchNowPlaying = async () => {
+  try {
+    const res = await fetch('/api/players/current')
+    if (res.ok) {
+      const data = await res.json()
+      nowPlaying.value = { status: data.status || '', metadata: data.metadata || null }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+const playerAction = async (action) => {
+  try {
+    await fetch(`/api/players/${action}`, { method: 'POST' })
+  } catch (e) { /* ignore */ } finally {
+    setTimeout(fetchNowPlaying, 300)
+  }
+}
+
+const playerSeek = async (offsetS) => {
+  try {
+    await fetch('/api/players/seek', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ offset_s: offsetS }),
+    })
+  } catch (e) { /* ignore */ } finally {
+    setTimeout(fetchNowPlaying, 300)
+  }
 }
 
 const toggleRadio = async () => {
@@ -619,6 +675,7 @@ const fetchErrorLogs = async () => {
 }
 
 const fetchAll = () => {
+  fetchNowPlaying()
   fetchRadio()
   fetchWorkers()
   fetchClients()
