@@ -1685,7 +1685,8 @@ def get_lyrics_by_track_id(
             """
             SELECT * FROM lyrics
             WHERE track_id = %s AND kind = 'approved'
-              AND (media_type = 'video' OR source IN ('youtube_caption', 'video', 'video_caption'))
+              AND (media_type = 'video'
+                   OR (media_type IS NULL AND source IN ('youtube_caption', 'video', 'video_caption')))
             ORDER BY lyric_id DESC LIMIT 1
             """,
             (track_id,),
@@ -1697,7 +1698,8 @@ def get_lyrics_by_track_id(
             """
             SELECT * FROM lyrics
             WHERE track_id = %s AND kind = 'approved'
-              AND (media_type = 'audio' OR source NOT IN ('youtube_caption', 'video', 'video_caption'))
+              AND (media_type = 'audio'
+                   OR (media_type IS NULL AND source NOT IN ('youtube_caption', 'video', 'video_caption')))
             ORDER BY lyric_id DESC LIMIT 1
             """,
             (track_id,),

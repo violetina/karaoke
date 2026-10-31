@@ -63,6 +63,43 @@ def test_put_is_upsert(tmp_path, c):
     assert got.has_synced
 
 
+def test_get_lyrics_by_track_id_audio_not_clobbered_by_newer_derived_video_row(tmp_path, c):
+    """Regression: get_lyrics_by_track_id(media_type='audio')'s fallback
+    clause used to be `media_type = 'audio' OR source NOT IN (known video
+    sources)` -- so a newer row explicitly tagged media_type='video' but
+    with a source string outside that fixed list (e.g. caption_sync.py's
+    "derived_from_audio", used for a video LRC built by shifting the real
+    audio lyrics by the sync offset) matched the second clause and won via
+    ORDER BY lyric_id DESC, silently replacing the real audio lyrics with
+    the offset-shifted video copy. Found live: PJ Harvey "Man-Size" and
+    Queen "Don't Stop Me Now" both played out of sync in audio mode because
+    of this after an AV-sync preprocessing run."""
+    cur = c.cursor()
+    cur.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id", ("X", "Y"))
+    track_id = cur.fetchone()["track_id"]
+    localcache.put_cached_lyrics(
+        "X", "Y",
+        Lyrics(plain="real", synced_raw="[00:10.00] real audio line", source="lrclib"),
+        media_type="audio", conn=c,
+    )
+    # Inserted after, with a higher lyric_id, and a source string that is
+    # NOT one of the video-caption source names -- exactly the condition
+    # that used to confuse the audio-lookup fallback.
+    localcache.put_cached_lyrics(
+        "X", "Y",
+        Lyrics(plain="real", synced_raw="[00:13.72] real audio line", source="derived_from_audio"),
+        media_type="video", conn=c,
+    )
+
+    audio = localcache.get_lyrics_by_track_id(track_id, c, media_type="audio")
+    video = localcache.get_lyrics_by_track_id(track_id, c, media_type="video")
+
+    assert audio.source == "lrclib"
+    assert audio.synced_raw == "[00:10.00] real audio line"
+    assert video.source == "derived_from_audio"
+    assert video.synced_raw == "[00:13.72] real audio line"
+
+
 def test_summarize_counts_plays_and_discoveries(tmp_path, c):
     localcache.log_event("radio", "discover", artist="A", title="S1", conn=c)
     localcache.log_event("radio", "play", artist="A", title="S1",
