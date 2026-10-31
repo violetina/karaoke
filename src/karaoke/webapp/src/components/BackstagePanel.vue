@@ -871,9 +871,10 @@ const closeLineLooper = () => {
   looper.value.open = false
 }
 
-const loadLooperTrack = async () => {
+const loadLooperTrack = async (opts = {}) => {
   if (!looper.value.track) return
   looper.value.msg = ''
+  const previousIndex = looper.value.lineIndex
   try {
     const res = await fetch(
       `/api/backstage/line-looper/track/${looper.value.track.track_id}?media_type=${looper.value.mediaType}`
@@ -888,7 +889,14 @@ const loadLooperTrack = async () => {
     looper.value.bpm = data.bpm
     looper.value.hasLocalFile = !!data.has_local_file
     if (looper.value.lines.length) {
-      looper.value.lineIndex = looper.value.lines[0].index
+      let targetIndex = looper.value.lines[0].index
+      if (opts.advanceFrom != null) {
+        const next = looper.value.lines.find((l) => l.index === opts.advanceFrom + 1)
+        targetIndex = next ? next.index : looper.value.lines[looper.value.lines.length - 1].index
+      } else if (previousIndex != null && looper.value.lines.some((l) => l.index === previousIndex)) {
+        targetIndex = previousIndex
+      }
+      looper.value.lineIndex = targetIndex
       selectLooperLine()
     }
   } catch (e) {
@@ -999,6 +1007,7 @@ const backToNudge = () => {
 const saveLineLooper = async () => {
   if (looper.value.saving) return
   looper.value.saving = true
+  const savedIndex = looper.value.lineIndex
   try {
     const res = await fetch('/api/backstage/line-looper/save', {
       method: 'POST',
@@ -1016,8 +1025,10 @@ const saveLineLooper = async () => {
     const data = await res.json()
     looper.value.msg = data.message || (data.status === 'ok' ? 'Saved.' : 'Save failed.')
     if (data.status === 'ok') {
-      // Refresh so the just-corrected line's text reflects the new save.
-      await loadLooperTrack()
+      // Advance straight to the next line instead of resetting to the
+      // first one, so correcting a whole track doesn't need a re-pick
+      // after every save.
+      await loadLooperTrack({ advanceFrom: savedIndex })
     }
   } catch (e) {
     looper.value.msg = 'Save failed.'
@@ -1318,6 +1329,16 @@ onBeforeUnmount(() => {
   color: var(--text-primary, #fff);
   font-size: 0.78rem;
   padding: 5px 8px;
+}
+
+/* Chromium renders a native <select> popup's <option> list using whatever
+   background/color is set directly on the <option> elements (unlike most
+   other select styling, which it ignores) -- without this the dropdown
+   popup falls back to the OS default white-on-black, clashing hard with
+   the dark theme. */
+.bs-select option {
+  background: #1a1f2e;
+  color: #e2e8f0;
 }
 
 .bs-input {
