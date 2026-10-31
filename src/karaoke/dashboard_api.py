@@ -837,6 +837,21 @@ async def refresh_playing_artist(body: SongActionPayload):
     return {"artist": profile, "processing_status": status}
 
 
+def _resolve_artist_title_url(track_id: Optional[int], artist: str, title: str, url: str, conn) -> tuple[str, str, str]:
+    """Fill in missing artist/title/url for a track_id from the DB (shared by all song-action endpoints)."""
+    if track_id is not None and (not artist or not title or not url):
+        cur = conn.cursor()
+        cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (track_id,))
+        r = cur.fetchone()
+        if r:
+            rd = dict(r) if hasattr(r, "keys") else {"artist": r[0], "title": r[1]}
+            artist = artist or rd.get("artist", "")
+            title = title or rd.get("title", "")
+        if not url:
+            url = _best_source_url_for_track(track_id, conn)
+    return artist, title, url
+
+
 @app.post("/api/song/process")
 async def process_song(body: SongActionPayload):
     """Fully (re)process a song: vectors, mood, chords, classification, timings."""
@@ -845,17 +860,7 @@ async def process_song(body: SongActionPayload):
 
     def work():
         with localcache.connect() as conn:
-            artist, title, url = body.artist, body.title, body.url
-            if body.track_id is not None and (not artist or not title or not url):
-                cur = conn.cursor()
-                cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (body.track_id,))
-                r = cur.fetchone()
-                if r:
-                    rd = dict(r) if hasattr(r, "keys") else {"artist": r[0], "title": r[1]}
-                    artist = artist or rd.get("artist", "")
-                    title = title or rd.get("title", "")
-                if not url:
-                    url = _best_source_url_for_track(body.track_id, conn)
+            artist, title, url = _resolve_artist_title_url(body.track_id, body.artist, body.title, body.url, conn)
             if not (artist and title):
                 return {"status": "error", "message": "artist/title required"}
             # include_timings=True → force the full pipeline for this song.
@@ -879,6 +884,84 @@ async def process_song(body: SongActionPayload):
         return await anyio.to_thread.run_sync(work)
     except Exception as e:
         _log.warning("process_song failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/backstage/track/{track_id}/reprocess")
+async def backstage_reprocess_track(track_id: int):
+    """Force EVERY pipeline step to re-run for this track, done or not.
+
+    Unlike /api/song/process (which only fills in what's missing), this is
+    the admin_tui-style "redo everything" action -- it passes an explicit
+    ``steps`` list so tasks.py's _forced_steps() bypasses the done-already
+    check entirely.
+    """
+    import anyio
+    from . import localcache, postprocess_queue
+    from .tasks import STEPS
+
+    def work():
+        with localcache.connect() as conn:
+            artist, title, url = _resolve_artist_title_url(track_id, "", "", "", conn)
+            if not (artist and title):
+                return {"status": "error", "message": "track not found"}
+            ok = postprocess_queue.publish_postprocess_task(
+                artist, title, url, include_timings=True, full=True, steps=list(STEPS),
+            )
+            return {
+                "status": "queued" if ok else "error",
+                "artist": artist, "title": title,
+                "message": "Full reprocess queued (all steps forced)" if ok else "Failed to publish task",
+            }
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_reprocess_track failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/backstage/track/{track_id}/whisper")
+async def backstage_whisper_track(track_id: int):
+    """Force just the lyric-sync step to re-run (the TUI's 'try Whisper' action)."""
+    import anyio
+    from . import localcache, postprocess_queue
+
+    def work():
+        with localcache.connect() as conn:
+            artist, title, url = _resolve_artist_title_url(track_id, "", "", "", conn)
+            if not (artist and title):
+                return {"status": "error", "message": "track not found"}
+            ok = postprocess_queue.publish_postprocess_task(
+                artist, title, url, full=True, steps=["sync"],
+            )
+            return {
+                "status": "queued" if ok else "error",
+                "artist": artist, "title": title,
+                "message": "Whisper lyric sync queued" if ok else "Failed to publish task",
+            }
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_whisper_track failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/backstage/track/{track_id}/av-sync")
+async def backstage_av_sync_track(track_id: int):
+    """Force a fresh waveform Audio/Video offset re-check for this track."""
+    import anyio
+    from .tasks import enqueue_av_sync
+
+    def work():
+        task_id = enqueue_av_sync(track_id)
+        return {"status": "queued", "task_id": task_id, "message": "A-V sync queued"}
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_av_sync_track failed: %s", e)
         return {"status": "error", "error": str(e)}
 
 
@@ -1549,6 +1632,89 @@ async def backstage_staging_reject(item_id: int):
             return r.json()
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+
+# -- Library / playlist browse (admin_tui's 'H' browse, ported to the web) --
+
+@app.get("/api/backstage/library/tracks")
+async def backstage_library_tracks(
+    q: str = "", genre: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+):
+    """Proxy the library's searchable track list (same table admin_tui's browse uses)."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(
+                f"{LIB_API_URL}/api/tracks",
+                params={"q": q, "genre": genre, "limit": limit, "offset": offset},
+            )
+            return {"status": "ok", "tracks": r.json()}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "tracks": []}
+
+
+@app.get("/api/backstage/playlists/{playlist_id}/tracks")
+async def backstage_playlist_tracks(playlist_id: str):
+    """List a saved playlist's tracks for browsing (in-process, same table PlaylistsPanel uses)."""
+    import anyio
+    from . import localcache
+
+    def work():
+        with localcache.connect() as conn:
+            return localcache.get_saved_playlist_tracks(playlist_id, conn=conn)
+
+    try:
+        tracks = await anyio.to_thread.run_sync(work)
+        return {"status": "ok", "tracks": tracks}
+    except Exception as e:
+        _log.warning("backstage_playlist_tracks failed: %s", e)
+        return {"status": "error", "error": str(e), "tracks": []}
+
+
+# -- Live captions (ctrl-api :8765, model/language chooser + SSE proxy) ----
+
+@app.get("/api/backstage/captions/config")
+async def backstage_captions_config():
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.get(f"{CTRL_API_URL}/api/captions/config")
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+class BackstageCaptionsConfigPayload(BaseModel):
+    model: Optional[str] = None
+    language: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+@app.post("/api/backstage/captions/config")
+async def backstage_set_captions_config(body: BackstageCaptionsConfigPayload):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            r = await client.post(
+                f"{CTRL_API_URL}/api/captions/config",
+                json=body.model_dump(exclude_none=True),
+            )
+            return r.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/backstage/captions/stream")
+async def backstage_captions_stream():
+    """Proxy the live-transcription SSE stream from :8765."""
+    async def sse_generator():
+        async with httpx.AsyncClient(timeout=None) as client:
+            try:
+                async with client.stream("GET", f"{CTRL_API_URL}/api/captions/stream") as resp:
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield f"{line}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'status': 'disconnected', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------

@@ -749,3 +749,38 @@ def test_whisper_sync_is_acknowledged_on_receipt():
     """A Whisper run longer than RabbitMQ's ack timeout must not be redelivered."""
     assert tasks.sync_lyrics.acks_late is False
     assert tasks.analyze_audio.acks_late is True     # the rest keep late acks
+
+
+# --- Tests for the Backstage "A-V Sync" per-track action -------------------
+
+def test_sync_av_calls_sync_audio_video_counterparts_with_force_waveform(monkeypatch):
+    fake_result = {"status": "ok", "method": "waveform", "offset": 3.72, "confidence": 0.206}
+    captured = {}
+
+    def fake_sync(track_id, conn, client=None, force_waveform=False):
+        captured["track_id"] = track_id
+        captured["force_waveform"] = force_waveform
+        return fake_result
+
+    monkeypatch.setattr(localcache, "connect", MagicMock())
+    with patch("karaoke.caption_sync.sync_audio_video_counterparts", new=fake_sync):
+        out = tasks.sync_av.run({"track_id": 923})
+
+    assert out == fake_result
+    assert captured["track_id"] == 923
+    assert captured["force_waveform"] is True
+
+
+def test_sync_av_reraises_on_failure():
+    monkeypatch_connect = MagicMock(side_effect=RuntimeError("db down"))
+    with patch.object(localcache, "connect", new=monkeypatch_connect):
+        with pytest.raises(RuntimeError):
+            tasks.sync_av.run({"track_id": 1})
+
+
+def test_enqueue_av_sync_publishes_task_id(monkeypatch):
+    fake_async_result = MagicMock(id="task-abc-123")
+    monkeypatch.setattr(tasks.sync_av, "delay", MagicMock(return_value=fake_async_result))
+    task_id = tasks.enqueue_av_sync(12657)
+    assert task_id == "task-abc-123"
+    tasks.sync_av.delay.assert_called_once_with({"track_id": 12657})

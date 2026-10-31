@@ -540,6 +540,52 @@ def enqueue_postprocess(payload: dict[str, Any]) -> str:
 
 @app.task(
     bind=True,
+    name="karaoke.tasks.sync_av",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=1,
+)
+def sync_av(self, payload: dict[str, Any]) -> dict[str, Any]:
+    """Force a fresh Audio/Video waveform offset for one track.
+
+    Not part of the normal postprocess_track chain: caption_sync's existing
+    waveform-first integration only even ATTEMPTS this when a track's
+    'timings' step (a real YouTube caption upgrade) succeeds, which per
+    PLAN-av-sync.md's own data read happens for roughly 1 of ~11,000
+    tracks -- so routing through the main chain would essentially never
+    actually run it. This is the explicit "A-V Sync" action instead
+    (admin_tui-style per-track operation, not a pipeline stage), using
+    force_waveform=True so it re-attempts even if a (possibly stale,
+    pre-waveform-method) offset is already stored.
+    """
+    track_id = payload.get("track_id")
+    log.info("celery sync_av: track %s", track_id)
+    try:
+        from . import localcache
+        from .caption_sync import sync_audio_video_counterparts
+        from .ytmusic_client import YTMusicClient
+
+        with localcache.connect() as conn:
+            result = sync_audio_video_counterparts(
+                int(track_id), conn, client=YTMusicClient(), force_waveform=True,
+            )
+        log.info("celery sync_av: track %s -> method=%s offset=%s",
+                 track_id, result.get("method"), result.get("offset"))
+        return result
+    except Exception:
+        log.exception("celery sync_av: failed for track %s", track_id)
+        raise
+
+
+def enqueue_av_sync(track_id: int) -> str:
+    """Publish a Celery A-V sync task for one track and return its task id."""
+    result = sync_av.delay({"track_id": track_id})
+    return str(result.id)
+
+
+@app.task(
+    bind=True,
     name="karaoke.tasks.sync_ytmusic_playlist",
     ignore_result=False,
 )

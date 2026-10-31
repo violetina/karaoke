@@ -9,6 +9,29 @@
     </div>
 
     <div class="bs-grid">
+      <!-- Radio -->
+      <div class="bs-card">
+        <div class="bs-card-header">
+          <span class="bs-card-title">📻 songrec Radio Mode</span>
+          <button class="bs-mini-btn" @click="fetchRadio" title="Refresh">↻</button>
+        </div>
+        <div class="bs-stat-row">
+          <span>Status</span>
+          <span class="bs-pill" :class="{ ok: radio.enabled }">{{ radio.status || (radio.enabled ? 'running' : 'stopped') }}</span>
+        </div>
+        <div class="bs-stat-row" v-if="radio.title">
+          <span>Recognized</span><span class="bs-stat-value">{{ radio.artist }} — {{ radio.title }}</span>
+        </div>
+        <div class="bs-stat-row" v-if="radio.processing">
+          <span>Processing</span><span class="bs-dim">{{ radio.processing }}</span>
+        </div>
+        <div class="bs-actions">
+          <button class="bs-btn" :class="{ active: radio.enabled }" @click="toggleRadio" :disabled="radioBusy">
+            {{ radioBusy ? '…' : (radio.enabled ? '⏹ Turn Radio Off' : '📻 Turn Radio On') }}
+          </button>
+        </div>
+      </div>
+
       <!-- Workers -->
       <div class="bs-card">
         <div class="bs-card-header">
@@ -181,7 +204,100 @@
         </div>
         <div v-else class="bs-empty">No recent errors.</div>
       </div>
+
+      <!-- Library / playlist browse (admin TUI's 'H' browse) -->
+      <div class="bs-card bs-card-wide">
+        <div class="bs-card-header">
+          <span class="bs-card-title">📚 Browse Library / Playlists</span>
+          <span class="bs-dim">right-click a track for actions</span>
+        </div>
+        <div class="bs-browse-controls">
+          <select class="bs-select" v-model="browseMode" @change="onBrowseModeChange">
+            <option value="library">🔍 Search library</option>
+            <option value="playlist">📂 Browse a playlist</option>
+          </select>
+          <input
+            v-if="browseMode === 'library'"
+            class="bs-input"
+            type="text"
+            v-model="browseQuery"
+            placeholder="artist or title…"
+            @input="debouncedLibrarySearch"
+          />
+          <select v-else class="bs-select" v-model="browsePlaylistId" @change="fetchPlaylistTracks">
+            <option value="">— choose a playlist —</option>
+            <option v-for="p in playlists" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
+          </select>
+        </div>
+        <table class="bs-table" v-if="browseTracks.length">
+          <thead>
+            <tr><th>Artist / Title</th><th>Genre</th><th>Synced</th></tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="t in browseTracks"
+              :key="t.track_id"
+              @contextmenu.prevent="openContextMenu($event, t)"
+              class="bs-browse-row"
+            >
+              <td class="bs-bold">{{ t.artist }} — {{ t.title }}</td>
+              <td class="bs-dim">{{ t.genre || '—' }}</td>
+              <td>{{ t.has_synced_lyrics ? '✓' : '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="bs-empty">
+          {{ browseMode === 'library' ? 'Type to search the library.' : 'Pick a playlist to browse its tracks.' }}
+        </div>
+      </div>
+
+      <!-- Live captions (TUI's live-transcription page, with model chooser) -->
+      <div class="bs-card bs-card-wide">
+        <div class="bs-card-header">
+          <span class="bs-card-title">💬 Live Captions (Transcription)</span>
+        </div>
+        <div class="bs-browse-controls">
+          <select class="bs-select" v-model="captionModel">
+            <option value="faster-whisper-tiny">🚀 Whisper Tiny (Fast Local)</option>
+            <option value="faster-whisper-base">🎯 Whisper Base (Local)</option>
+            <option value="faster-whisper-small">⚡ Whisper Small (Local)</option>
+            <option value="gemini-2.5-flash">✨ Gemini 2.5 Flash (API)</option>
+            <option value="gemini-1.5-flash">✨ Gemini 1.5 Flash (API)</option>
+            <option value="gemma-2-9b-it">💎 Gemma 2 9B (Dutch Refiner API)</option>
+            <option value="gemma-3-27b-it">💎 Gemma 3 27B (Dutch Refiner API)</option>
+          </select>
+          <select class="bs-select" v-model="captionLanguage">
+            <option value="nl">🇳🇱 Dutch (nl)</option>
+            <option value="en">🇬🇧 English (en)</option>
+            <option value="fr">🇫🇷 French (fr)</option>
+            <option value="de">🇩🇪 German (de)</option>
+            <option value="es">🇪🇸 Spanish (es)</option>
+            <option value="auto">🌐 Auto Detect</option>
+          </select>
+          <button class="bs-btn" :class="{ active: captionsLive }" @click="toggleCaptions">
+            {{ captionsLive ? '⏹ Stop' : '▶ Start Live Captions' }}
+          </button>
+        </div>
+        <div class="bs-log bs-captions-log" v-if="captionLines.length">
+          <div v-for="(c, i) in captionLines" :key="i" class="bs-log-line">{{ c }}</div>
+        </div>
+        <div v-else class="bs-empty">Not transcribing. Pick a model and language, then start.</div>
+      </div>
     </div>
+
+    <!-- Right-click context menu for a browsed track -->
+    <div
+      v-if="contextMenu.visible"
+      class="bs-ctx-menu"
+      :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+    >
+      <div class="bs-ctx-title">{{ contextMenu.track?.artist }} — {{ contextMenu.track?.title }}</div>
+      <button @click="runTrackAction('process')">⚙️ Process</button>
+      <button @click="runTrackAction('reprocess')">🔁 Reprocess (force all)</button>
+      <button @click="runTrackAction('whisper')">🗣️ Try Whisper</button>
+      <button @click="runTrackAction('av-sync')">🎬 A-V Sync</button>
+    </div>
+    <div v-if="actionMsg" class="bs-toast">{{ actionMsg }}</div>
   </div>
 </template>
 
@@ -195,6 +311,7 @@ const radioSessions = ref([])
 const stagingItems = ref([])
 const events = ref([])
 const errorLogs = ref([])
+const radio = ref({ enabled: false, status: 'stopped', artist: '', title: '', processing: '' })
 
 const scaleBusy = ref(false)
 const recordBusy = ref(false)
@@ -202,6 +319,24 @@ const kioskBusy = ref(false)
 const kioskMsg = ref('')
 const importingId = ref(null)
 const reviewingId = ref(null)
+const radioBusy = ref(false)
+
+// -- Browse state --
+const browseMode = ref('library')
+const browseQuery = ref('')
+const browsePlaylistId = ref('')
+const browseTracks = ref([])
+const playlists = ref([])
+const contextMenu = ref({ visible: false, x: 0, y: 0, track: null })
+const actionMsg = ref('')
+let actionMsgTimer = null
+
+// -- Live captions state --
+const captionModel = ref('faster-whisper-small')
+const captionLanguage = ref('nl')
+const captionsLive = ref(false)
+const captionLines = ref([])
+let captionsSource = null
 
 const formatTime = (ts) => {
   if (!ts) return '—'
@@ -209,6 +344,28 @@ const formatTime = (ts) => {
     return new Date(ts * 1000).toLocaleString()
   } catch (e) {
     return '—'
+  }
+}
+
+const fetchRadio = async () => {
+  try {
+    const res = await fetch('/api/radio')
+    if (res.ok) radio.value = await res.json()
+  } catch (e) { /* ignore */ }
+}
+
+const toggleRadio = async () => {
+  if (radioBusy.value) return
+  radioBusy.value = true
+  try {
+    const res = await fetch('/api/radio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !radio.value.enabled }),
+    })
+    if (res.ok) radio.value = await res.json()
+  } catch (e) { /* ignore */ } finally {
+    radioBusy.value = false
   }
 }
 
@@ -334,6 +491,7 @@ const fetchErrorLogs = async () => {
 }
 
 const fetchAll = () => {
+  fetchRadio()
   fetchWorkers()
   fetchClients()
   fetchRecordStatus()
@@ -343,13 +501,137 @@ const fetchAll = () => {
   fetchErrorLogs()
 }
 
+// -- Library / playlist browse --------------------------------------------
+
+const onBrowseModeChange = () => {
+  browseTracks.value = []
+  if (browseMode.value === 'playlist') fetchPlaylists()
+}
+
+const fetchPlaylists = async () => {
+  try {
+    const res = await fetch('/api/playlists')
+    if (res.ok) playlists.value = (await res.json()).playlists || []
+  } catch (e) { /* ignore */ }
+}
+
+let librarySearchTimer = null
+const debouncedLibrarySearch = () => {
+  if (librarySearchTimer) clearTimeout(librarySearchTimer)
+  librarySearchTimer = setTimeout(searchLibrary, 300)
+}
+
+const searchLibrary = async () => {
+  if (!browseQuery.value.trim()) {
+    browseTracks.value = []
+    return
+  }
+  try {
+    const res = await fetch(`/api/backstage/library/tracks?q=${encodeURIComponent(browseQuery.value)}&limit=30`)
+    if (res.ok) browseTracks.value = (await res.json()).tracks || []
+  } catch (e) { /* ignore */ }
+}
+
+const fetchPlaylistTracks = async () => {
+  if (!browsePlaylistId.value) {
+    browseTracks.value = []
+    return
+  }
+  try {
+    const res = await fetch(`/api/backstage/playlists/${encodeURIComponent(browsePlaylistId.value)}/tracks`)
+    if (res.ok) browseTracks.value = (await res.json()).tracks || []
+  } catch (e) { /* ignore */ }
+}
+
+// -- Right-click context menu + track actions ------------------------------
+
+const openContextMenu = (event, track) => {
+  contextMenu.value = { visible: true, x: event.clientX, y: event.clientY, track }
+}
+
+const closeContextMenu = () => {
+  contextMenu.value.visible = false
+}
+
+const showActionMsg = (msg) => {
+  actionMsg.value = msg
+  if (actionMsgTimer) clearTimeout(actionMsgTimer)
+  actionMsgTimer = setTimeout(() => { actionMsg.value = '' }, 4000)
+}
+
+const runTrackAction = async (action) => {
+  const track = contextMenu.value.track
+  closeContextMenu()
+  if (!track) return
+  const label = `${track.artist} — ${track.title}`
+  try {
+    let res
+    if (action === 'process') {
+      res = await fetch('/api/song/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_id: track.track_id }),
+      })
+    } else {
+      res = await fetch(`/api/backstage/track/${track.track_id}/${action}`, { method: 'POST' })
+    }
+    const data = await res.json()
+    showActionMsg(`${action} — ${label}: ${data.message || data.status || 'done'}`)
+  } catch (e) {
+    showActionMsg(`${action} — ${label}: failed`)
+  }
+}
+
+// -- Live captions -----------------------------------------------------
+
+const toggleCaptions = async () => {
+  if (captionsLive.value) {
+    if (captionsSource) {
+      captionsSource.close()
+      captionsSource = null
+    }
+    captionsLive.value = false
+    return
+  }
+  try {
+    await fetch('/api/backstage/captions/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: captionModel.value, language: captionLanguage.value }),
+    })
+  } catch (e) { /* ignore */ }
+  captionLines.value = []
+  captionsSource = new EventSource('/api/backstage/captions/stream')
+  captionsSource.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data)
+      const text = data.text || data.line || JSON.stringify(data)
+      captionLines.value.push(text)
+      if (captionLines.value.length > 100) captionLines.value.shift()
+    } catch (e) {
+      captionLines.value.push(ev.data)
+    }
+  }
+  captionsSource.onerror = () => {
+    captionsLive.value = false
+    if (captionsSource) {
+      captionsSource.close()
+      captionsSource = null
+    }
+  }
+  captionsLive.value = true
+}
+
 let pollTimer = null
 onMounted(() => {
   fetchAll()
   pollTimer = setInterval(fetchAll, 10000)
+  window.addEventListener('click', closeContextMenu)
 })
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
+  window.removeEventListener('click', closeContextMenu)
+  if (captionsSource) captionsSource.close()
 })
 </script>
 
@@ -567,5 +849,95 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .bs-grid { grid-template-columns: 1fr; }
   .bs-card-wide { grid-column: span 1; }
+}
+
+.bs-browse-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.bs-select, .bs-input {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary, #fff);
+  font-size: 0.78rem;
+  padding: 5px 8px;
+}
+
+.bs-input {
+  flex: 1;
+  min-width: 160px;
+}
+
+.bs-browse-row {
+  cursor: context-menu;
+}
+
+.bs-browse-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.bs-ctx-menu {
+  position: fixed;
+  z-index: 999;
+  background: #1a1f2e;
+  border: 1px solid var(--accent-cyan);
+  border-radius: 8px;
+  padding: 6px;
+  min-width: 190px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.bs-ctx-title {
+  font-size: 0.72rem;
+  color: var(--text-dim, #94a3b8);
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.bs-ctx-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.bs-ctx-menu button:hover {
+  background: rgba(0, 242, 254, 0.12);
+  color: var(--accent-cyan);
+}
+
+.bs-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1a1f2e;
+  border: 1px solid var(--accent-cyan);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  z-index: 1000;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.bs-captions-log {
+  font-size: 0.9rem;
+  font-family: inherit;
 }
 </style>
