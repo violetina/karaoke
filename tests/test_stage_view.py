@@ -111,6 +111,50 @@ def test_get_stage_state_with_playback_and_lyrics():
         assert state["upcoming_queue"][0]["title"] == "Don't Stop Me Now"
 
 
+def test_get_stage_state_passes_current_av_mode_to_lyrics_lookup():
+    """Regression: get_stage_state used to call get_lyrics_by_track_id with no
+    media_type at all, so it just grabbed whichever lyrics row had the
+    highest lyric_id -- almost always the newer AV-sync-derived row once a
+    track has both an audio and a video lyrics row. Found live: PJ Harvey
+    "Man-Size" showed lyrics ~3.7s late in BOTH audio and video playback
+    mode, because the stage always served the video-shifted copy regardless
+    of which mode was actually playing. Fixed by asking the kiosk's real AV
+    toggle state (player_open.cdp_get_av) and passing it through."""
+    fake_playback = {
+        "present": True, "position": 15.5, "duration": 200.0,
+        "casting": True, "paused": False,
+        "url": "https://music.youtube.com/watch?v=xyz",
+    }
+    fake_meta = MagicMock(artist="PJ Harvey", title="Man-Size", album="", url=None, duration=None)
+    fake_ly = MagicMock()
+    fake_ly.synced_raw = "[00:10.00]Line one\n"
+    fake_ly.lines = [(10.0, "Line one")]
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchone.return_value = {
+        "bpm": None, "detected_key": None, "energy": None,
+    }
+
+    with patch("karaoke.player_open.browser_playback", return_value=fake_playback), \
+         patch("karaoke.player_open.cdp_get_av", return_value="video") as mock_av, \
+         patch("karaoke.playerctl.playing_player", return_value="chromium"), \
+         patch("karaoke.playerctl.current_metadata", return_value=fake_meta), \
+         patch("karaoke.playerctl.status", return_value="Playing"), \
+         patch("karaoke.playerctl.art_url", return_value=""), \
+         patch("karaoke.localcache.connect") as mock_conn, \
+         patch("karaoke.localcache.find_track_id", return_value=923), \
+         patch("karaoke.localcache.get_lyrics_by_track_id", return_value=fake_ly) as mock_get_lyrics, \
+         patch("karaoke.track_analysis.ensure_schema"), \
+         patch("karaoke.localcache.load_active_queue", return_value={"current_index": 0, "rows": []}):
+
+        mock_conn.return_value.__enter__.return_value = fake_conn
+
+        get_stage_state()
+
+        mock_av.assert_called_once()
+        mock_get_lyrics.assert_called_once_with(923, fake_conn, media_type="video")
+
+
 def test_stage_state_flags_instrumental_break_like_the_tui():
     """A long no-lyric stretch must expose in_gap/gap_progress for the prompter.
 

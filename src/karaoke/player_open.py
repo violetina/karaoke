@@ -410,7 +410,7 @@ def cdp_previous_track() -> bool:
     return bool(reply and reply.get("result", {}).get("result", {}).get("value"))
 
 
-def cdp_get_av() -> str:
+def cdp_get_av(timeout: float = 2.0) -> str:
     """Read the active Audio (Song) vs Video mode on YouTube Music over CDP.
 
     Returns "audio", "video", or "no_av_toggle" when the playing item has no
@@ -424,7 +424,7 @@ def cdp_get_av() -> str:
       if (t.getAttribute('is-audio-playback-mode-selected') === 'true') return "audio";
       return "unknown";
     })()"""
-    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, force=True)
+    reply = _cdp_send("Runtime.evaluate", {"expression": js, "returnByValue": True}, timeout=timeout, force=True)
     val = reply.get("result", {}).get("result", {}).get("value") if reply else None
     return str(val or "unsupported")
 

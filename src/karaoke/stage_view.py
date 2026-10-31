@@ -232,7 +232,14 @@ def get_stage_state() -> dict[str, Any]:
                         track_id = found[0]
 
                 if track_id is not None:
-                    cached_ly = localcache.get_lyrics_by_track_id(track_id, conn)
+                    av_mode: Optional[str] = None
+                    try:
+                        raw_av_mode = player_open.cdp_get_av(timeout=0.08)
+                        if raw_av_mode in ("audio", "video"):
+                            av_mode = raw_av_mode
+                    except Exception:
+                        pass
+                    cached_ly = localcache.get_lyrics_by_track_id(track_id, conn, media_type=av_mode)
                     if cached_ly and cached_ly.synced_raw:
                         parsed_lines, ends, word_times = parse_enhanced_lrc(cached_ly.synced_raw)
                         for idx, (t, txt) in enumerate(parsed_lines):
