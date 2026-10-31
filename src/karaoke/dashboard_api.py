@@ -1717,6 +1717,104 @@ async def backstage_captions_stream():
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 
+# -- Line Looper (manual loop-and-confirm lyric word-timing correction) ----
+
+@app.get("/api/backstage/line-looper/track/{track_id}")
+async def backstage_line_looper_track(track_id: int, media_type: str = Query("audio")):
+    """Lines + BPM + local-file availability for the Line Looper tool."""
+    import anyio
+    from . import localcache, track_analysis
+    from .lyrics import parse_lrc
+    from .postprocess_worker import _get_cached_audio_path
+
+    def work():
+        with localcache.connect() as conn:
+            lyr = localcache.get_lyrics_by_track_id(track_id, conn, media_type=media_type)
+            if not lyr or not lyr.synced_raw:
+                return {"status": "error", "message": "No synced lyrics for this track/mode", "lines": []}
+            parsed = parse_lrc(lyr.synced_raw)
+            lines = [
+                {"index": i, "start": t, "text": text, "words": text.split()}
+                for i, (t, text) in enumerate(parsed)
+            ]
+            analysis = track_analysis.get_analysis(track_id, conn)
+            bpm = analysis.bpm if analysis else None
+            url = _best_source_url_for_track(track_id, conn)
+            has_local_file = bool(url and _get_cached_audio_path(url))
+            return {
+                "status": "ok", "lines": lines, "bpm": bpm,
+                "media_type": media_type, "has_local_file": has_local_file,
+            }
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_line_looper_track failed: %s", e)
+        return {"status": "error", "error": str(e), "lines": []}
+
+
+class LineLooperSavePayload(BaseModel):
+    track_id: int
+    media_type: str = "audio"
+    old_start: float
+    new_start: float
+    new_end: float
+    words: list[str]
+    dry_run: bool = False
+
+
+@app.post("/api/backstage/line-looper/save")
+async def backstage_line_looper_save(body: LineLooperSavePayload):
+    """Recompute one line's word timings from two confirmed anchors and save.
+
+    Reuses line_looper.distribute_word_times (count/punctuation/min-max
+    weighting, same logic lyric_align.line_weight already uses for whole
+    lines) instead of an even split, then rewrites only the matched LRC
+    line and upserts via the normal put_cached_lyrics path.
+    """
+    import anyio
+    from . import localcache, track_analysis
+    from .lyrics import Lyrics, parse_lrc
+    from .line_looper import distribute_word_times, render_enhanced_lrc_line, replace_line_in_synced_lyrics
+
+    def work():
+        with localcache.connect() as conn:
+            lyr = localcache.get_lyrics_by_track_id(body.track_id, conn, media_type=body.media_type)
+            if not lyr or not lyr.synced_raw:
+                return {"status": "error", "message": "No synced lyrics for this track/mode"}
+            analysis = track_analysis.get_analysis(body.track_id, conn)
+            bpm = analysis.bpm if analysis else None
+            try:
+                word_times = distribute_word_times(body.words, body.new_start, body.new_end, bpm=bpm)
+                new_line = render_enhanced_lrc_line(body.new_start, body.words, word_times)
+                new_raw = replace_line_in_synced_lyrics(lyr.synced_raw, body.old_start, new_line)
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+
+            if body.dry_run:
+                return {
+                    "status": "ok", "line": new_line, "word_times": word_times,
+                    "message": "Preview only (not saved)",
+                }
+
+            artist, title, _url = _resolve_artist_title_url(body.track_id, "", "", "", conn)
+            updated = Lyrics(
+                plain=lyr.plain, synced_raw=new_raw, source=lyr.source or "manual_line_looper",
+                lines=parse_lrc(new_raw), duration=lyr.duration,
+            )
+            localcache.put_cached_lyrics(artist, title, updated, media_type=body.media_type, conn=conn)
+            return {
+                "status": "ok", "line": new_line,
+                "word_times": word_times, "message": "Line corrected and saved",
+            }
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_line_looper_save failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Static frontend delivery
 # ---------------------------------------------------------------------------

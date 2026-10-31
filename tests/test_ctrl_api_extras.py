@@ -267,6 +267,51 @@ def test_admin_clients_tolerates_ss_failure(ctrl):
     assert body["clients"] == []
 
 
+# -- line looper media ---------------------------------------------------
+
+def test_line_looper_media_404_when_no_source(ctrl):
+    fake_conn = MagicMock()
+    fake_cur = MagicMock()
+    fake_cur.fetchone.return_value = None
+    fake_conn.cursor.return_value = fake_cur
+    fake_conn.__enter__ = lambda s: fake_conn
+    fake_conn.__exit__ = lambda s, *a: False
+    with patch("karaoke.localcache.connect", return_value=fake_conn):
+        res = ctrl.get("/api/line-looper/media/999?media_type=audio")
+    assert res.status_code == 404
+    assert "source" in res.json()["detail"].lower()
+
+
+def test_line_looper_media_404_when_not_cached(ctrl):
+    fake_conn = MagicMock()
+    fake_cur = MagicMock()
+    fake_cur.fetchone.return_value = {"url": "https://www.youtube.com/watch?v=abc123"}
+    fake_conn.cursor.return_value = fake_cur
+    fake_conn.__enter__ = lambda s: fake_conn
+    fake_conn.__exit__ = lambda s, *a: False
+    with patch("karaoke.localcache.connect", return_value=fake_conn), \
+         patch("karaoke.postprocess_worker._get_cached_audio_path", return_value=None):
+        res = ctrl.get("/api/line-looper/media/42?media_type=audio")
+    assert res.status_code == 404
+    assert "process this track first" in res.json()["detail"]
+
+
+def test_line_looper_media_serves_cached_file(ctrl, tmp_path):
+    audio_file = tmp_path / "abc123.webm"
+    audio_file.write_bytes(b"fake audio bytes")
+    fake_conn = MagicMock()
+    fake_cur = MagicMock()
+    fake_cur.fetchone.return_value = {"url": "https://www.youtube.com/watch?v=abc123"}
+    fake_conn.cursor.return_value = fake_cur
+    fake_conn.__enter__ = lambda s: fake_conn
+    fake_conn.__exit__ = lambda s, *a: False
+    with patch("karaoke.localcache.connect", return_value=fake_conn), \
+         patch("karaoke.postprocess_worker._get_cached_audio_path", return_value=audio_file):
+        res = ctrl.get("/api/line-looper/media/42?media_type=audio")
+    assert res.status_code == 200
+    assert res.content == b"fake audio bytes"
+
+
 # -- mood images & feeling images -----------------------------------------
 
 def test_mood_feeling_image_serves_extended_feelings(ctrl):

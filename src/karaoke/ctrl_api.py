@@ -520,6 +520,70 @@ def record_track_audio(recording_id: int, index: int):
                         filename=path.name)
 
 
+@app.get("/api/line-looper/media/{track_id}")
+def line_looper_media(track_id: int, media_type: str = Query("audio")):
+    """Serve the locally cached audio/video file for a track (Backstage's Line Looper).
+
+    Not proxied through the dashboard: the browser's <audio>/<video> element
+    loads this directly cross-port (same-origin rules don't apply to media
+    elements), so Range requests -- needed for seeking/looping -- go
+    straight to Starlette's FileResponse instead of through an extra hop.
+
+    404s with a clear message rather than attempting a download: this tool
+    corrects an existing estimate, it does not fetch new audio.
+    """
+    from fastapi.responses import FileResponse
+    from . import localcache
+    from .postprocess_worker import _get_cached_audio_path
+
+    with localcache.connect() as conn:
+        cur = conn.cursor()
+        # Audio mode prefers the youtube_music (audio-oriented) source;
+        # video mode prefers the plain youtube (official video-style)
+        # source -- the same kind-preference _best_source_url_for_track
+        # already uses, just inverted for video, since these are exactly
+        # the two source kinds AV-sync treats as separate audio/video
+        # counterparts.
+        if media_type == "video":
+            order_sql = """
+                CASE
+                    WHEN s.kind = 'youtube' THEN 0
+                    WHEN s.kind = 'youtube_video' THEN 0
+                    WHEN s.kind = 'youtube_music' THEN 1
+                    ELSE 2
+                END, s.source_id
+            """
+        else:
+            order_sql = """
+                CASE
+                    WHEN s.kind = 'youtube_music' THEN 0
+                    WHEN s.kind = 'youtube' THEN 1
+                    ELSE 2
+                END, s.source_id
+            """
+        cur.execute(
+            f"""
+            SELECT s.url FROM sources s
+            WHERE s.track_id = %s AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music')
+                                        OR s.url LIKE '%%youtube.com/watch%%')
+            ORDER BY {order_sql}
+            LIMIT 1
+            """,
+            (track_id,),
+        )
+        row = cur.fetchone()
+    if not row or not row["url"]:
+        raise HTTPException(status_code=404, detail="No known source URL for this track")
+
+    path = _get_cached_audio_path(row["url"])
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Not cached locally yet -- process this track first, then retry",
+        )
+    return FileResponse(path, filename=path.name)
+
+
 @app.get("/recordings/{recording_id}/tracks/{index}")
 def record_track_page(recording_id: int, index: int):
     """A page that plays one recorded track, and names it to the desktop.

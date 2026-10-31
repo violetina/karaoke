@@ -296,13 +296,101 @@
       <button @click="runTrackAction('reprocess')">🔁 Reprocess (force all)</button>
       <button @click="runTrackAction('whisper')">🗣️ Try Whisper</button>
       <button @click="runTrackAction('av-sync')">🎬 A-V Sync</button>
+      <button @click="openLineLooper(contextMenu.track)">🎯 Line Looper (fix word sync)</button>
     </div>
     <div v-if="actionMsg" class="bs-toast">{{ actionMsg }}</div>
+
+    <!-- Line Looper modal -->
+    <div v-if="looper.open" class="bs-modal-overlay" @click.self="closeLineLooper">
+      <div class="bs-modal">
+        <div class="bs-modal-header">
+          <span class="bs-card-title">🎯 Line Looper — {{ looper.track?.artist }} — {{ looper.track?.title }}</span>
+          <button class="bs-mini-btn" @click="closeLineLooper">✕</button>
+        </div>
+
+        <div v-if="!looper.hasLocalFile" class="bs-empty">
+          No locally cached {{ looper.mediaType }} file for this track yet — Process it first, then reopen.
+        </div>
+        <template v-else>
+          <div class="bs-browse-controls">
+            <select class="bs-select" v-model="looper.mediaType" @change="loadLooperTrack">
+              <option value="audio">🎧 Audio</option>
+              <option value="video">🎬 Video</option>
+            </select>
+            <select class="bs-select" v-model.number="looper.lineIndex" @change="selectLooperLine">
+              <option v-for="l in looper.lines" :key="l.index" :value="l.index">
+                [{{ l.start.toFixed(2) }}s] {{ l.text }}
+              </option>
+            </select>
+          </div>
+
+          <audio v-if="looper.mediaType === 'audio'" ref="looperMediaEl" :src="looperMediaUrl"
+                 @timeupdate="onLooperTimeUpdate"></audio>
+          <video v-else ref="looperMediaEl" :src="looperMediaUrl" class="bs-looper-video"
+                 @timeupdate="onLooperTimeUpdate"></video>
+
+          <div class="bs-looper-line-preview">{{ looper.words.join(' ') }}</div>
+
+          <div class="bs-looper-stage" v-if="looper.stage === 'nudge'">
+            <div class="bs-stat-row">
+              <span>Loop start</span><span class="bs-stat-value">{{ looper.loopStart.toFixed(3) }}s</span>
+            </div>
+            <div class="bs-actions">
+              <button class="bs-btn" @click="nudge(-0.5)">« -500ms</button>
+              <button class="bs-btn" @click="nudge(-0.05)">‹ -50ms</button>
+              <button class="bs-btn" :class="{ active: looper.looping }" @click="toggleLoop">
+                {{ looper.looping ? '⏸ Pause loop' : '▶ Loop from here' }}
+              </button>
+              <button class="bs-btn" @click="nudge(0.05)">+50ms ›</button>
+              <button class="bs-btn" @click="nudge(0.5)">+500ms »</button>
+            </div>
+            <div class="bs-actions">
+              <button class="bs-btn active" @click="confirmStart">✓ Start is right — play line</button>
+            </div>
+          </div>
+
+          <div class="bs-looper-stage" v-if="looper.stage === 'listen'">
+            <div class="bs-empty">Playing the line through once. Click (or press Enter) the instant you hear the last word.</div>
+            <div class="bs-actions">
+              <button class="bs-btn active" @click="confirmEnd" @keyup.enter="confirmEnd" tabindex="0">
+                ⏎ Last word now
+              </button>
+              <button class="bs-btn warn" @click="backToNudge">« Back / nudge again</button>
+            </div>
+          </div>
+
+          <div class="bs-looper-stage" v-if="looper.stage === 'review'">
+            <div class="bs-stat-row">
+              <span>Confirmed start</span><span class="bs-stat-value">{{ looper.confirmedStart.toFixed(3) }}s</span>
+            </div>
+            <div class="bs-stat-row">
+              <span>Confirmed last word</span><span class="bs-stat-value">{{ looper.confirmedEnd.toFixed(3) }}s</span>
+            </div>
+            <table class="bs-table">
+              <thead><tr><th>Word</th><th>Calculated time</th></tr></thead>
+              <tbody>
+                <tr v-for="(w, i) in looper.words" :key="i">
+                  <td>{{ w }}</td>
+                  <td class="bs-mono">{{ looper.wordTimes[i]?.toFixed(3) }}s</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="bs-actions">
+              <button class="bs-btn active" @click="saveLineLooper" :disabled="looper.saving">
+                {{ looper.saving ? 'Saving…' : '💾 Save corrected line' }}
+              </button>
+              <button class="bs-btn warn" @click="backToNudge">« Redo</button>
+            </div>
+          </div>
+        </template>
+        <div v-if="looper.msg" class="bs-empty">{{ looper.msg }}</div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const workers = ref({})
 const clients = ref({})
@@ -582,6 +670,208 @@ const runTrackAction = async (action) => {
   }
 }
 
+// -- Line Looper (manual loop-and-confirm word-sync correction) -----------
+
+const looper = ref({
+  open: false,
+  track: null,
+  mediaType: 'audio',
+  hasLocalFile: false,
+  lines: [],
+  lineIndex: null,
+  words: [],
+  bpm: null,
+  stage: 'nudge',   // nudge -> listen -> review
+  loopStart: 0,
+  clipLen: 4,
+  looping: false,
+  confirmedStart: 0,
+  confirmedEnd: 0,
+  wordTimes: [],
+  saving: false,
+  msg: '',
+})
+const looperMediaEl = ref(null)
+
+const looperMediaUrl = computed(() => {
+  if (!looper.value.track) return ''
+  return `http://127.0.0.1:8765/api/line-looper/media/${looper.value.track.track_id}?media_type=${looper.value.mediaType}`
+})
+
+const closeContextMenuOnly = () => { contextMenu.value.visible = false }
+
+const openLineLooper = (track) => {
+  closeContextMenuOnly()
+  if (!track) return
+  looper.value = {
+    open: true, track, mediaType: 'audio', hasLocalFile: false,
+    lines: [], lineIndex: null, words: [], bpm: null, stage: 'nudge',
+    loopStart: 0, clipLen: 4, looping: false, confirmedStart: 0, confirmedEnd: 0,
+    wordTimes: [], saving: false, msg: '',
+  }
+  loadLooperTrack()
+}
+
+const closeLineLooper = () => {
+  if (looperMediaEl.value) looperMediaEl.value.pause()
+  looper.value.open = false
+}
+
+const loadLooperTrack = async () => {
+  if (!looper.value.track) return
+  looper.value.msg = ''
+  try {
+    const res = await fetch(
+      `/api/backstage/line-looper/track/${looper.value.track.track_id}?media_type=${looper.value.mediaType}`
+    )
+    const data = await res.json()
+    if (data.status !== 'ok') {
+      looper.value.msg = data.message || 'No synced lyrics for this track/mode.'
+      looper.value.lines = []
+      return
+    }
+    looper.value.lines = data.lines || []
+    looper.value.bpm = data.bpm
+    looper.value.hasLocalFile = !!data.has_local_file
+    if (looper.value.lines.length) {
+      looper.value.lineIndex = looper.value.lines[0].index
+      selectLooperLine()
+    }
+  } catch (e) {
+    looper.value.msg = 'Failed to load track data.'
+  }
+}
+
+const selectLooperLine = () => {
+  const line = looper.value.lines.find((l) => l.index === looper.value.lineIndex)
+  if (!line) return
+  looper.value.words = line.words
+  looper.value.loopStart = line.start
+  const next = looper.value.lines.find((l) => l.index === looper.value.lineIndex + 1)
+  looper.value.clipLen = next ? Math.min(8, Math.max(1.5, next.start - line.start)) : 4
+  looper.value.stage = 'nudge'
+  looper.value.looping = false
+  if (looperMediaEl.value) looperMediaEl.value.pause()
+}
+
+const nudge = (delta) => {
+  looper.value.loopStart = Math.max(0, looper.value.loopStart + delta)
+  if (looper.value.looping && looperMediaEl.value) {
+    looperMediaEl.value.currentTime = looper.value.loopStart
+  }
+}
+
+const toggleLoop = () => {
+  const el = looperMediaEl.value
+  if (!el) return
+  if (looper.value.looping) {
+    el.pause()
+    looper.value.looping = false
+  } else {
+    el.currentTime = looper.value.loopStart
+    el.play()
+    looper.value.looping = true
+  }
+}
+
+const onLooperTimeUpdate = () => {
+  const el = looperMediaEl.value
+  if (!el) return
+  if (looper.value.stage === 'nudge' && looper.value.looping) {
+    if (el.currentTime >= looper.value.loopStart + looper.value.clipLen) {
+      el.currentTime = looper.value.loopStart
+    }
+  } else if (looper.value.stage === 'listen') {
+    // Safety stop well past the clip so a missed click doesn't play forever.
+    if (el.currentTime >= looper.value.loopStart + looper.value.clipLen + 4) {
+      el.pause()
+    }
+  }
+}
+
+const confirmStart = () => {
+  const el = looperMediaEl.value
+  if (!el) return
+  el.pause()
+  looper.value.looping = false
+  looper.value.confirmedStart = looper.value.loopStart
+  looper.value.stage = 'listen'
+  el.currentTime = looper.value.loopStart
+  el.play()
+}
+
+const confirmEnd = async () => {
+  const el = looperMediaEl.value
+  if (!el) return
+  looper.value.confirmedEnd = el.currentTime
+  el.pause()
+  if (looper.value.confirmedEnd <= looper.value.confirmedStart) {
+    looper.value.msg = 'That was before the confirmed start — try again.'
+    return
+  }
+  looper.value.msg = ''
+  try {
+    const res = await fetch('/api/backstage/line-looper/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        track_id: looper.value.track.track_id,
+        media_type: looper.value.mediaType,
+        old_start: looper.value.lines.find((l) => l.index === looper.value.lineIndex).start,
+        new_start: looper.value.confirmedStart,
+        new_end: looper.value.confirmedEnd,
+        words: looper.value.words,
+        dry_run: true,
+      }),
+    })
+    const data = await res.json()
+    if (data.status === 'ok') {
+      looper.value.wordTimes = data.word_times
+      looper.value.stage = 'review'
+    } else {
+      looper.value.msg = data.message || 'Could not calculate word times.'
+    }
+  } catch (e) {
+    looper.value.msg = 'Could not calculate word times.'
+  }
+}
+
+const backToNudge = () => {
+  if (looperMediaEl.value) looperMediaEl.value.pause()
+  looper.value.looping = false
+  looper.value.stage = 'nudge'
+}
+
+const saveLineLooper = async () => {
+  if (looper.value.saving) return
+  looper.value.saving = true
+  try {
+    const res = await fetch('/api/backstage/line-looper/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        track_id: looper.value.track.track_id,
+        media_type: looper.value.mediaType,
+        old_start: looper.value.lines.find((l) => l.index === looper.value.lineIndex).start,
+        new_start: looper.value.confirmedStart,
+        new_end: looper.value.confirmedEnd,
+        words: looper.value.words,
+        dry_run: false,
+      }),
+    })
+    const data = await res.json()
+    looper.value.msg = data.message || (data.status === 'ok' ? 'Saved.' : 'Save failed.')
+    if (data.status === 'ok') {
+      // Refresh so the just-corrected line's text reflects the new save.
+      await loadLooperTrack()
+    }
+  } catch (e) {
+    looper.value.msg = 'Save failed.'
+  } finally {
+    looper.value.saving = false
+  }
+}
+
 // -- Live captions -----------------------------------------------------
 
 const toggleCaptions = async () => {
@@ -623,14 +913,23 @@ const toggleCaptions = async () => {
 }
 
 let pollTimer = null
+const onLooperKeydown = (ev) => {
+  if (ev.key === 'Enter' && looper.value.open && looper.value.stage === 'listen') {
+    ev.preventDefault()
+    confirmEnd()
+  }
+}
+
 onMounted(() => {
   fetchAll()
   pollTimer = setInterval(fetchAll, 10000)
   window.addEventListener('click', closeContextMenu)
+  window.addEventListener('keydown', onLooperKeydown)
 })
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
   window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('keydown', onLooperKeydown)
   if (captionsSource) captionsSource.close()
 })
 </script>
@@ -939,5 +1238,57 @@ onBeforeUnmount(() => {
 .bs-captions-log {
   font-size: 0.9rem;
   font-family: inherit;
+}
+
+.bs-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+}
+
+.bs-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--accent-cyan);
+  border-radius: 14px;
+  padding: 18px 20px;
+  width: min(640px, 92vw);
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.bs-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+}
+
+.bs-looper-video {
+  width: 100%;
+  max-height: 260px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: #000;
+}
+
+.bs-looper-line-preview {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #e2e8f0;
+  padding: 8px 0;
+  text-align: center;
+}
+
+.bs-looper-stage {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
 }
 </style>
