@@ -2,7 +2,18 @@
   <div class="playlists-card">
     <div class="pl-header">
       <span class="pl-title">🎶 PLAYLISTS</span>
-      <span class="pl-count" v-if="playlists.length">{{ playlists.length }}</span>
+      <div class="pl-header-actions">
+        <button
+          class="pl-keepgoing"
+          :class="{ active: autopilot }"
+          @click="toggleAutopilot"
+          :disabled="autopilotBusy"
+          title="Keep going: auto-add 5 fitting tracks as the queue nears its end"
+        >
+          {{ autopilotBusy ? '…' : (autopilot ? '🔁 Keep going: On' : '🔁 Keep going') }}
+        </button>
+        <span class="pl-count" v-if="playlists.length">{{ playlists.length }}</span>
+      </div>
     </div>
 
     <div v-if="loading" class="pl-loading">⏳ Loading playlists…</div>
@@ -29,13 +40,48 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 
 defineEmits(['explore-playlist'])
 
 const playlists = ref([])
 const loading = ref(true)
 const playingId = ref(null)
+
+// Shared with QueuePanel's "Keep going" toggle -- same global autopilot
+// state (/api/queue/autopilot), surfaced here too so playing a playlist from
+// this list doesn't require switching panels to turn it on.
+const autopilot = ref(false)
+const autopilotBusy = ref(false)
+let autopilotTimer = null
+
+const checkAutopilotStatus = async () => {
+  try {
+    const res = await fetch('/api/follow')
+    if (res.ok) autopilot.value = !!(await res.json()).autopilot
+  } catch (e) {
+    // ignore transient errors
+  }
+}
+
+const toggleAutopilot = async () => {
+  if (autopilotBusy.value) return
+  autopilotBusy.value = true
+  const target = !autopilot.value
+  try {
+    const res = await fetch('/api/queue/autopilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: target }),
+    })
+    if (res.ok) autopilot.value = !!(await res.json()).autopilot
+    else await checkAutopilotStatus()
+  } catch (e) {
+    await checkAutopilotStatus()
+  } finally {
+    autopilotBusy.value = false
+  }
+}
 
 const fetchPlaylists = async () => {
   loading.value = true
@@ -70,7 +116,14 @@ const playPlaylist = async (pl) => {
   }
 }
 
-onMounted(fetchPlaylists)
+onMounted(() => {
+  fetchPlaylists()
+  checkAutopilotStatus()
+  autopilotTimer = setInterval(checkAutopilotStatus, 5000)
+})
+onBeforeUnmount(() => {
+  if (autopilotTimer) clearInterval(autopilotTimer)
+})
 </script>
 
 <style scoped>
@@ -101,6 +154,40 @@ onMounted(fetchPlaylists)
   font-weight: 800;
   letter-spacing: 0.06em;
   color: var(--accent-gold);
+}
+
+.pl-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pl-keepgoing {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text-primary, #fff);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pl-keepgoing:hover:not(:disabled) {
+  border-color: var(--accent-gold);
+}
+
+.pl-keepgoing.active {
+  background: var(--accent-gold);
+  border-color: var(--accent-gold);
+  color: #2a1e00;
+}
+
+.pl-keepgoing:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .pl-count {
