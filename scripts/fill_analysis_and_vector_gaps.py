@@ -74,8 +74,13 @@ def _run():
         all_gap_track_ids = list(set([t["track_id"] for t in missing_analysis + missing_genre]))
         playlist_items = []
         if all_gap_track_ids:
-            placeholders = ",".join("?" * len(all_gap_track_ids))
-            cur.execute(f"SELECT track_id, artist, title FROM tracks WHERE track_id IN ({placeholders})", all_gap_track_ids)
+            # psycopg/Postgres, not sqlite3: a single ANY(%s) over the list
+            # takes one parameter regardless of list length, so it can't
+            # drift out of sync with a hand-built placeholder string.
+            cur.execute(
+                "SELECT track_id, artist, title FROM tracks WHERE track_id = ANY(%s)",
+                (all_gap_track_ids,),
+            )
             for r in cur.fetchall():
                 playlist_items.append({"track_id": r["track_id"], "artist": r["artist"], "title": r["title"]})
 

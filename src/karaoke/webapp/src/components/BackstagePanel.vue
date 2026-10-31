@@ -228,7 +228,16 @@
             <option value="">— choose a playlist —</option>
             <option v-for="p in playlists" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
           </select>
+          <button
+            v-if="browseMode === 'playlist' && browsePlaylistId"
+            class="bs-btn"
+            @click="bulkProcessPlaylist"
+            :disabled="bulkProcessBusy"
+          >
+            {{ bulkProcessBusy ? 'Queuing…' : '📦 Bulk Process This Playlist' }}
+          </button>
         </div>
+        <div v-if="bulkProcessMsg" class="bs-empty">{{ bulkProcessMsg }}</div>
         <table class="bs-table" v-if="browseTracks.length">
           <thead>
             <tr><th>Artist / Title</th><th>Genre</th><th>Synced</th></tr>
@@ -248,6 +257,31 @@
         </table>
         <div v-else class="bs-empty">
           {{ browseMode === 'library' ? 'Type to search the library.' : 'Pick a playlist to browse its tracks.' }}
+        </div>
+      </div>
+
+      <!-- Library gap-fill (wires scripts/fill_analysis_and_vector_gaps.py) -->
+      <div class="bs-card bs-card-wide">
+        <div class="bs-card-header">
+          <span class="bs-card-title">🧩 Fill Missing Vectors / Analysis (library-wide)</span>
+          <button class="bs-mini-btn" @click="fetchGapFillStatus" title="Refresh">↻</button>
+        </div>
+        <div class="bs-stat-row">
+          <span>Status</span>
+          <span class="bs-pill" :class="{ ok: gapFill.running }">{{ gapFill.running ? 'running' : 'idle' }}</span>
+        </div>
+        <div class="bs-actions">
+          <button class="bs-btn active" @click="startGapFill" :disabled="gapFill.running || gapFillBusy">
+            {{ gapFillBusy ? '…' : '▶ Start Gap-Fill' }}
+          </button>
+          <button class="bs-btn warn" @click="stopGapFill" :disabled="!gapFill.running || gapFillBusy">⏹ Stop</button>
+        </div>
+        <div class="bs-log" v-if="gapFill.logTail.length">
+          <div v-for="(l, i) in gapFill.logTail" :key="i" class="bs-log-line">{{ l }}</div>
+        </div>
+        <div v-else class="bs-empty">
+          Scans the whole library for missing Key/BPM, genre/CLAP labels and vectors, then rebuilds the
+          OpenSearch index. Can take minutes to hours — runs as a background systemd unit, safe to close this page.
         </div>
       </div>
 
@@ -418,6 +452,12 @@ const playlists = ref([])
 const contextMenu = ref({ visible: false, x: 0, y: 0, track: null })
 const actionMsg = ref('')
 let actionMsgTimer = null
+const bulkProcessBusy = ref(false)
+const bulkProcessMsg = ref('')
+
+// -- Library gap-fill state --
+const gapFill = ref({ running: false, logTail: [] })
+const gapFillBusy = ref(false)
 
 // -- Live captions state --
 const captionModel = ref('faster-whisper-small')
@@ -587,6 +627,7 @@ const fetchAll = () => {
   fetchStagingQueue()
   fetchEvents()
   fetchErrorLogs()
+  fetchGapFillStatus()
 }
 
 // -- Library / playlist browse --------------------------------------------
@@ -629,6 +670,62 @@ const fetchPlaylistTracks = async () => {
     const res = await fetch(`/api/backstage/playlists/${encodeURIComponent(browsePlaylistId.value)}/tracks`)
     if (res.ok) browseTracks.value = (await res.json()).tracks || []
   } catch (e) { /* ignore */ }
+}
+
+const bulkProcessPlaylist = async () => {
+  if (!browsePlaylistId.value || bulkProcessBusy.value) return
+  bulkProcessBusy.value = true
+  bulkProcessMsg.value = ''
+  try {
+    const res = await fetch(
+      `/api/backstage/playlists/${encodeURIComponent(browsePlaylistId.value)}/bulk-process`,
+      { method: 'POST' },
+    )
+    const data = await res.json()
+    bulkProcessMsg.value = data.message || (data.status === 'ok' ? 'Done.' : 'Failed.')
+  } catch (e) {
+    bulkProcessMsg.value = 'Bulk process failed.'
+  } finally {
+    bulkProcessBusy.value = false
+  }
+}
+
+// -- Library gap-fill -------------------------------------------------
+
+const fetchGapFillStatus = async () => {
+  try {
+    const res = await fetch('/api/backstage/gap-fill/status?lines=20')
+    if (res.ok) {
+      const data = await res.json()
+      gapFill.value = { running: !!data.running, logTail: data.log_tail || [] }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+const startGapFill = async () => {
+  if (gapFillBusy.value) return
+  gapFillBusy.value = true
+  try {
+    const res = await fetch('/api/backstage/gap-fill/start', { method: 'POST' })
+    const data = await res.json()
+    if (data.status !== 'ok') showActionMsg(`Gap-fill: ${data.error || 'failed to start'}`)
+    await fetchGapFillStatus()
+  } catch (e) {
+    showActionMsg('Gap-fill: failed to start')
+  } finally {
+    gapFillBusy.value = false
+  }
+}
+
+const stopGapFill = async () => {
+  if (gapFillBusy.value) return
+  gapFillBusy.value = true
+  try {
+    await fetch('/api/backstage/gap-fill/stop', { method: 'POST' })
+    await fetchGapFillStatus()
+  } catch (e) { /* ignore */ } finally {
+    gapFillBusy.value = false
+  }
 }
 
 // -- Right-click context menu + track actions ------------------------------

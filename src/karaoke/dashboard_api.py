@@ -1815,6 +1815,135 @@ async def backstage_line_looper_save(body: LineLooperSavePayload):
         return {"status": "error", "error": str(e)}
 
 
+# -- Bulk playlist processing (wires scripts/enqueue_playlists.py) ---------
+
+@app.post("/api/backstage/playlists/{playlist_id}/bulk-process")
+async def backstage_bulk_process_playlist(playlist_id: str, limit: Optional[int] = Query(None, ge=1)):
+    """Fully post-process every track in a saved playlist.
+
+    Wires in scripts/enqueue_playlists.py's own logic directly (cheap: it
+    only enqueues Celery tasks, the same publish_postprocess_task calls the
+    existing /api/song/process handler uses) rather than shelling out --
+    there is nothing here that needs its own process.
+    """
+    import anyio
+    from . import localcache
+    from .postprocess_queue import needs_postprocessing, publish_postprocess_task
+    from scripts.enqueue_playlists import playlist_tracks
+
+    def work():
+        with localcache.connect() as conn:
+            rows = playlist_tracks(conn, playlist_id)
+            queued = complete = failed = 0
+            for row in rows:
+                if limit is not None and queued >= limit:
+                    break
+                pending = needs_postprocessing(row["track_id"], conn)
+                if not pending:
+                    complete += 1
+                    continue
+                if publish_postprocess_task(row["artist"], row["title"], row["url"],
+                                            include_timings=True, full=True):
+                    queued += 1
+                else:
+                    failed += 1
+            return {
+                "status": "ok", "total": len(rows), "queued": queued,
+                "already_complete": complete, "failed": failed,
+                "message": f"Queued {queued}; {complete} already complete; {failed} failed to publish.",
+            }
+
+    try:
+        return await anyio.to_thread.run_sync(work)
+    except Exception as e:
+        _log.warning("backstage_bulk_process_playlist failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+# -- Library gap-fill (wires scripts/fill_analysis_and_vector_gaps.py) -----
+#
+# Unlike the playlist bulk-process above, this one runs CLAP genre
+# classification and a full OpenSearch vector rebuild synchronously inline
+# -- it can take minutes to hours on a large library and already guards
+# itself with its own ProcessLock. It is launched as a transient systemd
+# user unit (not a bare subprocess) so it survives the dashboard restarting,
+# is visible/stoppable via systemctl like every other long-running piece of
+# this project, and its own stdout progress lines land in the journal for
+# free -- the same way /api/backstage/logs/errors already reads one.
+
+_GAP_FILL_UNIT = "karaoke-backstage-gapfill"
+
+
+@app.post("/api/backstage/gap-fill/start")
+async def backstage_gap_fill_start():
+    def work():
+        venv_python = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".venv", "bin", "python")
+        if not os.path.isfile(venv_python):
+            venv_python = "python3"
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        result = subprocess.run(
+            [
+                "systemd-run", "--user", f"--unit={_GAP_FILL_UNIT}", "--collect",
+                f"--working-directory={repo_root}",
+                f"--setenv=PYTHONPATH={os.path.join(repo_root, 'src')}",
+                venv_python, "scripts/fill_analysis_and_vector_gaps.py",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {"status": "error", "error": result.stderr.strip() or "systemd-run failed"}
+        return {"status": "ok", "message": "Gap-fill started in the background", "unit": _GAP_FILL_UNIT}
+
+    try:
+        return await asyncio.to_thread(work)
+    except Exception as e:
+        _log.warning("backstage_gap_fill_start failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/backstage/gap-fill/status")
+async def backstage_gap_fill_status(lines: int = Query(20, ge=1, le=200)):
+    def work():
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", _GAP_FILL_UNIT],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = active.stdout.strip() == "active"
+        log_tail: list[str] = []
+        try:
+            journal = subprocess.run(
+                ["journalctl", "--user", "-u", _GAP_FILL_UNIT, "-n", str(lines), "--no-pager", "-o", "cat"],
+                capture_output=True, text=True, timeout=5,
+            )
+            log_tail = [l for l in journal.stdout.splitlines() if l.strip()]
+        except Exception:
+            pass
+        return {"status": "ok", "running": running, "log_tail": log_tail}
+
+    try:
+        return await asyncio.to_thread(work)
+    except Exception as e:
+        _log.warning("backstage_gap_fill_status failed: %s", e)
+        return {"status": "error", "error": str(e), "running": False, "log_tail": []}
+
+
+@app.post("/api/backstage/gap-fill/stop")
+async def backstage_gap_fill_stop():
+    def work():
+        result = subprocess.run(
+            ["systemctl", "--user", "stop", _GAP_FILL_UNIT],
+            capture_output=True, text=True, timeout=10,
+        )
+        return {"status": "ok" if result.returncode == 0 else "error",
+                "message": "Gap-fill stopped" if result.returncode == 0 else result.stderr.strip()}
+
+    try:
+        return await asyncio.to_thread(work)
+    except Exception as e:
+        _log.warning("backstage_gap_fill_stop failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Static frontend delivery
 # ---------------------------------------------------------------------------
