@@ -186,6 +186,9 @@ def transcribe_to_lrc(
     compute_type: str = "int8",
     vad_filter: bool = False,
     temperature: Optional[Any] = None,
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    album: Optional[str] = None,
 ) -> str:
     """Transcribe an audio file to LRC text using faster-whisper.
 
@@ -193,7 +196,11 @@ def transcribe_to_lrc(
     post-hoc dedup pass drops adjacent repeats, and
     :mod:`karaoke.whisper_clean` removes artifacts and runaway repetition --
     this path is used when nothing else has the words, so nothing else will
-    catch them. Returns an LRC string (may be empty).
+    catch them. When ``artist``/``title``/``album`` are given, a leading run
+    of lines that just speaks the track's own metadata (some audio files open
+    with a spoken promo announcement before the song starts) is dropped too
+    -- see :func:`karaoke.whisper_clean.drop_spoken_metadata_intro`. Returns
+    an LRC string (may be empty).
     """
     words = transcribe_to_words(
         audio_path, text=text, model_size=model_size, language=language,
@@ -204,8 +211,9 @@ def transcribe_to_lrc(
     # them against, so the artifacts have to be filtered on their own terms:
     # note glyphs over instrumentals, bracketed stage directions, and the same
     # phrase repeated past anything a chorus does.
-    from .whisper_clean import is_artifact, drop_runaway_repeats
+    from .whisper_clean import is_artifact, drop_runaway_repeats, drop_spoken_metadata_intro
 
+    lines = drop_spoken_metadata_intro(lines, artist=artist, title=title, album=album)
     kept = [(t, txt) for t, txt in lines if not is_artifact(txt)]
     texts = drop_runaway_repeats([txt for _, txt in kept])
     remaining = list(texts)

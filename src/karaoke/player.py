@@ -282,7 +282,7 @@ def get_synced(
                                       total_duration=duration)
             plain_out, source = known_good, "whisper_aligned"
         else:
-            lrc = transcribe_to_lrc(audio_path)
+            lrc = transcribe_to_lrc(audio_path, artist=artist, title=title, album=album)
             plain_out = "\n".join(t for _, t in parse_lrc(lrc))
             source = "whisper"
 
@@ -325,7 +325,7 @@ def get_synced(
         try:
             from .whisper_sync import transcribe_to_lrc
 
-            lrc = transcribe_to_lrc(audio_path)
+            lrc = transcribe_to_lrc(audio_path, artist=artist, title=title, album=album)
             if lrc.strip():
                 ly = Lyrics(
                     plain="\n".join(t for _, t in parse_lrc(lrc)),

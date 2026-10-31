@@ -99,3 +99,53 @@ def test_cleaning_nothing_is_safe():
     assert wc.clean_lines([]) == []
     assert wc.clean_text("") == ""
     assert wc.clean_text(None) == ""
+
+
+# -- spoken metadata intro ------------------------------------------------
+
+def test_drops_spoken_metadata_intro_morphine_case():
+    """The exact live case: a promo-style spoken intro naming artist, album,
+    and title, one per line, before the real lyrics start."""
+    lines = [
+        (4.73, "Morphine"),
+        (5.21, "Like Swimming"),
+        (5.67, "I Know You (Pt. Iii)"),
+        (14.52, "Give me a kiss hello goodbye what's the difference? Just end everything"),
+        (19.73, "You say with a smile Wave goodbye hello"),
+    ]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Morphine", title="I Know You (Pt. III)",
+                                        album="Like Swimming")
+    assert out == lines[3:]
+
+
+def test_keeps_real_lyrics_with_no_metadata_match():
+    lines = [(0.0, "Tonight"), (2.0, "I'm gonna have myself a real good time")]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Queen", title="Don't Stop Me Now")
+    assert out == lines
+
+
+def test_does_not_strip_a_late_coincidental_title_match():
+    """A chorus line that happens to echo the title, well past the intro
+    window, must never be treated as a spoken tag."""
+    lines = [
+        (10.0, "Here's the real opening line"),
+        (45.0, "Don't stop me now"),  # a chorus hit, not an intro
+    ]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Queen", title="Don't Stop Me Now")
+    assert out == lines
+
+
+def test_does_not_strip_when_no_metadata_given():
+    lines = [(0.0, "Morphine"), (1.0, "real line")]
+    assert wc.drop_spoken_metadata_intro(lines) == lines
+
+
+def test_stops_at_first_non_matching_line_even_mid_intro():
+    """Only a genuine, unbroken prefix run is dropped."""
+    lines = [
+        (1.0, "Morphine"),
+        (5.0, "a real opening lyric"),
+        (6.0, "Like Swimming"),  # would match album, but comes after a real line
+    ]
+    out = wc.drop_spoken_metadata_intro(lines, artist="Morphine", album="Like Swimming")
+    assert out == lines[1:]

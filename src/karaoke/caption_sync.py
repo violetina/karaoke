@@ -489,7 +489,9 @@ def _try_whisper_offset(track: dict, audio_lrc: str, video_url: str) -> Optional
     if not video_path:
         return None
     try:
-        video_lrc = transcribe_to_lrc(str(video_path), temperature=0.0)
+        video_lrc = transcribe_to_lrc(str(video_path), temperature=0.0,
+                                      artist=track.get("artist"), title=track.get("title"),
+                                      album=track.get("album"))
     except Exception as exc:
         log.debug("whisper av-sync: transcription failed for track %s: %s",
                  track.get("track_id"), exc)
