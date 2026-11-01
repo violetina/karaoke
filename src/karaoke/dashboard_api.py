@@ -1459,7 +1459,7 @@ class ChatRequest(BaseModel):
     current_title: Optional[str] = None
 
 
-def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
+def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str = "") -> str:
     """Build the AI DJ system prompt.
 
     The booth must never recommend the song already on stage. A small local
@@ -1477,14 +1477,25 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         
         # Look up actual tracks so the model has guaranteed valid options
         c = conn.cursor()
-        c.execute("SELECT artist, title FROM tracks ORDER BY RANDOM() LIMIT 7")
+        c.execute("SELECT artist, title FROM tracks ORDER BY RANDOM() LIMIT 5")
         sample_tracks = [f"'{dict(r)['artist']} - {dict(r)['title']}'" for r in c.fetchall()]
         track_hint = f"To guarantee you suggest a real song, here are some valid songs in the library right now: {', '.join(sample_tracks)}." if sample_tracks else ""
+        
+        # Fetch smart playlists to give the DJ thematic awareness
+        c.execute("SELECT name FROM saved_playlists WHERE playlist_id LIKE 'smart:%' ORDER BY RANDOM() LIMIT 5")
+        sample_playlists = [dict(r)["name"] for r in c.fetchall()]
+        playlist_hint = f"We have these themed smart playlists ready: {', '.join(sample_playlists)}." if sample_playlists else ""
 
     playback_status = (
         f"The track currently on stage is '{now_title}' by {now_artist}. It is ALREADY PLAYING: never suggest, "
         f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track."
     ) if now_artist else "There is currently NO song playing. You must suggest a song."
+
+    artist_fact_block = (
+        f"\n\nHere are some verified facts about the currently playing artist ({now_artist}) from our database:\n"
+        f"{artist_context}\n"
+        f"You MUST use THESE facts when talking about them. DO NOT invent ANY side projects, band members, or history that is not in this block."
+    ) if artist_context else "\n\nDO NOT invent ANY side projects, band members, or history for artists if you aren't 100% sure of the facts."
 
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
@@ -1495,7 +1506,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
         f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
-        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {track_hint} "
+        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {track_hint} {playlist_hint} "
         f"Do NOT make up song titles based on the user's prompt. "
         f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
         f"If you aren't sure a specific song by a specific artist exists and is in the library, DO NOT output the QUEUE bracket. Just suggest the artist instead. "
@@ -1504,6 +1515,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format. "
         f"Never output a QUEUE or FOCUS bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"{focus_instruction}"
+        f"{artist_fact_block}"
     )
 
 
@@ -1514,7 +1526,36 @@ async def dj_chat_endpoint(body: ChatRequest):
     now_artist = body.current_artist or ""
     now_title = body.current_title or ""
 
-    system_prompt = _dj_chat_system_prompt(now_artist, now_title)
+    artist_context = ""
+    if now_artist:
+        try:
+            import json
+            # We use OpenSearch directly since mcp_server's search_artists might not be available or returns pure markdown
+            from .osclient import client
+            os_c = client()
+            res = os_c.search(
+                index="karaoke-artist-cache",
+                body={
+                    "query": {
+                        "match_phrase": {
+                            "name": now_artist
+                        }
+                    },
+                    "size": 1
+                }
+            )
+            if res["hits"]["hits"]:
+                a = res["hits"]["hits"][0]["_source"]
+                lines = []
+                if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
+                if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
+                if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
+                if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
+                artist_context = "\n".join(lines)
+        except Exception:
+            pass
+
+    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context)
 
     ollama_payload = {
         "model": OLLAMA_MODEL,
@@ -1534,6 +1575,7 @@ async def dj_chat_endpoint(body: ChatRequest):
                         if not chunk:
                             continue
                         try:
+                            import json
                             item = json.loads(chunk)
                             token = item.get("message", {}).get("content", "")
                             full_text += token
