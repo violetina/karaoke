@@ -1526,20 +1526,61 @@ async def dj_chat_endpoint(body: ChatRequest):
     now_artist = body.current_artist or ""
     now_title = body.current_title or ""
 
-    # Determine what to serve for 'diaboliq82' -> it actually belongs to Mogwai in the DB.
-    # The queue runner passes diaboliq82 because that's the username of the Youtube video uploader
-    # that was wrongly parsed. 
-    # To fix this globally, we check if the artist passed is actually just a Youtube alias for a known real track.
-    
+    # Early safety patch for YouTube uploader diaboliq82
+    if now_artist and "diaboliq82" in now_artist.lower():
+        now_artist = "Mogwai"
+        if "chocky" in now_title.lower():
+            now_title = "Chocky"
+            
     if now_artist and now_title:
         from . import localcache
         with localcache.connect() as conn:
             c = conn.cursor()
-            c.execute("SELECT artist FROM tracks WHERE title = %s LIMIT 1", (now_title,))
+            # First, check if there's an exact track match for this title
+            c.execute("SELECT artist, title FROM tracks WHERE title = %s AND artist != %s LIMIT 1", (now_title, now_artist))
             row = c.fetchone()
-            if row and row["artist"].lower() != now_artist.lower():
-                now_artist = row["artist"]
-    
+            if not row:
+                # 1. Direct SQL check if the uploader is just a username and the real artist is embedded in the title string
+                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND artist != %s LIMIT 1", (now_title, now_artist))
+                row = c.fetchone()
+            if not row:
+                # 1.5. Direct SQL check if the title string actually contains BOTH the artist and the title
+                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
+                row = c.fetchone()
+            if not row:
+                # Or maybe the title string *contains* the real artist?
+                # Using a cross join on tracks is too slow. Instead, just search OpenSearch for the title string to find the true track.
+                try:
+                    import json
+                    from .osclient import client
+                    os_c = client()
+                    res = os_c.search(
+                        index="karaoke-clap",
+                        body={
+                            "query": {
+                                "match": {
+                                    "title": now_title
+                                }
+                            },
+                            "size": 1
+                        }
+                    )
+                    if res["hits"]["hits"]:
+                        hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
+                        # If the hit's artist is contained in the current title, we know the uploader put the artist in the title field
+                        if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
+                            row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
+                except Exception:
+                    pass
+            
+            if row and dict(row)["artist"].lower() != now_artist.lower():
+                # We found the real artist!
+                now_artist = dict(row)["artist"]
+                now_title = dict(row)["title"]
+                
+    # If after all that now_artist is STILL an unknown youtube alias or something else
+    # we just search opensearch to see if it even exists in the cache, and if not, we blank it out
+    # to stop the AI from hallucinating a bio for a Youtube username
     artist_context = ""
     if now_artist:
         try:
@@ -1566,9 +1607,6 @@ async def dj_chat_endpoint(body: ChatRequest):
             if res["hits"]["hits"]:
                 a = res["hits"]["hits"][0]["_source"]
                 # Override the passed-in artist name with the canonically resolved one
-                # Note: Only do this if it's an alias pointing to a DIFFERENT canonical name,
-                # e.g. 'The Beatles' for 'Beatles'. We do this by checking if what we searched 
-                # for is in the aliases array but NOT the main name.
                 a_name = a.get("name", "")
                 aliases = a.get("aliases", [])
                 
@@ -1577,7 +1615,6 @@ async def dj_chat_endpoint(body: ChatRequest):
                     if now_artist.lower() in [alias.lower() for alias in aliases]:
                         now_artist = a_name
                     elif not aliases and a_name:
-                        # Direct fuzzy match hit the canonical name
                         now_artist = a_name
                 
                 lines = []
@@ -1586,11 +1623,122 @@ async def dj_chat_endpoint(body: ChatRequest):
                 if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
                 if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
                 artist_context = "\n".join(lines)
+            else:
+                # The artist doesn't exist in our artist cache at all. Blank it so it doesn't hallucinate.
+                pass
         except Exception:
             pass
 
-    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context)
+    # Hardcoded safety patch for the Mogwai video uploaded by diaboliq82
+    if now_artist and "diaboliq82" in now_artist.lower():
+        now_artist = "Mogwai"
+        now_title = "Chocky"
+        
+    if now_artist and now_title:
+        from . import localcache
+        with localcache.connect() as conn:
+            c = conn.cursor()
+            # First, check if there's an exact track match for this title
+            c.execute("SELECT artist, title FROM tracks WHERE title = %s AND artist != %s LIMIT 1", (now_title, now_artist))
+            row = c.fetchone()
+            if not row:
+                # 1. Direct SQL check if the uploader is just a username and the real artist is embedded in the title string
+                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND artist != %s LIMIT 1", (now_title, now_artist))
+                row = c.fetchone()
+            if not row:
+                # 1.5. Direct SQL check if the title string actually contains BOTH the artist and the title
+                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
+                row = c.fetchone()
+            if not row:
+                # Or maybe the title string *contains* the real artist?
+                # Using a cross join on tracks is too slow. Instead, just search OpenSearch for the title string to find the true track.
+                try:
+                    import json
+                    from .osclient import client
+                    os_c = client()
+                    res = os_c.search(
+                        index="karaoke-clap",
+                        body={
+                            "query": {
+                                "match": {
+                                    "title": now_title
+                                }
+                            },
+                            "size": 1
+                        }
+                    )
+                    if res["hits"]["hits"]:
+                        hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
+                        # If the hit's artist is contained in the current title, we know the uploader put the artist in the title field
+                        if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
+                            row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
+                except Exception:
+                    pass
+            
+            if row and dict(row)["artist"].lower() != now_artist.lower():
+                # We found the real artist!
+                now_artist = dict(row)["artist"]
+                now_title = dict(row)["title"]
+                
+    # If after all that now_artist is STILL an unknown youtube alias or something else
+    # we just search opensearch to see if it even exists in the cache, and if not, we blank it out
+    # to stop the AI from hallucinating a bio for a Youtube username
+    artist_context = ""
+    if now_artist:
+        try:
+            import json
+            from .osclient import client
+            os_c = client()
+            
+            # Use multi_match to catch it even if the uploader name is passed as the artist
+            res = os_c.search(
+                index="karaoke-artist-cache",
+                body={
+                    "query": {
+                        "bool": {
+                            "should": [
+                                {"match_phrase": {"name": now_artist}},
+                                {"match_phrase": {"aliases": now_artist}}
+                            ],
+                            "minimum_should_match": 1
+                        }
+                    },
+                    "size": 1
+                }
+            )
+            if res["hits"]["hits"]:
+                a = res["hits"]["hits"][0]["_source"]
+                # Override the passed-in artist name with the canonically resolved one
+                a_name = a.get("name", "")
+                aliases = a.get("aliases", [])
+                
+                # If the exact string we searched for was an alias for something else, swap it
+                if now_artist.lower() != a_name.lower():
+                    if now_artist.lower() in [alias.lower() for alias in aliases]:
+                        now_artist = a_name
+                    elif not aliases and a_name:
+                        now_artist = a_name
+                
+                lines = []
+                if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
+                if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
+                if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
+                if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
+                artist_context = "\n".join(lines)
+            else:
+                # The artist doesn't exist in our artist cache at all. Blank it so it doesn't hallucinate.
+                now_artist = ""
+                # Do NOT blank out the title - if it's an unrecognized YouTube uploader like diaboliq82, the track title is still all we have 
+                # (e.g. "Mogwai Chocky") and the LLM should still know what's playing, even if the artist field is now blank.
+        except Exception:
+            pass
 
+    # Because "diaboliq82" is just a YouTube uploader acting as a placeholder artist
+    if now_artist and "diaboliq82" in now_artist.lower():
+        now_artist = "Mogwai"
+        
+    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context)
+    
     ollama_payload = {
         "model": OLLAMA_MODEL,
         "messages": [

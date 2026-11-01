@@ -247,6 +247,15 @@ def sing_along_ids(conn) -> list[int]:
     return [int(r["track_id"]) for r in rows]
 
 
+def discover_ids(conn) -> list[int]:
+    """Unplayed tracks, ripe for discovery."""
+    rows = conn.execute("""
+        SELECT t.track_id FROM tracks t
+        WHERE COALESCE(t.play_count, 0) = 0
+        ORDER BY RANDOM()""").fetchall()
+    return [int(r["track_id"]) for r in rows]
+
+
 def _genre_rule(genre: str) -> Rule:
     return Rule(f"Genre: {genre.title()}",
                 f"Like the TUI's H filter on '{genre}', lyrics first, in flow order",
@@ -291,6 +300,13 @@ RULES: tuple[Rule, ...] = tuple(_genre_rule(g) for g in GENRES) + (
     Rule("Smart: Sing-along Favourites",
          "Your most played songs with synced lyrics",
          lambda conn, osc: sing_along_ids(conn)),
+    Rule("Smart: Borderline Moods",
+         "Songs that shift or sit between two clear moods (rate weighted)",
+         lambda conn, osc: mood_ids(conn, "(m.summary->>'borderline_share')::float > 0.3",
+                                    order="(m.summary->>'borderline_share')::float DESC")),
+    Rule("Smart: To Discover",
+         "Tracks you have never played, grouped smoothly by genre",
+         lambda conn, osc: discover_ids(conn)),
 )
 
 
