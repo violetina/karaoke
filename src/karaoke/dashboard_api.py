@@ -1011,7 +1011,7 @@ async def queue_song(body: SongActionPayload):
                 if matches:
                     track_id = matches[0].get("track_id")
             if track_id is None:
-                return {"status": "error", "message": "Could not find this song in the library"}
+                return {"status": "error", "message": f"Could not find this song in the library: '{body.query or body.title}'"}
             return collection.enqueue_next(int(track_id), conn)
 
     try:
@@ -1401,20 +1401,23 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
     unless the prompt explicitly rules it out, which is why the DJ booth kept
     offering the song that was already playing.
     """
-    focus_instruction = f"You may output `[FOCUS: The Artist Name]` (using the exact artist name) to show their profile." if now_artist != "Unknown Artist" else ""
+    focus_instruction = f"You may output `[FOCUS: The Artist Name]` (using the exact artist name) to show their profile." if now_artist else ""
+
+    playback_status = (
+        f"The track currently on stage is '{now_title}' by {now_artist}. It is ALREADY PLAYING: never suggest, "
+        f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track."
+    ) if now_artist else "There is currently NO song playing. You must suggest a song."
 
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
-        f"The track currently on stage is '{now_title}' by {now_artist}. "
+        f"{playback_status} "
         f"You have deep knowledge of music history, bands, side-projects, BPM, and Camelot keys. "
         f"Keep answers punchy, entertaining, and brief (2-3 sentences). "
         f"If the user asks about an artist, highlight their story or side-projects. "
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
-        f"The song '{now_title}' by {now_artist} is ALREADY PLAYING: never suggest, "
-        f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track. "
         f"Only if explicitly asked to queue a track, you must output `[QUEUE: Artist - Track Title]` "
-        f"with the exact artist and title (e.g. `[QUEUE: Moby - Porcelain]`). Do not use brackets like [Artist Name]. "
+        f"with the exact artist and title of a real song in our library (e.g. `[QUEUE: Moby - Porcelain]`). Do not use brackets like [Artist Name]. "
         f"{focus_instruction}"
     )
 
@@ -1423,8 +1426,8 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
 async def dj_chat_endpoint(body: ChatRequest):
     """Server-Sent Events streaming chat with local Ollama model."""
     user_msg = body.message.strip()
-    now_artist = body.current_artist or "Unknown Artist"
-    now_title = body.current_title or "Unknown Track"
+    now_artist = body.current_artist or ""
+    now_title = body.current_title or ""
 
     system_prompt = _dj_chat_system_prompt(now_artist, now_title)
 
