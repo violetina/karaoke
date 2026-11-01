@@ -1010,8 +1010,16 @@ async def queue_song(body: SongActionPayload):
                 matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
                 if matches:
                     track_id = matches[0].get("track_id")
+                else:
+                    # Remove quotes from the query if present, as the LLM often wraps the title in quotes
+                    clean_query = body.query.replace('"', '')
+                    if clean_query and clean_query != body.query:
+                        matches = json.loads(search_songs(query=clean_query, limit=1)).get("tracks", [])
+                        if matches:
+                            track_id = matches[0].get("track_id")
+            
             if track_id is None:
-                return {"status": "error", "message": f"Could not find this song in the library: '{body.query or body.title}' (try asking the DJ to search for what we *do* have by that artist)."}
+                return {"status": "error", "message": f"Could not find a song matching '{body.query or body.title}' in the library."}
             return collection.enqueue_next(int(track_id), conn)
 
     try:
@@ -1426,10 +1434,14 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"If the user asks about an artist, highlight their story or side-projects. "
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
-        f"If the user asks you to play or queue a track, you MUST output `[QUEUE: Artist Name - Track Title]` "
-        f"with the exact artist and title of a real song in our library. {artist_hint} "
-        f"Do not guess songs you think we should have. If you aren't sure a song is in the library, DO NOT output the QUEUE bracket. "
+        f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
+        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {artist_hint} "
+        f"Do NOT make up song titles based on the user's prompt (e.g. if asked for a 'lullaby', do NOT invent 'The Beatles - Lullaby'). "
+        f"Only use exact artist and track titles you know to exist in reality. "
+        f"If you aren't sure a song exists and is in the library, DO NOT output the QUEUE bracket. "
         f"Never output a QUEUE bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
+        f"Do not put quotes around the track title inside the QUEUE bracket (e.g. use [QUEUE: Moby - Porcelain] not [QUEUE: Moby - \"Porcelain\"]). "
+        f"Do not write stage directions like *[SPEAKING TO THE KARAOKE NIGHT]* or *(Speaking to the crowd)*. Keep in character naturally without roleplay action tags. "
         f"{focus_instruction}"
     )
 
