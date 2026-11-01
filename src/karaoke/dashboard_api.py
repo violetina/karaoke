@@ -1422,17 +1422,19 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
     unless the prompt explicitly rules it out, which is why the DJ booth kept
     offering the song that was already playing.
     """
-    focus_instruction = f"You may output `[FOCUS: The Artist Name]` (using the exact artist name) to show their profile." if now_artist else ""
+    focus_instruction = f"If you want to pull up an artist's profile on screen, you may output `[FOCUS: The Artist Name]` using their EXACT name." if now_artist else ""
 
     import urllib.parse
     from . import localcache
     with localcache.connect() as conn:
         catalog = localcache.get_all_artist_genres_map(conn)
         available_artists = list(catalog.keys())
-        # Pick 10 random popular artists so the model knows what is actually in the library
-        import random
-        sample_artists = random.sample(available_artists, min(10, len(available_artists))) if available_artists else []
-        artist_hint = f"Some artists actually in this library right now include: {', '.join(sample_artists)}." if sample_artists else ""
+        
+        # Look up actual tracks so the model has guaranteed valid options
+        c = conn.cursor()
+        c.execute("SELECT artist, title FROM tracks ORDER BY RANDOM() LIMIT 7")
+        sample_tracks = [f"'{dict(r)['artist']} - {dict(r)['title']}'" for r in c.fetchall()]
+        track_hint = f"To guarantee you suggest a real song, here are some valid songs in the library right now: {', '.join(sample_tracks)}." if sample_tracks else ""
 
     playback_status = (
         f"The track currently on stage is '{now_title}' by {now_artist}. It is ALREADY PLAYING: never suggest, "
@@ -1448,14 +1450,14 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
         f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
-        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {artist_hint} "
-        f"Do NOT make up song titles based on the user's prompt (e.g. if asked for a 'lullaby' or 'peaceful song', do NOT invent 'The Beatles - Lullaby' or 'Little Fears - Peaceful Days'). "
-        f"Only use exact artist and track titles you know to exist in reality. "
-        f"If you aren't sure a song exists and is in the library, DO NOT output the QUEUE bracket. "
-        f"Never output a QUEUE bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
-        f"Do not put quotes around the track title inside the QUEUE bracket (e.g. use [QUEUE: Moby - Porcelain] not [QUEUE: Moby - \"Porcelain\"]). "
+        f"Only if explicitly asked to queue a track, you must output `[QUEUE: Artist - Track Title]` "
+        f"with a real song in our library. {track_hint} "
+        f"Do NOT make up song titles based on the user's prompt. "
+        f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
+        f"If you aren't sure a specific song by a specific artist exists and is in the library, DO NOT output the QUEUE bracket. Just suggest the artist instead. "
         f"Do not write stage directions like *[SPEAKING TO THE KARAOKE NIGHT]* or *(Speaking to the crowd)*. Keep in character naturally without roleplay action tags. "
-        f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format."
+        f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format. "
+        f"Never output a QUEUE or FOCUS bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"{focus_instruction}"
     )
 
@@ -1500,7 +1502,7 @@ async def dj_chat_endpoint(body: ChatRequest):
                                     yield {"event": "action", "data": json.dumps({"action": "focus_artist", "artist": target_artist})}
                                 queue_match = re.search(r"\[QUEUE:\s*([^\]]+)\]", full_text)
                                 if queue_match:
-                                    target_track = queue_match.group(1).strip()
+                                    target_track = queue_match.group(1).replace('"', '').replace("'", "").strip()
                                     yield {"event": "action", "data": json.dumps({"action": "queue_suggestion", "track": target_track})}
                                 yield {"event": "done", "data": json.dumps({"status": "complete"})}
                         except json.JSONDecodeError:
