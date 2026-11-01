@@ -232,5 +232,5 @@ def test_notes_are_not_indexed_unless_asked(conn):
     """Lyric search is the primary use; notes must not dilute it by default."""
     import inspect
 
-    sig = inspect.signature(vector_index.rebuild_from_sqlite)
+    sig = inspect.signature(vector_index.rebuild_from_db)
     assert sig.parameters["include_notes"].default is False

@@ -128,13 +128,13 @@ def main() -> int:
 
             if newly_ingested_ids:
                 write(f"Targeted vector indexing for {len(newly_ingested_ids)} tracks...")
-                result = vector_index.rebuild_from_sqlite(
+                result = vector_index.rebuild_from_db(
                     track_ids=newly_ingested_ids,
                     embed=True,
                     include_lines=True,
                 )
             else:
-                result = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                result = vector_index.rebuild_from_db(embed=True, include_lines=True)
             write(
                 f"VECTOR REBUILD COMPLETE indexed={result.indexed} "
                 f"line_docs={result.line_docs} note_docs={result.note_docs}"

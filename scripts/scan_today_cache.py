@@ -63,6 +63,6 @@ print(f" Sourced:    {stats.get('sourced')}", flush=True)
 print(f" Errors:     {stats.get('errors')}", flush=True)
 
 print("\nRebuilding OpenSearch vectors ...", flush=True)
-st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+st = vector_index.rebuild_from_db(embed=True, include_lines=True)
 print(f"Vector index updated: {st.indexed} tracks, {st.line_docs} line docs", flush=True)
 print("ALL DONE", flush=True)

@@ -74,7 +74,7 @@ try:
     )
 
     write("VECTOR REBUILD BEGIN")
-    result = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+    result = vector_index.rebuild_from_db(embed=True, include_lines=True)
     write(f"VECTOR REBUILD COMPLETE indexed={result.indexed} line_docs={result.line_docs} note_docs={result.note_docs}")
     write("ALL DONE")
 except Exception as exc:

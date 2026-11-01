@@ -89,12 +89,12 @@ def test_build_track_doc_from_sqlite(tmp_path):
     assert "lyrics_vector" not in doc
 
 
-def test_rebuild_from_sqlite_indexes_tracks_and_lines(tmp_path):
+def test_rebuild_from_db_indexes_tracks_and_lines(tmp_path):
     db = tmp_path / "karaoke.db"
     _seed_db(db)
     fake = FakeOpenSearch()
 
-    stats = vector_index.rebuild_from_sqlite(
+    stats = vector_index.rebuild_from_db(
         db_path=str(db),
         embed=False,
         include_lines=True,
@@ -124,7 +124,7 @@ def test_rebuild_batches_writes_into_bulk_requests(tmp_path):
     _seed_db(db)
     fake = FakeOpenSearch()
 
-    stats = vector_index.rebuild_from_sqlite(
+    stats = vector_index.rebuild_from_db(
         db_path=str(db),
         embed=False,
         include_lines=True,
@@ -147,7 +147,7 @@ def test_rebuild_flushes_multiple_chunks_when_over_chunk_size(tmp_path):
     _seed_db(db)
     fake = FakeOpenSearch()
 
-    stats = vector_index.rebuild_from_sqlite(
+    stats = vector_index.rebuild_from_db(
         db_path=str(db),
         embed=False,
         include_lines=True,

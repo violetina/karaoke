@@ -55,7 +55,7 @@ def test_gap_fill_track_lookup_uses_any_not_sqlite_placeholders(tmp_path, monkey
     with patch("karaoke.localcache.connect", return_value=fake_conn), \
          patch.object(gap_fill.Path, "home", return_value=home_dir), \
          patch("karaoke.autoclassify.run", return_value={}), \
-         patch("karaoke.vector_index.rebuild_from_sqlite",
+         patch("karaoke.vector_index.rebuild_from_db",
                return_value=MagicMock(indexed=0, line_docs=0)):
         gap_fill._run()
 

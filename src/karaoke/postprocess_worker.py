@@ -371,7 +371,7 @@ def run_vectors_logic(track_id: int, conn) -> bool:
         from .vector_index import index_track
         # One document, not a library rebuild: this runs per track at the end of
         # a post-processing chain. The previous call passed track_id to
-        # rebuild_from_sqlite, which takes no such argument -- it raised
+        # rebuild_from_db, which takes no such argument -- it raised
         # TypeError on every invocation.
         if not index_track(track_id, conn=conn):
             log.warning("postprocess: no vector doc written for track %s", track_id)

@@ -1083,7 +1083,7 @@ class KaraokeAdminApp(App):
 
                 self.call_from_thread(self._append_event_log, "[bold yellow]Rebuilding OpenSearch vectors for scanned files...[/]")
                 # Rebuild vectors for newly ingested files
-                vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                vector_index.rebuild_from_db(embed=True, include_lines=True)
 
                 msg = (f"Scan complete. Seen: {stats.get('seen', 0)}, "
                        f"Processed: {stats.get('processed', 0)}, "
@@ -1136,7 +1136,7 @@ class KaraokeAdminApp(App):
             try:
                 from . import vector_index, localcache
                 with localcache.connect() as conn:
-                    st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                    st = vector_index.rebuild_from_db(embed=True, include_lines=True)
                 msg = f"Vector indices updated: {st.indexed} tracks, {st.line_docs} lines"
                 self.call_from_thread(self.notify, msg)
                 self.call_from_thread(self._mark_task_finished, label, msg)
@@ -1167,7 +1167,7 @@ class KaraokeAdminApp(App):
                         if res:
                             processed += 1
                     if processed:
-                        vector_index.rebuild_from_sqlite(embed=True, include_lines=True, include_notes=True)
+                        vector_index.rebuild_from_db(embed=True, include_lines=True, include_notes=True)
                 msg = f"Processed {processed} recording(s) and ingested song vectors"
                 self.call_from_thread(self.notify, msg)
                 self.call_from_thread(self._mark_task_finished, label, msg)
@@ -1359,7 +1359,7 @@ class KaraokeAdminApp(App):
                 self.call_from_thread(self.notify, msg)
                 self.call_from_thread(self._mark_task_finished, label, msg)
                 # Rebuild vectors to make sure OpenSearch is refreshed
-                vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                vector_index.rebuild_from_db(embed=True, include_lines=True)
                 self.call_from_thread(self.refresh_recordings)
             except Exception as exc:
                 msg = f"Analysis of recording #{rid} failed: {exc}"
@@ -1422,7 +1422,7 @@ class KaraokeAdminApp(App):
                 msg = f"Imported {res.get('imported_tracks', 0)} tracks ({res.get('audio_slices', 0)} audio slices) from radio session #{session_id}"
                 self.call_from_thread(self.notify, msg)
                 self.call_from_thread(self._mark_task_finished, label, msg)
-                vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+                vector_index.rebuild_from_db(embed=True, include_lines=True)
                 self.call_from_thread(self.refresh_recordings)
             except Exception as exc:
                 msg = f"Import of radio session #{session_id} failed: {exc}"
@@ -1600,7 +1600,7 @@ def align_plain_text_for_track(track_identifier: str, lyrics_or_file_path: str) 
         if not ok:
             raise RuntimeError(f"Whisper alignment produced no output for '{artist} - {title}'")
 
-        vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+        vector_index.rebuild_from_db(embed=True, include_lines=True)
         return f"Successfully aligned lyrics for #{track_id}: {artist} - {title}"
 
 

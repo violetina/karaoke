@@ -113,7 +113,7 @@ def main() -> int:
         print(f"\nstored {len(stitched)} synced lines on track {MEDLEY_TRACK}")
 
     print("rebuilding vector index...")
-    st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+    st = vector_index.rebuild_from_db(embed=True, include_lines=True)
     print(f"indexed: tracks={st.indexed}, lines={st.line_docs}")
     return 0
 

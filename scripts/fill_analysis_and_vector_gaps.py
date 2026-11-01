@@ -127,7 +127,7 @@ def _run():
         # Step C: Rebuild OpenSearch Vector Index to include all new features/genres
         print("\n--- STEP 3: Updating OpenSearch Vector Indices ---")
         try:
-            st = vector_index.rebuild_from_sqlite(embed=True, include_lines=True)
+            st = vector_index.rebuild_from_db(embed=True, include_lines=True, track_ids=all_gap_track_ids)
             print(f"✓ OpenSearch vector index updated: tracks={st.indexed}, lines={st.line_docs}")
         except Exception as exc:
             print(f"Vector index update note: {exc}")
