@@ -1012,12 +1012,23 @@ async def queue_song(body: SongActionPayload):
                     track_id = matches[0].get("track_id")
                 else:
                     # Remove quotes from the query if present, as the LLM often wraps the title in quotes
-                    clean_query = body.query.replace('"', '')
+                    clean_query = body.query.replace('"', '').replace("'", "")
                     if clean_query and clean_query != body.query:
                         matches = json.loads(search_songs(query=clean_query, limit=1)).get("tracks", [])
                         if matches:
                             track_id = matches[0].get("track_id")
             
+            if track_id is None and body.query:
+                from .mcp_server import search_songs
+                # One last attempt: maybe the LLM suggested a format like `Band - "Title"`, split and just search title
+                if '-' in body.query:
+                    parts = body.query.split('-', 1)
+                    title_only = parts[1].replace('"', '').replace("'", "").strip()
+                    if title_only:
+                        matches = json.loads(search_songs(query=title_only, limit=1)).get("tracks", [])
+                        if matches:
+                            track_id = matches[0].get("track_id")
+
             if track_id is None:
                 return {"status": "error", "message": f"Could not find a song matching '{body.query or body.title}' in the library."}
             return collection.enqueue_next(int(track_id), conn)
@@ -1436,7 +1447,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Never claim you played or queued anything; you can only suggest. "
         f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
         f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {artist_hint} "
-        f"Do NOT make up song titles based on the user's prompt (e.g. if asked for a 'lullaby', do NOT invent 'The Beatles - Lullaby'). "
+        f"Do NOT make up song titles based on the user's prompt (e.g. if asked for a 'lullaby' or 'peaceful song', do NOT invent 'The Beatles - Lullaby' or 'Little Fears - Peaceful Days'). "
         f"Only use exact artist and track titles you know to exist in reality. "
         f"If you aren't sure a song exists and is in the library, DO NOT output the QUEUE bracket. "
         f"Never output a QUEUE bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
