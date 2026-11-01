@@ -1011,7 +1011,7 @@ async def queue_song(body: SongActionPayload):
                 if matches:
                     track_id = matches[0].get("track_id")
             if track_id is None:
-                return {"status": "error", "message": f"Could not find this song in the library: '{body.query or body.title}'"}
+                return {"status": "error", "message": f"Could not find this song in the library: '{body.query or body.title}' (try asking the DJ to search for what we *do* have by that artist)."}
             return collection.enqueue_next(int(track_id), conn)
 
     try:
@@ -1403,6 +1403,16 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
     """
     focus_instruction = f"You may output `[FOCUS: The Artist Name]` (using the exact artist name) to show their profile." if now_artist else ""
 
+    import urllib.parse
+    from . import localcache
+    with localcache.connect() as conn:
+        catalog = localcache.get_all_artist_genres_map(conn)
+        available_artists = list(catalog.keys())
+        # Pick 10 random popular artists so the model knows what is actually in the library
+        import random
+        sample_artists = random.sample(available_artists, min(10, len(available_artists))) if available_artists else []
+        artist_hint = f"Some artists actually in this library right now include: {', '.join(sample_artists)}." if sample_artists else ""
+
     playback_status = (
         f"The track currently on stage is '{now_title}' by {now_artist}. It is ALREADY PLAYING: never suggest, "
         f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track."
@@ -1416,8 +1426,10 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"If the user asks about an artist, highlight their story or side-projects. "
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
-        f"Only if explicitly asked to queue a track, you must output `[QUEUE: Artist - Track Title]` "
-        f"with the exact artist and title of a real song in our library (e.g. `[QUEUE: Moby - Porcelain]`). Do not use brackets like [Artist Name]. "
+        f"If the user asks you to play or queue a track, you MUST output `[QUEUE: Artist Name - Track Title]` "
+        f"with the exact artist and title of a real song in our library. {artist_hint} "
+        f"Do not guess songs you think we should have. If you aren't sure a song is in the library, DO NOT output the QUEUE bracket. "
+        f"Never output a QUEUE bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"{focus_instruction}"
     )
 
