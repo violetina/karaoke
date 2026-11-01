@@ -162,9 +162,8 @@ def enqueue_next(track_id: int, conn) -> dict[str, Any]:
     insert_at = min(len(rows), max(0, cur_idx) + 1)
 
     # Don't double-add when the song is already the very next row.
-    if insert_at - 1 >= 0 and insert_at - 1 < len(rows) \
-            and rows[insert_at - 1].get("track_id") == row["track_id"] \
-            and insert_at - 1 != cur_idx:
+    if insert_at < len(rows) \
+            and rows[insert_at].get("track_id") == row["track_id"]:
         return {"status": "queued", "position": insert_at,
                 "queue_name": active.get("name", ""), "duplicate": True,
                 "artist": row["artist"], "title": row["title"]}

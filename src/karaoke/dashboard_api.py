@@ -1007,12 +1007,14 @@ async def queue_song(body: SongActionPayload):
                 track_id = localcache.find_track_id(body.artist, body.title, conn)
             if track_id is None and body.query:
                 from .mcp_server import search_songs
+                
+                # Try exact query first
                 matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
                 if matches:
                     track_id = matches[0].get("track_id")
                 else:
-                    # Remove quotes from the query if present, as the LLM often wraps the title in quotes
-                    clean_query = body.query.replace('"', '').replace("'", "")
+                    # Remove quotes and brackets if the LLM sent a malformed string
+                    clean_query = body.query.replace('"', '').replace("'", "").replace('[', '').replace(']', '').replace('QUEUE:', '').strip()
                     if clean_query and clean_query != body.query:
                         matches = json.loads(search_songs(query=clean_query, limit=1)).get("tracks", [])
                         if matches:
@@ -1023,7 +1025,7 @@ async def queue_song(body: SongActionPayload):
                 # One last attempt: maybe the LLM suggested a format like `Band - "Title"`, split and just search title
                 if '-' in body.query:
                     parts = body.query.split('-', 1)
-                    title_only = parts[1].replace('"', '').replace("'", "").strip()
+                    title_only = parts[1].replace('"', '').replace("'", "").replace('[', '').replace(']', '').strip()
                     if title_only:
                         matches = json.loads(search_songs(query=title_only, limit=1)).get("tracks", [])
                         if matches:
@@ -1453,6 +1455,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Never output a QUEUE bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"Do not put quotes around the track title inside the QUEUE bracket (e.g. use [QUEUE: Moby - Porcelain] not [QUEUE: Moby - \"Porcelain\"]). "
         f"Do not write stage directions like *[SPEAKING TO THE KARAOKE NIGHT]* or *(Speaking to the crowd)*. Keep in character naturally without roleplay action tags. "
+        f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format."
         f"{focus_instruction}"
     )
 
