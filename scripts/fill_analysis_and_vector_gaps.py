@@ -59,7 +59,7 @@ def _run():
                 ORDER BY CASE WHEN s2.kind = 'local' THEN 0 WHEN s2.kind = 'youtube_music' THEN 1 ELSE 2 END, s2.source_id LIMIT 1
             )
             LEFT JOIN track_genre g ON g.track_id = t.track_id
-            WHERE g.genre IS NULL OR g.genre = ''
+            WHERE g.track_id IS NULL
             ORDER BY t.track_id
         ''')
         missing_genre = [dict(r) for r in cur.fetchall()]

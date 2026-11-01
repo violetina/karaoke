@@ -537,15 +537,16 @@ def ensure_genre_table(conn: Connection) -> None:
 
 def record_genre(track_id: int, verdict: Any, conn: Connection, *,
                  method: str = "clap-zero-shot") -> bool:
-    """Store a track's genre label. Returns whether anything was written.
-
-    A None verdict writes nothing rather than storing an "unknown" row: the
-    absence of a label and a label saying "unknown" read the same to a query
-    but mean different things to a re-run, which should retry the first and
-    leave the second alone.
+    """Store a track's genre label (or explicit lack of one). Returns whether anything was written.
+    
+    A None verdict writes a blank row so we know we explicitly tried and
+    failed to find a confident label, preventing infinite retry loops.
     """
-    if verdict is None or not getattr(verdict, "genre", ""):
-        return False
+    genre = getattr(verdict, "genre", "") if verdict else ""
+    score = getattr(verdict, "score", 0.0) if verdict else 0.0
+    runner_up = getattr(verdict, "runner_up", "") if verdict else ""
+    runner_up_score = getattr(verdict, "runner_up_score", 0.0) if verdict else 0.0
+
     conn.execute(
         """
         INSERT INTO track_genre (track_id, genre, score, runner_up,
@@ -559,8 +560,7 @@ def record_genre(track_id: int, verdict: Any, conn: Connection, *,
             method          = excluded.method,
             labelled_at     = excluded.labelled_at
         """,
-        (track_id, verdict.genre, verdict.score, verdict.runner_up,
-         verdict.runner_up_score, method, time.time()),
+        (track_id, genre, score, runner_up, runner_up_score, method, time.time()),
     )
     conn.commit()
     return True

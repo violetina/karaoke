@@ -115,11 +115,9 @@ def label_genre(track_id: int, conn) -> Optional[str]:
         _store_embedding(track_id, vector, conn)
 
     verdict = genre_mod.classify(vector, genre_mod.label_vectors())
-    if verdict is None:
-        return None
     localcache.ensure_genre_table(conn)
     localcache.record_genre(track_id, verdict, conn)
-    return verdict.genre
+    return verdict.genre if verdict else None
 
 
 def _store_embedding(track_id: int, vector: list[float], conn) -> None:
