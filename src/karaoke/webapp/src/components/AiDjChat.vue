@@ -33,14 +33,14 @@
           :class="msg.role"
         >
           <div class="bubble-sender">{{ msg.role === 'user' ? 'YOU' : 'AI DJ' }}</div>
-          <div class="bubble-content">{{ msg.content }}</div>
+          <div class="bubble-content">{{ cleanText(msg.content) }}</div>
           <button v-for="track in msg.queueSuggestions || []" :key="track" class="chip-btn"
             @click="$emit('queue-track', track)">Queue next: {{ track }}</button>
         </div>
 
         <div v-if="streamingText" class="chat-bubble assistant streaming">
           <div class="bubble-sender">AI DJ <span class="streaming-dot"></span></div>
-          <div class="bubble-content">{{ streamingText }}</div>
+          <div class="bubble-content">{{ cleanText(streamingText) }}</div>
         </div>
       </div>
 
@@ -115,6 +115,11 @@ const quickChips = computed(() => [
   'Find songs in harmonic key',
   'Queue an upbeat crowd pleaser!',
 ])
+
+const cleanText = (text) => {
+  if (!text) return ''
+  return text.replace(/\[(FOCUS|QUEUE):[^\]]*\]?/g, '').trim()
+}
 
 const toggleExpanded = () => {
   isExpanded.value = !isExpanded.value

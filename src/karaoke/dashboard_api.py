@@ -1401,6 +1401,8 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
     unless the prompt explicitly rules it out, which is why the DJ booth kept
     offering the song that was already playing.
     """
+    focus_instruction = f"You may use [FOCUS: Artist Name] for artist inspection." if now_artist != "Unknown Artist" else ""
+
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
         f"The track currently on stage is '{now_title}' by {now_artist}. "
@@ -1413,7 +1415,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"recommend, or queue it. Any 'next song' you name must be a DIFFERENT track. "
         f"Only if explicitly asked to queue a track, offer [QUEUE: Artist - Track Title] "
         f"as a suggestion the user must confirm with a button. "
-        f"You may use [FOCUS: Artist Name] for artist inspection."
+        f"{focus_instruction}"
     )
 
 
