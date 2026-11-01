@@ -1526,19 +1526,38 @@ async def dj_chat_endpoint(body: ChatRequest):
     now_artist = body.current_artist or ""
     now_title = body.current_title or ""
 
+    # Determine what to serve for 'diaboliq82' -> it actually belongs to Mogwai in the DB.
+    # The queue runner passes diaboliq82 because that's the username of the Youtube video uploader
+    # that was wrongly parsed. 
+    # To fix this globally, we check if the artist passed is actually just a Youtube alias for a known real track.
+    
+    if now_artist and now_title:
+        from . import localcache
+        with localcache.connect() as conn:
+            c = conn.cursor()
+            c.execute("SELECT artist FROM tracks WHERE title = %s LIMIT 1", (now_title,))
+            row = c.fetchone()
+            if row and row["artist"].lower() != now_artist.lower():
+                now_artist = row["artist"]
+    
     artist_context = ""
     if now_artist:
         try:
             import json
-            # We use OpenSearch directly since mcp_server's search_artists might not be available or returns pure markdown
             from .osclient import client
             os_c = client()
+            
+            # Use multi_match to catch it even if the uploader name is passed as the artist
             res = os_c.search(
                 index="karaoke-artist-cache",
                 body={
                     "query": {
-                        "match_phrase": {
-                            "name": now_artist
+                        "bool": {
+                            "should": [
+                                {"match_phrase": {"name": now_artist}},
+                                {"match_phrase": {"aliases": now_artist}}
+                            ],
+                            "minimum_should_match": 1
                         }
                     },
                     "size": 1
@@ -1546,6 +1565,21 @@ async def dj_chat_endpoint(body: ChatRequest):
             )
             if res["hits"]["hits"]:
                 a = res["hits"]["hits"][0]["_source"]
+                # Override the passed-in artist name with the canonically resolved one
+                # Note: Only do this if it's an alias pointing to a DIFFERENT canonical name,
+                # e.g. 'The Beatles' for 'Beatles'. We do this by checking if what we searched 
+                # for is in the aliases array but NOT the main name.
+                a_name = a.get("name", "")
+                aliases = a.get("aliases", [])
+                
+                # If the exact string we searched for was an alias for something else, swap it
+                if now_artist.lower() != a_name.lower():
+                    if now_artist.lower() in [alias.lower() for alias in aliases]:
+                        now_artist = a_name
+                    elif not aliases and a_name:
+                        # Direct fuzzy match hit the canonical name
+                        now_artist = a_name
+                
                 lines = []
                 if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
                 if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
