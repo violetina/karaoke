@@ -1022,14 +1022,59 @@ async def queue_song(body: SongActionPayload):
             
             if track_id is None and body.query:
                 from .mcp_server import search_songs
-                # One last attempt: maybe the LLM suggested a format like `Band - "Title"`, split and just search title
+                # One last attempt: maybe the LLM suggested a format like `Band - "Title"`, split and search both ways
                 if '-' in body.query:
                     parts = body.query.split('-', 1)
                     title_only = parts[1].replace('"', '').replace("'", "").replace('[', '').replace(']', '').strip()
+                    artist_only = parts[0].replace('"', '').replace("'", "").replace('[', '').replace(']', '').strip()
+                    
                     if title_only:
-                        matches = json.loads(search_songs(query=title_only, limit=1)).get("tracks", [])
-                        if matches:
-                            track_id = matches[0].get("track_id")
+                        # OpenSearch exact match can fail on punctuation like apostrophes (e.g. Learnin' vs Learnin).
+                        # We try stripping punctuation if the exact matches fail.
+                        import string
+                        title_clean = title_only.translate(str.maketrans('', '', string.punctuation))
+                        artist_clean = artist_only.translate(str.maketrans('', '', string.punctuation))
+                        
+                        combo_queries = []
+                        if title_only and artist_only:
+                            combo_queries.append(f"{artist_only} {title_only}")
+                            combo_queries.append(f"{artist_clean} {title_clean}")
+                        
+                        for q in combo_queries:
+                            matches = json.loads(search_songs(query=q, limit=1)).get("tracks", [])
+                            if matches:
+                                track_id = matches[0].get("track_id")
+                                break
+                        
+                        if track_id is None:
+                            # Try just the title
+                            title_queries = [title_only, title_clean]
+                            matches = []
+                            for q in title_queries:
+                                matches = json.loads(search_songs(query=q, limit=5)).get("tracks", [])
+                                if not matches:
+                                    continue
+                                # To be safe against generic titles matching wrong artists, only accept it if the artist part somewhat matches too
+                                artist_part = parts[0].strip().lower()
+                                for m in matches:
+                                    if artist_part in m.get("artist", "").lower() or m.get("artist", "").lower() in artist_part:
+                                        track_id = m.get("track_id")
+                                        break
+                                if track_id is not None:
+                                    break
+                            
+                            # if it didn't match the artist at all but we got hits, just take the first match to be safe
+                            if track_id is None and matches: 
+                                track_id = matches[0].get("track_id")
+                        
+                        # Extreme fallback: direct SQLite query if OpenSearch text analysis rejects it entirely
+                        if track_id is None:
+                            cur = conn.cursor()
+                            cur.execute("SELECT track_id FROM tracks WHERE artist ILIKE %s AND title ILIKE %s LIMIT 1",
+                                        (f"%{artist_clean}%", f"%{title_clean}%"))
+                            row = cur.fetchone()
+                            if row:
+                                track_id = dict(row)["track_id"]
 
             if track_id is None:
                 return {"status": "error", "message": f"Could not find a song matching '{body.query or body.title}' in the library."}
@@ -1450,11 +1495,11 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str) -> str:
         f"Answer questions about vibe, history, or recommendations without taking playback actions. "
         f"Never claim you played or queued anything; you can only suggest. "
         f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
-        f"Only if explicitly asked to queue a track, you must output `[QUEUE: Artist - Track Title]` "
-        f"with a real song in our library. {track_hint} "
+        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {track_hint} "
         f"Do NOT make up song titles based on the user's prompt. "
         f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
         f"If you aren't sure a specific song by a specific artist exists and is in the library, DO NOT output the QUEUE bracket. Just suggest the artist instead. "
+        f"Do NOT put quotes around track titles in your text or QUEUE brackets. Write `Depeche Mode - The Love Thieves`, not `Depeche Mode - \"The Love Thieves\"`. "
         f"Do not write stage directions like *[SPEAKING TO THE KARAOKE NIGHT]* or *(Speaking to the crowd)*. Keep in character naturally without roleplay action tags. "
         f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format. "
         f"Never output a QUEUE or FOCUS bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
