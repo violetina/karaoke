@@ -212,6 +212,7 @@ def get_stage_state() -> dict[str, Any]:
 
     # 2. Look up lyrics and audio analysis from local database
     lines: list[dict[str, Any]] = []
+    cached_ly = None
     # Reuse the player's timeline so the dashboard detects instrumental breaks
     # exactly the way the TUI does (LyricTimeline.in_gap / gap_progress).
     timeline = None
@@ -285,6 +286,17 @@ def get_stage_state() -> dict[str, Any]:
                             lines.append({
                                 "index": idx,
                                 "time": round(t, 2),
+                                "end": None,
+                                "text": txt,
+                                "words": [],
+                            })
+                    elif cached_ly and cached_ly.plain:
+                        # Fallback for plain unsynced lyrics: supply lines so dashboard displays the text
+                        plain_lines = [l.strip() for l in cached_ly.plain.splitlines() if l.strip()]
+                        for idx, txt in enumerate(plain_lines):
+                            lines.append({
+                                "index": idx,
+                                "time": None,
                                 "end": None,
                                 "text": txt,
                                 "words": [],
@@ -482,6 +494,7 @@ def get_stage_state() -> dict[str, Any]:
         "next_line_in": next_line_in,
         "in_gap": in_gap,
         "gap_progress": gap_progress,
+        "has_synced": bool(cached_ly and (cached_ly.synced_raw or cached_ly.lines)),
         "lines": lines,
         "upcoming_queue": upcoming_queue,
         "timestamp": time.time(),

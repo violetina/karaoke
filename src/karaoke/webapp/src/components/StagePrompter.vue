@@ -29,6 +29,9 @@
       <div class="lyrics-header">
         <span>KARAOKE PROMPTER</span>
         <div class="lyrics-timing">
+          <span v-if="stage.has_synced === false && stage.lines && stage.lines.length" class="plain-lyrics-tag">
+            Text-only (unsynced)
+          </span>
           <span v-if="nextLineCountdown" class="next-line-countdown">
             Next line in {{ nextLineCountdown }}
           </span>
@@ -180,6 +183,12 @@ const WINDOW_AFTER = 4
 const lyricWindow = computed(() => {
   const lines = props.stage.lines || []
   if (!lines.length) return []
+  // If lyrics are plain text without sync timestamps:
+  const isPlain = lines.every((l) => l.time === null || l.time === undefined)
+  if (isPlain) {
+    return lines.map((line, idx) => ({ idx, line, cls: 'plain-line' }))
+  }
+
   let active = props.stage.active_line_index
   // Before the first synced line, preview from the top.
   if (active < 0) active = 0
@@ -562,7 +571,7 @@ onMounted(() => {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 /* Instrumental break rest marker (mirrors the TUI's ♪ gap bar). */
@@ -644,6 +653,23 @@ onMounted(() => {
   transition: all 0.3s cubic-bezier(0.2, 0, 0, 1);
   line-height: 1.4;
   width: 100%;
+}
+
+.lyric-line.plain-line {
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 1.25rem;
+  line-height: 1.6;
+}
+
+.plain-lyrics-tag {
+  color: var(--accent-gold, #ffbe0b);
+  background: rgba(255, 190, 11, 0.12);
+  border: 1px solid rgba(255, 190, 11, 0.3);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-right: 6px;
 }
 
 .lyric-line.past {
