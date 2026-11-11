@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.7.0 — OpenSearch Dashboards, Mood/Chords v2 search, and artist cleanup
+
+### OpenSearch Dashboards (new)
+
+- Deploy OpenSearch Dashboards 3.8.0 into `kind-karaoke` (`make dashboards-install`), reachable on `http://localhost:5601` through the `karaoke-dashboards-forward` user unit. Localhost only, no auth, like the OpenSearch it fronts. `make dashboards-import` regenerates and imports the saved objects; `make dashboards-uninstall` removes it.
+- Four dashboards: **Artists Overview** (type, genre, country, decade, labels, track counts), **Lyrics and Library Coverage** (synced vs unsynced, lyrics source, per-artist gaps), **Lyric Lines Search** (full-text over every lyric line) and **Audio Analysis** (Mood v2 and Chords v2).
+- Index patterns ship with their field lists, so visualizations resolve fields without a manual "refresh field list".
+
+### Mood v2 and Chords v2 in search
+
+- The `tracks` index now carries the sound-derived fields: `audio_mood`, `audio_feeling`, `mood_arc`, `feeling_arc`, `mood_swings_per_minute`, `mood_share_*`, `harmony_style`, `key_mode`, `blues_score`, `ii_v_i`, `tritone_subs` and related. Only current-version rows are indexed; `dominant_mood` remains the lyric-sentiment mood.
+- `embed_clap` refreshes a track's audio fields as soon as its mood is stored (mood is the last step of the chain).
+
+### Artist and library cleanup
+
+- Stop the now-playing path re-creating uploader-named tracks such as "Vidiot411 - Roger And Out": it matches by source URL first, then to a unique resolved track when the artist is an unmatched uploader handle.
+- `folder_scan` no longer takes a bare track number as the artist; it parses `NN - Artist - Title` filenames and falls back to the parent artist folder.
+- `db_cleanup` gains a second pass (`find_channel_artist_dupes.py`) that classifies cross-artist duplicates (typos, reordered collaborations, uploader handles) using MusicBrainz lookup status, repairs numeric artists from their file paths and merges the safe ones. Covers by other artists and collaboration subsets are left alone. `merge_tracks` now carries genre, mood, chords, tone, art, artist links, sync offsets, notes, playlist and radio references, duration and play counts.
+
+### Post-processing
+
+- The CLAP worker runs 4 processes instead of 1 (about 2.4x mood throughput on a 24-core host); each holds its own model copy (about 1.5 GB resident).
+- Add `scripts/enqueue_mood_chords.py`: a bounded batch of tracks missing current Mood/Chords v2, grouped by primary MusicBrainz artist with `--exclude-top`.
+- `fill_library_gaps.py` takes a single-instance lock, passes browser cookies to downloads and flushes progress.
+
+### Dashboard and prompter
+
+- Show unsynced lyrics as text-only lines with a "Text-only (unsynced)" tag instead of an empty prompter.
+- AI DJ prompt and parsing hardening since 1.6.0: no invented titles, placeholders or side-projects, malformed `[QUEUE]` brackets and quotes are stripped before track resolution, the booth adapts when nothing is playing, bad YouTube artist names resolve to their canonical identities, and the prompt is seeded with a random selection of library tracks and playlists. New smart playlists for borderline moods and discovery.
+- Fix the genre gap-fill retrying blank verdicts forever, and make Backstage gap-fill vector only the missing tracks.
+- AI DJ: model selection endpoints (`/api/dj/models`), prompt grounding with facts retrieved for the user's query, and relaxed "Artist - Title" matching when queueing.
+- Refresh `webapp_dist`; the previous refresh removed the old bundles without adding the new ones.
+- Drop the retired Gemini 1.5 Flash and Gemma 3 27B options from live captions.
+
+### Running and upgrading
+
+- Restart `karaoke-celery-worker` and `karaoke-celery-clap` after upgrading (`systemctl --user daemon-reload` first, for the new CLAP unit), and `karaoke-dashboard`. Run `make systemd-install` to link the new `karaoke-dashboards-forward` unit.
+- Purging a Celery queue does not release in-flight song claims; re-queuing the same tracks within 15 minutes is skipped as "already in progress".
+
 ## 1.6.0 — Backstage admin page, A/V sync, and queue autopilot
 
 ### Backstage (new)
