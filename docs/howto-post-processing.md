@@ -139,7 +139,7 @@ front of the fast steps of the next song:
 |---|---|---|
 | `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, artist, vectors, finish |
 | `karaoke-sync` | `karaoke-celery-sync` (2 processes, 3 threads each) | Whisper lyric sync (`make celery-sync-worker`) |
-| `karaoke-clap` | `karaoke-celery-clap` (1 process) | CLAP timbre embedding, CLAP genre label, and mood |
+| `karaoke-clap` | `karaoke-celery-clap` (4 processes, each with its own model copy) | CLAP timbre embedding, CLAP genre label, and mood |
 
 If `karaoke-celery-sync` is down, lyric sync waits in its queue and the rest of
 the chain waits behind it; nothing else is held up.

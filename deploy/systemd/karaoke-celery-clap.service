@@ -1,5 +1,5 @@
 [Unit]
-Description=Karaoke Celery CLAP worker (timbre embeddings, one process)
+Description=Karaoke Celery CLAP worker (timbre embeddings and mood, 4 processes)
 Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
 After=network-online.target karaoke-mq-forward.service
 Wants=network-online.target karaoke-mq-forward.service
@@ -11,14 +11,17 @@ WorkingDirectory=/home/tina/karaoke
 Environment=PYTHONPATH=/home/tina/karaoke/src
 Environment=KARAOKE_ORCHESTRATOR=celery
 Environment=RABBITMQ_HOST=localhost
-# One process holding the model; let torch use a few threads inside it. The
-# slice's CPUQuota still caps the whole background budget.
-Environment=OMP_NUM_THREADS=4
+# Four processes, each holding its own copy of the model (~0.7 GB resident), with
+# two torch threads apiece. One process with four threads used ~40% of a core:
+# the work is dominated by audio decode and per-window scoring, which scale
+# better across processes than across threads. The slice's CPUQuota still caps
+# the whole background budget.
+Environment=OMP_NUM_THREADS=2
 Environment=OPENBLAS_NUM_THREADS=1
-Environment=MKL_NUM_THREADS=4
+Environment=MKL_NUM_THREADS=2
 Environment=NUMEXPR_NUM_THREADS=1
 # Its own queue (karaoke-clap): the analysis workers never load CLAP.
-ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-clap --loglevel=INFO --concurrency=1 --hostname=clap@%%h --events
+ExecStart=/home/tina/karaoke/.venv/bin/celery -A karaoke.celery_app:app worker -Q karaoke-clap --loglevel=INFO --concurrency=4 --hostname=clap@%%h --events
 Restart=always
 RestartSec=5
 SyslogIdentifier=karaoke-celery-clap
