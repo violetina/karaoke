@@ -19,7 +19,7 @@ semantic/vector search and is always rebuilt from this database.
 | Server | PostgreSQL 18.4 |
 | Database / role | `karaoke` / `karaoke` |
 | Driver | `psycopg` 3.3.5 (`psycopg[binary,pool]>=3.0.0`) |
-| Pool | `psycopg_pool.ConnectionPool` — `min_size=1`, `max_size=500` |
+| Pool | `psycopg_pool.ConnectionPool` — `min_size=1`, `max_size=10` (`KARAOKE_PG_POOL_MAX`), `max_idle=30s` (`KARAOKE_PG_POOL_MAX_IDLE`) |
 | Connection style | `autocommit=True`, `row_factory=dict_row` |
 
 `localcache.connect()` leases a connection from a process-wide pool created by

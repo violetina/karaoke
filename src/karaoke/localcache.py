@@ -1291,7 +1291,9 @@ def get_pool() -> ConnectionPool:
     global _POOL
     if _POOL is None:
         pg_url = os.environ.get("KARAOKE_PG_URL", "postgresql://karaoke:karaoke@localhost:5432/karaoke")
-        _POOL = ConnectionPool(conninfo=pg_url, open=True, min_size=1, max_size=500, kwargs={"autocommit": True, "row_factory": psycopg.rows.dict_row})
+        _POOL = ConnectionPool(conninfo=pg_url, open=True, min_size=1,
+                               max_size=int(os.environ.get("KARAOKE_PG_POOL_MAX", "10")),
+                               max_idle=float(os.environ.get("KARAOKE_PG_POOL_MAX_IDLE", "30")), kwargs={"autocommit": True, "row_factory": psycopg.rows.dict_row})
         # Close the pool while the interpreter is still alive. Left to
         # finalization, ConnectionPool.__del__ tries to join its worker threads
         # after shutdown has begun and raises PythonFinalizationError -- which
