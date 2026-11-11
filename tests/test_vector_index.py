@@ -279,3 +279,12 @@ def test_audio_analysis_fields_use_current_versions_only():
     assert vector_index.audio_analysis_fields(MOOD_VERSION - 1, mood, None, None) == {}
     # No analysis -> no fields, so `exists` queries stay honest.
     assert vector_index.audio_analysis_fields(None, None, None, None) == {}
+
+
+def test_genre_fields_carry_the_clap_verdict_and_skip_blanks():
+    doc = vector_index.genre_fields("shoegaze", 0.61, "punk rock", 0.59)
+    assert doc["genre"] == "shoegaze" and doc["audio_genre"] == "shoegaze"
+    assert doc["genre_score"] == 0.61 and doc["genre_runner_up_score"] == 0.59
+    # A blank verdict (matched no label) must not look like a genre.
+    assert vector_index.genre_fields("", 0.0, "", 0.0) == {}
+    assert vector_index.genre_fields(None, None, None, None) == {}

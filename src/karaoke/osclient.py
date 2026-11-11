@@ -102,6 +102,8 @@ def index_body() -> dict[str, Any]:
                 "broad_genres": {"type": "keyword"},
                 "audio_genre": {"type": "keyword"},
                 "audio_genre_runner_up": {"type": "keyword"},
+                "genre_score": {"type": "float"},
+                "genre_runner_up_score": {"type": "float"},
                 # Audio-derived Mood v2 (track_moods) and Chords v2 (track_chords).
                 # ``dominant_mood`` above is lyric sentiment; these come from the
                 # sound. Only current-version rows are indexed.

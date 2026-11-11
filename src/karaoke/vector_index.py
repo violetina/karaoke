@@ -56,7 +56,11 @@ def iter_track_rows(conn: Any, track_id: Optional[int] = None, track_ids: Option
     cur = conn.cursor()
     has_track_genre = localcache.table_exists(conn, "track_genre")
 
-    genre_cols = "tg.genre AS audio_genre, tg.runner_up AS audio_genre_runner_up" if has_track_genre else "'' AS audio_genre, '' AS audio_genre_runner_up"
+    genre_cols = ("tg.genre AS audio_genre, tg.runner_up AS audio_genre_runner_up, "
+                  "tg.score AS audio_genre_score, tg.runner_up_score AS audio_genre_runner_up_score"
+                  if has_track_genre else
+                  "'' AS audio_genre, '' AS audio_genre_runner_up, "
+                  "NULL AS audio_genre_score, NULL AS audio_genre_runner_up_score")
     genre_join = "LEFT JOIN track_genre tg ON tg.track_id = t.track_id" if has_track_genre else ""
 
     query = f"""
@@ -143,6 +147,28 @@ def index_track(track_id: int, *, conn: Any = None, os_client: Any = None,
             c.close()
 
 
+def genre_fields(genre: Any, score: Any, runner_up: Any, runner_up_score: Any) -> dict[str, Any]:
+    """The CLAP zero-shot genre verdict as search fields.
+
+    ``genre`` and ``genre_score`` are the verdict itself (what
+    ``scripts/label_genres.py`` has always mirrored onto the document), and
+    ``audio_genre*`` repeat it under the audio_* names. A blank verdict -- the
+    track matched no label -- yields no genre field at all, so a facet never
+    counts an empty string as a genre.
+    """
+    if not genre:
+        return {}
+    out: dict[str, Any] = {"genre": genre, "audio_genre": genre}
+    if score is not None:
+        out["genre_score"] = float(score)
+    if runner_up:
+        out["genre_runner_up"] = runner_up
+        out["audio_genre_runner_up"] = runner_up
+        if runner_up_score is not None:
+            out["genre_runner_up_score"] = float(runner_up_score)
+    return out
+
+
 def audio_analysis_fields(mood_version: Any, mood_summary: Any,
                           chords_version: Any, chord_harmony: Any) -> dict[str, Any]:
     """Flat search fields from the stored Mood v2 and Chords v2 timelines.
@@ -187,7 +213,7 @@ def audio_analysis_fields(mood_version: Any, mood_summary: Any,
 
 
 def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = None) -> bool:
-    """Refresh just the Mood v2 / Chords v2 fields of one indexed track.
+    """Refresh just the Mood v2, Chords v2 and CLAP genre fields of one indexed track.
 
     The mood timeline is made last in the post-processing chain, after the
     search document was written, so it would otherwise only reach OpenSearch on
@@ -207,15 +233,19 @@ def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = Non
             return False
         row = c.execute(
             "SELECT tm.mood_version, tm.summary AS mood_summary,"
-            " tc.chords_version, tc.harmony AS chord_harmony"
+            " tc.chords_version, tc.harmony AS chord_harmony,"
+            " tg.genre, tg.score AS genre_score, tg.runner_up, tg.runner_up_score"
             " FROM tracks t"
             " LEFT JOIN track_moods tm ON tm.track_id = t.track_id"
             " LEFT JOIN track_chords tc ON tc.track_id = t.track_id"
+            " LEFT JOIN track_genre tg ON tg.track_id = t.track_id"
             " WHERE t.track_id = %s", (track_id,)).fetchone()
         if not row:
             return False
         fields = audio_analysis_fields(row["mood_version"], row["mood_summary"],
                                        row["chords_version"], row["chord_harmony"])
+        fields.update(genre_fields(row["genre"], row["genre_score"],
+                                   row["runner_up"], row["runner_up_score"]))
         if not fields:
             return False
         os_client.update(index=settings.index_name, id=track_doc_id(track_id),
@@ -274,6 +304,10 @@ def build_track_doc(
         "audio_genre_runner_up": audio_ru or "",
         "indexed_at": datetime.now(timezone.utc).isoformat(),
     }
+    doc.update(genre_fields(
+        audio_g, row["audio_genre_score"] if "audio_genre_score" in keys else None,
+        audio_ru, row["audio_genre_runner_up_score"] if "audio_genre_runner_up_score" in keys else None,
+    ))
     doc.update(audio_analysis_fields(
         row["mood_version"] if "mood_version" in keys else None,
         row["mood_summary"] if "mood_summary" in keys else None,
