@@ -35,7 +35,8 @@ MCP_API_URL = os.environ.get("KARAOKE_MCP_API_URL", "http://127.0.0.1:8888")
 LIB_API_URL = os.environ.get("KARAOKE_LIB_API_URL", "http://127.0.0.1:8000")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9200")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen3:0.6b")
+OLLAMA_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen3:latest")
+_CURRENT_DJ_MODEL = OLLAMA_MODEL
 
 USER_AGENT = "KaraokeDashboard/1.0 (contact: admin@karaoke.local)"
 COMMONS_THUMB_URL = "https://commons.wikimedia.org/wiki/Special:FilePath/{filename}?width=400"
@@ -1014,21 +1015,33 @@ async def queue_song(body: SongActionPayload):
         with localcache.connect() as conn:
             track_id = body.track_id
             if track_id is None and body.artist and body.title:
-                track_id = localcache.find_track_id(body.artist, body.title, conn)
+                track_id = localcache.find_track_id(body.artist, body.title, conn) or localcache.find_track_id_relaxed(body.artist, body.title, conn)
             if track_id is None and body.query:
-                from .mcp_server import search_songs
-                
-                # Try exact query first
-                matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
-                if matches:
-                    track_id = matches[0].get("track_id")
-                else:
-                    # Remove quotes and brackets if the LLM sent a malformed string
-                    clean_query = body.query.replace('"', '').replace("'", "").replace('[', '').replace(']', '').replace('QUEUE:', '').strip()
-                    if clean_query and clean_query != body.query:
-                        matches = json.loads(search_songs(query=clean_query, limit=1)).get("tracks", [])
-                        if matches:
-                            track_id = matches[0].get("track_id")
+                # If query contains "Artist - Title", try relaxed matching first!
+                q_text = body.query.replace('"', '').replace("'", "").replace('[', '').replace(']', '').replace('QUEUE:', '').strip()
+                if '-' in q_text:
+                    parts = [p.strip() for p in q_text.split('-') if p.strip()]
+                    # If LLM prefixed the current artist/track e.g. "GravyTrain - Herbalizer - Song For Mary" (3 parts)
+                    if len(parts) >= 2:
+                        # Try the last two parts as Artist - Title
+                        cand_artist = parts[-2]
+                        cand_title = parts[-1]
+                        track_id = localcache.find_track_id(cand_artist, cand_title, conn) or localcache.find_track_id_relaxed(cand_artist, cand_title, conn)
+                        if track_id is None and len(parts) == 2:
+                            track_id = localcache.find_track_id(parts[0], parts[1], conn) or localcache.find_track_id_relaxed(parts[0], parts[1], conn)
+
+                if track_id is None:
+                    from .mcp_server import search_songs
+                    # Try exact query
+                    matches = json.loads(search_songs(query=body.query, limit=1)).get("tracks", [])
+                    if matches:
+                        track_id = matches[0].get("track_id")
+                    else:
+                        clean_query = body.query.replace('"', '').replace("'", "").replace('[', '').replace(']', '').replace('QUEUE:', '').strip()
+                        if clean_query and clean_query != body.query:
+                            matches = json.loads(search_songs(query=clean_query, limit=1)).get("tracks", [])
+                            if matches:
+                                track_id = matches[0].get("track_id")
             
             if track_id is None and body.query:
                 from .mcp_server import search_songs
@@ -1085,6 +1098,11 @@ async def queue_song(body: SongActionPayload):
                             row = cur.fetchone()
                             if row:
                                 track_id = dict(row)["track_id"]
+
+                # Extra fallback for any query: check if whole query matches relaxed against any track
+                if track_id is None and '-' in body.query:
+                    parts = body.query.split('-', 1)
+                    track_id = localcache.find_track_id_relaxed(parts[0].strip(), parts[1].strip(), conn)
 
             if track_id is None:
                 return {"status": "error", "message": f"Could not find a song matching '{body.query or body.title}' in the library."}
@@ -1467,9 +1485,185 @@ class ChatRequest(BaseModel):
     message: str
     current_artist: Optional[str] = None
     current_title: Optional[str] = None
+    model: Optional[str] = None
 
 
-def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str = "") -> str:
+class DJModelConfigRequest(BaseModel):
+    model: str
+
+
+@app.get("/api/dj/models")
+async def list_dj_models():
+    """List available local Ollama models and current selected model."""
+    global _CURRENT_DJ_MODEL
+    models = []
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            r = await client.get(f"{OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                data = r.json()
+                for m in data.get("models", []):
+                    name = m.get("name")
+                    if name:
+                        models.append({
+                            "name": name,
+                            "size_bytes": m.get("size", 0),
+                            "parameter_size": m.get("details", {}).get("parameter_size", ""),
+                        })
+    except Exception as exc:
+        _log.warning("Could not query Ollama models: %s", exc)
+
+    if not any(m["name"] == _CURRENT_DJ_MODEL for m in models) and _CURRENT_DJ_MODEL:
+        models.append({"name": _CURRENT_DJ_MODEL, "size_bytes": 0, "parameter_size": ""})
+
+    return {
+        "current": _CURRENT_DJ_MODEL,
+        "models": models,
+    }
+
+
+@app.post("/api/dj/models")
+async def set_dj_model(req: DJModelConfigRequest):
+    """Set the active DJ model."""
+    global _CURRENT_DJ_MODEL
+    if not req.model or not req.model.strip():
+        raise HTTPException(status_code=400, detail="Model name cannot be empty")
+    _CURRENT_DJ_MODEL = req.model.strip()
+    return {"status": "ok", "current": _CURRENT_DJ_MODEL}
+
+
+def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "") -> str:
+    """Retrieve grounded facts from OpenSearch and PostgreSQL matching the user's question."""
+    facts = []
+    q_lower = query.lower()
+    from .osclient import client
+    from . import localcache
+
+    try:
+        os_c = client()
+    except Exception:
+        os_c = None
+
+    # If user query is asking for a next track / recommendation, run suggest_next_tracks!
+    if any(k in q_lower for k in ("suggest", "next", "after", "recommend", "follow")):
+        try:
+            from . import mcp_server
+            import json
+            raw_sugg = mcp_server.suggest_next_tracks(artist=now_artist, title=now_title, limit=3)
+            data_sugg = json.loads(raw_sugg)
+            suggs = data_sugg.get("suggestions", [])
+            if suggs:
+                formatted = [f"'{s['artist']} - {s['title']}' (reason: {s.get('reason', 'good fit')})" for s in suggs]
+                facts.append(f"Recommended next songs following current vibe: {'; '.join(formatted)}")
+        except Exception:
+            pass
+
+    # 1. Search OpenSearch artist cache for any mentioned artists
+    if os_c is not None:
+        try:
+            res = os_c.search(
+                index="karaoke-artist-cache",
+                body={
+                    "query": {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["name^3", "aliases^2", "description"],
+                            "type": "best_fields",
+                        }
+                    },
+                    "size": 2,
+                },
+            )
+            hits = res.get("hits", {}).get("hits", [])
+            for h in hits:
+                s = h.get("_source", {})
+                a_name = s.get("name")
+                if not a_name:
+                    continue
+                info = [f"Artist '{a_name}'"]
+                if s.get("genres"):
+                    info.append(f"Genres: {', '.join(s['genres'][:4])}")
+                if s.get("member_names"):
+                    info.append(f"Members: {', '.join(s['member_names'][:5])}")
+                if s.get("member_of_names"):
+                    info.append(f"Member of: {', '.join(s['member_of_names'][:5])}")
+                if s.get("description"):
+                    info.append(f"Bio: {s['description'][:240]}...")
+                facts.append(" · ".join(info))
+        except Exception:
+            pass
+
+    # 2. Search OpenSearch library tracks (lyrics / titles / sound) matching the query
+    if os_c is not None:
+        try:
+            res = os_c.search(
+                index="tracks",
+                body={
+                    "query": {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["title^2", "artist^2", "lyrics"],
+                        }
+                    },
+                    "size": 4,
+                },
+            )
+            hits = res.get("hits", {}).get("hits", [])
+            matched_tracks = []
+            for h in hits:
+                s = h.get("_source", {})
+                tid = s.get("track_id")
+                a = s.get("artist")
+                t = s.get("title")
+                if a and t:
+                    matched_tracks.append(f"#{tid} '{a} - {t}'")
+            if matched_tracks:
+                facts.append(f"Relevant songs in our library: {', '.join(matched_tracks)}")
+        except Exception:
+            pass
+
+    # 3. Check for chord / harmony or mood queries in PostgreSQL
+    if any(k in q_lower for k in ("chord", "progression", "key", "camelot", "harmony", "mood", "feeling", "bpm")):
+        try:
+            with localcache.connect() as conn:
+                c = conn.cursor()
+                # If they ask about the current playing track or a specific track
+                target_artist = now_artist
+                target_title = now_title
+                if target_artist and target_title:
+                    c.execute("""
+                        SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, a.energy,
+                               m.summary as mood_summary, c.summary as chord_summary
+                        FROM tracks t
+                        LEFT JOIN track_analysis a ON a.track_id = t.track_id
+                        LEFT JOIN track_moods m ON m.track_id = t.track_id
+                        LEFT JOIN track_chords c ON c.track_id = t.track_id
+                        WHERE t.artist ILIKE %s AND t.title ILIKE %s
+                        LIMIT 1
+                    """, (f"%{target_artist}%", f"%{target_title}%"))
+                    row = c.fetchone()
+                    if row:
+                        r = dict(row)
+                        det = []
+                        if r.get("detected_key"): det.append(f"Key: {r['detected_key']}")
+                        if r.get("bpm"): det.append(f"BPM: {round(r['bpm'])}")
+                        if r.get("energy"): det.append(f"Energy: {r['energy']:.2f}")
+                        m_sum = r.get("mood_summary") or {}
+                        if m_sum.get("dominant"): det.append(f"Dominant Mood: {m_sum.get('dominant')}")
+                        if m_sum.get("dominant_feeling"): det.append(f"Feeling: {m_sum.get('dominant_feeling')}")
+                        c_sum = r.get("chord_summary") or {}
+                        chords_list = c_sum.get("distinct_chords") if isinstance(c_sum, dict) else None
+                        if chords_list:
+                            det.append(f"Chords: {', '.join(chords_list[:6])}")
+                        if det:
+                            facts.append(f"Musical analysis for current track '{target_artist} - {target_title}': " + " · ".join(det))
+        except Exception:
+            pass
+
+    return "\n".join(facts)
+
+
+def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str = "", query_facts: str = "") -> str:
     """Build the AI DJ system prompt.
 
     The booth must never recommend the song already on stage. A small local
@@ -1507,6 +1701,12 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str 
         f"You MUST use THESE facts when talking about them. DO NOT invent ANY side projects, band members, or history that is not in this block."
     ) if artist_context else "\n\nDO NOT invent ANY side projects, band members, or history for artists if you aren't 100% sure of the facts."
 
+    query_fact_block = (
+        f"\n\nVerified search results from our OpenSearch and library database relevant to the user query:\n"
+        f"{query_facts}\n"
+        f"Use these verified facts directly in your answer if relevant."
+    ) if query_facts else ""
+
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
         f"{playback_status} "
@@ -1517,6 +1717,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str 
         f"Never claim you played or queued anything; you can only suggest. "
         f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
         f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {track_hint} {playlist_hint} "
+        f"CRITICAL FORMAT RULE: The QUEUE bracket must ONLY contain ONE artist and ONE track title: `[QUEUE: Artist - Title]`. Never prefix it with the currently playing artist or uploader name! "
         f"Do NOT make up song titles based on the user's prompt. "
         f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
         f"If you aren't sure a specific song by a specific artist exists and is in the library, DO NOT output the QUEUE bracket. Just suggest the artist instead. "
@@ -1526,6 +1727,7 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str 
         f"Never output a QUEUE or FOCUS bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"{focus_instruction}"
         f"{artist_fact_block}"
+        f"{query_fact_block}"
     )
 
 
@@ -1541,109 +1743,7 @@ async def dj_chat_endpoint(body: ChatRequest):
         now_artist = "Mogwai"
         if "chocky" in now_title.lower():
             now_title = "Chocky"
-            
-    if now_artist and now_title:
-        from . import localcache
-        with localcache.connect() as conn:
-            c = conn.cursor()
-            # First, check if there's an exact track match for this title
-            c.execute("SELECT artist, title FROM tracks WHERE title = %s AND artist != %s LIMIT 1", (now_title, now_artist))
-            row = c.fetchone()
-            if not row:
-                # 1. Direct SQL check if the uploader is just a username and the real artist is embedded in the title string
-                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND artist != %s LIMIT 1", (now_title, now_artist))
-                row = c.fetchone()
-            if not row:
-                # 1.5. Direct SQL check if the title string actually contains BOTH the artist and the title
-                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
-                row = c.fetchone()
-            if not row:
-                # Or maybe the title string *contains* the real artist?
-                # Using a cross join on tracks is too slow. Instead, just search OpenSearch for the title string to find the true track.
-                try:
-                    import json
-                    from .osclient import client
-                    os_c = client()
-                    res = os_c.search(
-                        index="karaoke-clap",
-                        body={
-                            "query": {
-                                "match": {
-                                    "title": now_title
-                                }
-                            },
-                            "size": 1
-                        }
-                    )
-                    if res["hits"]["hits"]:
-                        hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
-                        # If the hit's artist is contained in the current title, we know the uploader put the artist in the title field
-                        if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
-                            row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
-                except Exception:
-                    pass
-            
-            if row and dict(row)["artist"].lower() != now_artist.lower():
-                # We found the real artist!
-                now_artist = dict(row)["artist"]
-                now_title = dict(row)["title"]
-                
-    # If after all that now_artist is STILL an unknown youtube alias or something else
-    # we just search opensearch to see if it even exists in the cache, and if not, we blank it out
-    # to stop the AI from hallucinating a bio for a Youtube username
-    artist_context = ""
-    if now_artist:
-        try:
-            import json
-            from .osclient import client
-            os_c = client()
-            
-            # Use multi_match to catch it even if the uploader name is passed as the artist
-            res = os_c.search(
-                index="karaoke-artist-cache",
-                body={
-                    "query": {
-                        "bool": {
-                            "should": [
-                                {"match_phrase": {"name": now_artist}},
-                                {"match_phrase": {"aliases": now_artist}}
-                            ],
-                            "minimum_should_match": 1
-                        }
-                    },
-                    "size": 1
-                }
-            )
-            if res["hits"]["hits"]:
-                a = res["hits"]["hits"][0]["_source"]
-                # Override the passed-in artist name with the canonically resolved one
-                a_name = a.get("name", "")
-                aliases = a.get("aliases", [])
-                
-                # If the exact string we searched for was an alias for something else, swap it
-                if now_artist.lower() != a_name.lower():
-                    if now_artist.lower() in [alias.lower() for alias in aliases]:
-                        now_artist = a_name
-                    elif not aliases and a_name:
-                        now_artist = a_name
-                
-                lines = []
-                if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
-                if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
-                if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
-                if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
-                artist_context = "\n".join(lines)
-            else:
-                # The artist doesn't exist in our artist cache at all. Blank it so it doesn't hallucinate.
-                pass
-        except Exception:
-            pass
 
-    # Hardcoded safety patch for the Mogwai video uploaded by diaboliq82
-    if now_artist and "diaboliq82" in now_artist.lower():
-        now_artist = "Mogwai"
-        now_title = "Chocky"
-        
     if now_artist and now_title:
         from . import localcache
         with localcache.connect() as conn:
@@ -1660,8 +1760,6 @@ async def dj_chat_endpoint(body: ChatRequest):
                 c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
                 row = c.fetchone()
             if not row:
-                # Or maybe the title string *contains* the real artist?
-                # Using a cross join on tracks is too slow. Instead, just search OpenSearch for the title string to find the true track.
                 try:
                     import json
                     from .osclient import client
@@ -1679,28 +1777,22 @@ async def dj_chat_endpoint(body: ChatRequest):
                     )
                     if res["hits"]["hits"]:
                         hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
-                        # If the hit's artist is contained in the current title, we know the uploader put the artist in the title field
                         if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
                             row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
                 except Exception:
                     pass
-            
+
             if row and dict(row)["artist"].lower() != now_artist.lower():
-                # We found the real artist!
                 now_artist = dict(row)["artist"]
                 now_title = dict(row)["title"]
-                
-    # If after all that now_artist is STILL an unknown youtube alias or something else
-    # we just search opensearch to see if it even exists in the cache, and if not, we blank it out
-    # to stop the AI from hallucinating a bio for a Youtube username
+
     artist_context = ""
     if now_artist:
         try:
             import json
             from .osclient import client
             os_c = client()
-            
-            # Use multi_match to catch it even if the uploader name is passed as the artist
+
             res = os_c.search(
                 index="karaoke-artist-cache",
                 body={
@@ -1718,17 +1810,15 @@ async def dj_chat_endpoint(body: ChatRequest):
             )
             if res["hits"]["hits"]:
                 a = res["hits"]["hits"][0]["_source"]
-                # Override the passed-in artist name with the canonically resolved one
                 a_name = a.get("name", "")
                 aliases = a.get("aliases", [])
-                
-                # If the exact string we searched for was an alias for something else, swap it
+
                 if now_artist.lower() != a_name.lower():
                     if now_artist.lower() in [alias.lower() for alias in aliases]:
                         now_artist = a_name
                     elif not aliases and a_name:
                         now_artist = a_name
-                
+
                 lines = []
                 if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
                 if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
@@ -1736,21 +1826,22 @@ async def dj_chat_endpoint(body: ChatRequest):
                 if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
                 artist_context = "\n".join(lines)
             else:
-                # The artist doesn't exist in our artist cache at all. Blank it so it doesn't hallucinate.
                 now_artist = ""
-                # Do NOT blank out the title - if it's an unrecognized YouTube uploader like diaboliq82, the track title is still all we have 
-                # (e.g. "Mogwai Chocky") and the LLM should still know what's playing, even if the artist field is now blank.
         except Exception:
             pass
 
-    # Because "diaboliq82" is just a YouTube uploader acting as a placeholder artist
     if now_artist and "diaboliq82" in now_artist.lower():
         now_artist = "Mogwai"
-        
-    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context)
-    
+
+    # Retrieve real facts from OpenSearch / Postgres based on the user query
+    query_facts = _retrieve_query_facts(user_msg, now_artist=now_artist, now_title=now_title)
+
+    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context, query_facts=query_facts)
+
+    chosen_model = body.model.strip() if (body.model and body.model.strip()) else _CURRENT_DJ_MODEL
+
     ollama_payload = {
-        "model": OLLAMA_MODEL,
+        "model": chosen_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
@@ -1782,6 +1873,9 @@ async def dj_chat_endpoint(body: ChatRequest):
                                 queue_match = re.search(r"\[QUEUE:\s*([^\]]+)\]", full_text)
                                 if queue_match:
                                     target_track = queue_match.group(1).replace('"', '').replace("'", "").strip()
+                                    # Strip leading current artist prefix if LLM included it (e.g. "CurrentArtist - TargetArtist - Title")
+                                    if now_artist and target_track.lower().startswith(f"{now_artist.lower()} -"):
+                                        target_track = target_track[len(now_artist) + 2:].strip().lstrip("-").strip()
                                     yield {"event": "action", "data": json.dumps({"action": "queue_suggestion", "track": target_track})}
                                 yield {"event": "done", "data": json.dumps({"status": "complete"})}
                         except json.JSONDecodeError:

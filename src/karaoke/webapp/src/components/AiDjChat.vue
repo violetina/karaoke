@@ -10,7 +10,19 @@
         </div>
         <div class="dj-title">
           <span class="name">AI DJ &amp; MC</span>
-          <span class="model-badge">Ollama qwen3 · MCP Integrated</span>
+          <select
+            v-if="availableModels.length > 0"
+            class="model-select"
+            v-model="selectedModel"
+            @click.stop
+            @change="handleModelChange"
+            title="Switch local AI DJ model"
+          >
+            <option v-for="m in availableModels" :key="m.name" :value="m.name">
+              {{ m.name }} {{ m.parameter_size ? `(${m.parameter_size})` : '' }}
+            </option>
+          </select>
+          <span v-else class="model-badge">Ollama qwen3 · MCP Integrated</span>
         </div>
       </div>
 
@@ -75,7 +87,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 
 const props = defineProps({
   currentArtist: {
@@ -96,6 +108,42 @@ const inputQuery = ref('')
 const streamingText = ref('')
 const queueSuggestions = ref([])
 const messagesRef = ref(null)
+
+const availableModels = ref([])
+const selectedModel = ref('qwen3:latest')
+
+const fetchModels = async () => {
+  try {
+    const res = await fetch('/api/dj/models')
+    if (res.ok) {
+      const data = await res.json()
+      if (data.models && data.models.length > 0) {
+        availableModels.value = data.models
+      }
+      if (data.current) {
+        selectedModel.value = data.current
+      }
+    }
+  } catch (err) {
+    // fallback default
+  }
+}
+
+const handleModelChange = async () => {
+  try {
+    await fetch('/api/dj/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: selectedModel.value }),
+    })
+  } catch (err) {
+    // ignore
+  }
+}
+
+onMounted(() => {
+  fetchModels()
+})
 
 const messages = ref([
   {
@@ -157,6 +205,7 @@ const handleSend = async () => {
         message: query,
         current_artist: props.currentArtist,
         current_title: props.currentTitle,
+        model: selectedModel.value,
       }),
     })
 
@@ -276,6 +325,23 @@ const handleSend = async () => {
   font-size: 0.65rem;
   color: var(--text-muted);
   font-family: 'JetBrains Mono', monospace;
+}
+
+.model-select {
+  font-size: 0.68rem;
+  background: var(--bg-surface, #1e1e24);
+  color: var(--accent-color, #a78bfa);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+  outline: none;
+  font-family: 'JetBrains Mono', monospace;
+  max-width: 170px;
+}
+
+.model-select:focus {
+  border-color: var(--accent-color, #a78bfa);
 }
 
 .header-summary {
