@@ -50,20 +50,28 @@ def main() -> int:
                    COALESCE(ta.mbid, 'str:' || lower(t.artist)) AS grp,
                    COALESCE(a.name, t.artist) AS grp_name,
                    (m.track_id IS NULL OR m.mood_version < %s) AS need_mood,
-                   (c.track_id IS NULL OR c.chords_version < %s) AS need_chords,
-                   (g.track_id IS NULL) AS need_clap
+                   (c.track_id IS NULL OR c.chords_version < %s) AS need_chords
             FROM tracks t
             LEFT JOIN track_artists ta ON ta.track_id = t.track_id AND ta.position = 0
             LEFT JOIN artists a ON a.mbid = ta.mbid
             LEFT JOIN track_moods m ON m.track_id = t.track_id
             LEFT JOIN track_chords c ON c.track_id = t.track_id
-            LEFT JOIN track_genre g ON g.track_id = t.track_id
             WHERE length(trim(t.artist)) > 0
             ORDER BY t.track_id
             """,
             (MOOD_VERSION, CHORDS_VERSION),
         ).fetchall()
         from collections import Counter, defaultdict
+        # A genre needs a CLAP vector. Ask the index, not track_genre: a track
+        # that matched no label has no genre row but is already embedded, and
+        # re-running it would only reproduce the same non-answer.
+        from opensearchpy import helpers
+        from karaoke import clap_vector
+        from karaoke.osclient import client as os_client
+        embedded = {int(h["_source"]["track_id"]) for h in helpers.scan(
+            os_client(), index=clap_vector.CLAP_INDEX, _source=["track_id"],
+            query={"query": {"exists": {"field": "clap_vector"}}})}
+        allrows = [{**r, "need_clap": r["track_id"] not in embedded} for r in allrows]
         rows = [r for r in allrows if r["need_mood"] or r["need_chords"] or r["need_clap"]]
         if args.exclude_top:
             sizes = Counter(r["grp"] for r in allrows)
