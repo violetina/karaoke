@@ -513,6 +513,9 @@ def embed_clap(self, context_dict: dict[str, Any]) -> dict[str, Any]:
         # The mood timeline uses the same CLAP model, already loaded here.
         if "mood" in wanted:
             postprocess_worker.run_mood_logic(context.track_id, context.audio_path, conn)
+            # The search document was written before this step; add the mood.
+            from . import vector_index
+            vector_index.update_audio_fields(context.track_id, conn=conn)
     return context.to_dict()
 
 

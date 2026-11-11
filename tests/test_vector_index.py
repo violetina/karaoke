@@ -258,3 +258,24 @@ def test_vector_index_main_status_cli(tmp_path, capsys):
     assert '"is_running":' in out
     assert '"db_tracks": 1' in out
 
+
+
+def test_audio_analysis_fields_use_current_versions_only():
+    from karaoke.chords import CHORDS_VERSION
+    from karaoke.mood_timeline import MOOD_VERSION
+
+    mood = {"dominant": "happy", "dominant_feeling": "uplifting", "arc": "happy → tender",
+            "feeling_arc": "uplifting → tender", "swing_count": 1, "swings_per_minute": 0.34,
+            "borderline_share": 0.0, "shares": {"happy": 0.8, "tender": 0.2}}
+    harmony = {"style": "blues", "key_minor": True, "key_tonic": 9, "blues_score": 0.7,
+               "ii_v_i": 2, "minor_ii_v_i": 1, "tritone_subs": 0, "dominant_share": 0.3}
+
+    doc = vector_index.audio_analysis_fields(MOOD_VERSION, mood, CHORDS_VERSION, harmony)
+    assert doc["audio_mood"] == "happy" and doc["mood_share_sad"] == 0.0
+    assert doc["harmony_style"] == "blues" and doc["key_mode"] == "minor"
+    assert doc["ii_v_i"] == 3  # major + minor ii-V-I
+
+    # An older version was made by other rules: leave its fields out entirely.
+    assert vector_index.audio_analysis_fields(MOOD_VERSION - 1, mood, None, None) == {}
+    # No analysis -> no fields, so `exists` queries stay honest.
+    assert vector_index.audio_analysis_fields(None, None, None, None) == {}

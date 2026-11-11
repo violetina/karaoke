@@ -72,9 +72,13 @@ def iter_track_rows(conn: Any, track_id: Optional[int] = None, track_ids: Option
             l.source AS lyrics_source,
             l.synced_lyrics,
             l.plain_lyrics,
-            {genre_cols}
+            {genre_cols},
+            tm.mood_version, tm.summary AS mood_summary,
+            tc.chords_version, tc.harmony AS chord_harmony
         FROM tracks t
         {genre_join}
+        LEFT JOIN track_moods tm ON tm.track_id = t.track_id
+        LEFT JOIN track_chords tc ON tc.track_id = t.track_id
         LEFT JOIN sources s ON s.source_id = (
             SELECT source_id FROM sources
             WHERE track_id = t.track_id
@@ -139,6 +143,93 @@ def index_track(track_id: int, *, conn: Any = None, os_client: Any = None,
             c.close()
 
 
+def audio_analysis_fields(mood_version: Any, mood_summary: Any,
+                          chords_version: Any, chord_harmony: Any) -> dict[str, Any]:
+    """Flat search fields from the stored Mood v2 and Chords v2 timelines.
+
+    Only rows at the current version are used: an older mood or chord row was
+    made by different rules and would put two incompatible scales in one chart.
+    Missing data yields no field at all, so ``exists`` queries and dashboard
+    coverage counts stay honest.
+    """
+    from .chords import CHORDS_VERSION
+    from .mood_timeline import MOOD_VERSION
+
+    out: dict[str, Any] = {}
+    m = mood_summary if isinstance(mood_summary, dict) else None
+    if m and mood_version == MOOD_VERSION:
+        out["mood_version"] = MOOD_VERSION
+        out["audio_mood"] = m.get("dominant")
+        out["audio_feeling"] = m.get("dominant_feeling")
+        out["mood_arc"] = m.get("arc")
+        out["feeling_arc"] = m.get("feeling_arc")
+        out["mood_swing_count"] = m.get("swing_count")
+        out["mood_swings_per_minute"] = m.get("swings_per_minute")
+        out["mood_borderline_share"] = m.get("borderline_share")
+        shares = m.get("shares") or {}
+        for name in ("happy", "angry", "tender", "sad"):
+            out[f"mood_share_{name}"] = float(shares.get(name, 0.0))
+    h = chord_harmony if isinstance(chord_harmony, dict) else None
+    if h and chords_version == CHORDS_VERSION:
+        out["chords_version"] = CHORDS_VERSION
+        out["harmony_style"] = h.get("style")
+        if h.get("key_minor") is not None:
+            out["key_mode"] = "minor" if h.get("key_minor") else "major"
+        out["key_tonic"] = h.get("key_tonic")
+        out["blues_score"] = h.get("blues_score")
+        out["dominant_share"] = h.get("dominant_share")
+        out["cadences_per_minute"] = h.get("cadences_per_minute")
+        out["fifth_chains_per_minute"] = h.get("fifth_chains_per_minute")
+        out["ii_v_i"] = (h.get("ii_v_i") or 0) + (h.get("minor_ii_v_i") or 0)
+        for k in ("tritone_subs", "secondary_dominants", "backdoor", "andalusian"):
+            out[k] = h.get(k)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = None) -> bool:
+    """Refresh just the Mood v2 / Chords v2 fields of one indexed track.
+
+    The mood timeline is made last in the post-processing chain, after the
+    search document was written, so it would otherwise only reach OpenSearch on
+    the next full rebuild. A partial update touches nothing else (no re-embedding).
+    Best-effort: returns False when there is nothing to write or the cluster is
+    unreachable.
+    """
+    from .logger import log
+
+    own_conn = conn is None
+    c = conn or localcache.connect()
+    try:
+        if os_client is None:
+            from .osclient import client as get_os_client
+            os_client = get_os_client()
+        if os_client is None:
+            return False
+        row = c.execute(
+            "SELECT tm.mood_version, tm.summary AS mood_summary,"
+            " tc.chords_version, tc.harmony AS chord_harmony"
+            " FROM tracks t"
+            " LEFT JOIN track_moods tm ON tm.track_id = t.track_id"
+            " LEFT JOIN track_chords tc ON tc.track_id = t.track_id"
+            " WHERE t.track_id = %s", (track_id,)).fetchone()
+        if not row:
+            return False
+        fields = audio_analysis_fields(row["mood_version"], row["mood_summary"],
+                                       row["chords_version"], row["chord_harmony"])
+        if not fields:
+            return False
+        os_client.update(index=settings.index_name, id=track_doc_id(track_id),
+                         body={"doc": fields})
+        return True
+    except Exception:
+        log.debug("vector index: audio field update failed for track %s", track_id,
+                  exc_info=True)
+        return False
+    finally:
+        if own_conn:
+            c.close()
+
+
 def build_track_doc(
     row: Any,
     *,
@@ -183,6 +274,12 @@ def build_track_doc(
         "audio_genre_runner_up": audio_ru or "",
         "indexed_at": datetime.now(timezone.utc).isoformat(),
     }
+    doc.update(audio_analysis_fields(
+        row["mood_version"] if "mood_version" in keys else None,
+        row["mood_summary"] if "mood_summary" in keys else None,
+        row["chords_version"] if "chords_version" in keys else None,
+        row["chord_harmony"] if "chord_harmony" in keys else None,
+    ))
     lyrics_text = plain or ("\n".join(t for _, t in lines) if lines else "")
     if lyrics_text:
         from . import smartlist, visuals
