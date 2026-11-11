@@ -134,7 +134,8 @@ Every live service, its bound address, health check, and authentication details:
 | **Flower Dashboard** | [http://127.0.0.1:5555](http://127.0.0.1:5555) | HTTP / Web UI | Host (`systemd`) | Live Celery worker inspection, task rates, args, runtime graphs |
 | **RabbitMQ Mgmt** | [http://127.0.0.1:15672](http://127.0.0.1:15672) | HTTP / Web UI | Host / K8s tunnel | RabbitMQ web interface (`guest` / `guest`) |
 | **RabbitMQ AMQP** | `amqp://127.0.0.1:5672` | AMQP 0-9-1 | Host / K8s tunnel | Core broker connection for Celery worker & publisher |
-| **OpenSearch REST** | `http://127.0.0.1:9200` | HTTP / REST | K8s (`default`) | Vector search indexes (`tracks`, `tracks-lines`, `tracks-notes`) |
+| **OpenSearch REST** | `http://127.0.0.1:9200` | HTTP / REST | K8s (`default`) | Vector search indexes (`tracks`, `tracks-lines`, `tracks-notes`, `karaoke-artists`) |
+| **OpenSearch Dashboards** | [http://127.0.0.1:5601](http://127.0.0.1:5601) | HTTP / Web UI | Host / K8s tunnel | Artists Overview, Lyrics & Library Coverage, and Lyric Lines Search dashboards (`karaoke-dashboards-forward.service`, localhost-only, no auth) |
 | **Web Karaoke TUI** | [http://localhost:8001](http://localhost:8001) | HTTP / WebSockets | Host (`textual-serve`)| Interactive karaoke player rendered in the web browser |
 | **Chrome CDP** | `http://127.0.0.1:9222` | HTTP / WebSocket | Host (`google-chrome`) | DevTools automation port for YouTube Music & Spotify playback |
 | **MCP Server** | `http://127.0.0.1:8888` | SSE + Streamable HTTP | Host (`systemd`) | Library as MCP tools: search, now-playing, suggestions, lyric vibe, playlists, playback. `/health` for probes |
@@ -293,6 +294,19 @@ celery -A karaoke.celery_app:app inspect registered
 
 # Check Flower web dashboard
 curl -fsS http://localhost:5555/api/workers
+```
+
+### OpenSearch Dashboards
+
+```bash
+# Check Dashboards health via the host port-forward
+curl -fsS http://localhost:5601/api/status
+
+# Re-import saved objects (index patterns, searches, visualizations, dashboards)
+make dashboards-import
+
+# Rollback / undeploy OpenSearch Dashboards
+make dashboards-uninstall
 ```
 
 ### Argo Events in Kubernetes

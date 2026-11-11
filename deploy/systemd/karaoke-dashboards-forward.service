@@ -1,0 +1,17 @@
+[Unit]
+Description=Karaoke OpenSearch Dashboards port-forward (kind svc/opensearch-dashboards -> localhost:5601)
+Documentation=file:///home/tina/karaoke/docs/platform-services.md
+After=network-online.target
+Wants=network-online.target
+PartOf=karaoke.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tina/karaoke
+ExecStart=/usr/bin/kubectl --context kind-karaoke -n default port-forward svc/opensearch-dashboards 5601:5601 --address 127.0.0.1
+Restart=always
+RestartSec=5
+SyslogIdentifier=karaoke-dashboards-forward
+
+[Install]
+WantedBy=karaoke.target

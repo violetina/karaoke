@@ -1,0 +1,27 @@
+# OpenSearch Dashboards values for the local kind-karaoke cluster (dev only).
+# Security plugin disabled to match deploy/opensearch-values.yaml.
+# Exposed to the host on 127.0.0.1:5601 via karaoke-dashboards-forward.service.
+opensearchHosts: "http://opensearch-cluster-master:9200"
+replicaCount: 1
+
+extraEnvs:
+  - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+    value: "true"
+
+config:
+  opensearch_dashboards.yml: |
+    server.name: karaoke-dashboards
+    server.host: "0.0.0.0"
+    opensearch.hosts: ["http://opensearch-cluster-master:9200"]
+
+service:
+  type: ClusterIP
+  port: 5601
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"

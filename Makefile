@@ -392,6 +392,7 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-ctrl-api.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mpris.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-mq-forward.service $(HOME)/.config/systemd/user/
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-dashboards-forward.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-worker.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-clap.service $(HOME)/.config/systemd/user/
 	ln -sf $(CURDIR)/deploy/systemd/karaoke-celery-sync.service $(HOME)/.config/systemd/user/
@@ -417,12 +418,30 @@ systemd-install: ## Install/refresh the karaoke systemd --user units (symlinks t
 
 systemd-uninstall: ## Stop and remove the karaoke systemd --user units
 	-systemctl --user disable --now karaoke.target karaoke-healthcheck.timer
-	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mpris karaoke-mq-forward karaoke-celery-worker karaoke-celery-clap karaoke-celery-sync karaoke-celery-flower karaoke-kiosk karaoke-webtui karaoke-relay karaoke-mcp karaoke-obot-tunnel 'karaoke-postprocess@*'
+	-systemctl --user stop karaoke-api karaoke-ctrl-api karaoke-mpris karaoke-mq-forward karaoke-dashboards-forward karaoke-celery-worker karaoke-celery-clap karaoke-celery-sync karaoke-celery-flower karaoke-kiosk karaoke-webtui karaoke-relay karaoke-mcp karaoke-obot-tunnel 'karaoke-postprocess@*'
 	rm -f $(HOME)/.config/systemd/user/karaoke-*.service \
 	      $(HOME)/.config/systemd/user/karaoke-*.timer \
 	      $(HOME)/.config/systemd/user/karaoke-*.slice \
 	      $(HOME)/.config/systemd/user/karaoke.target
 	systemctl --user daemon-reload
+
+dashboards-install: ## Deploy OpenSearch Dashboards 3.8.0 into kind-karaoke and import saved objects
+	helm --kube-context $(KUBE_CONTEXT) upgrade --install opensearch-dashboards opensearch/opensearch-dashboards \
+		--version 3.8.0 -n default -f deploy/opensearch-dashboards-values.yaml --wait --timeout 5m
+	ln -sf $(CURDIR)/deploy/systemd/karaoke-dashboards-forward.service $(HOME)/.config/systemd/user/
+	systemctl --user daemon-reload
+	systemctl --user enable --now karaoke-dashboards-forward.service
+	$(PYTHON) scripts/setup_opensearch_dashboards.py
+
+dashboards-import: ## Regenerate and import OpenSearch Dashboards saved objects (index patterns, visualizations, dashboards)
+	$(PYTHON) scripts/setup_opensearch_dashboards.py
+
+dashboards-forward: ## Expose in-cluster OpenSearch Dashboards on http://localhost:5601
+	kubectl --context $(KUBE_CONTEXT) -n default port-forward svc/opensearch-dashboards 5601:5601 --address 127.0.0.1
+
+dashboards-uninstall: ## Remove OpenSearch Dashboards Helm release and stop the port-forward unit
+	-systemctl --user disable --now karaoke-dashboards-forward.service
+	-helm --kube-context $(KUBE_CONTEXT) -n default uninstall opensearch-dashboards
 
 systemd-up: ## Start all karaoke services via the target
 	systemctl --user start karaoke.target karaoke-healthcheck.timer
