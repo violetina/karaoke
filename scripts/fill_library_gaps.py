@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -116,6 +117,7 @@ def process_candidate(
     t0 = time.time()
 
     # 1. Resolve or download audio
+    cookies = os.environ.get("KARAOKE_COOKIES_FROM_BROWSER")
     audio_path = chord_timeline.local_audio(tid, conn)
     if audio_path is None:
         # Try downloadable URLs from candidates (e.g. youtube, youtube_music)
@@ -126,7 +128,7 @@ def process_candidate(
         last_dl_err = None
         for dl_url in download_urls:
             try:
-                audio_path = run_download_logic(dl_url, cookies_from_browser=None)
+                audio_path = run_download_logic(dl_url, cookies_from_browser=cookies)
                 if audio_path and audio_path.is_file():
                     result["downloaded"] = True
                     break
@@ -210,7 +212,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Preview candidate tracks only")
     args = parser.parse_args(argv)
 
-    print("=== KARAOKE LIBRARY GAP FILL: CHORDS V2 & MOOD V2 ===")
+    from karaoke.lockfile import ProcessLock
+    lock = ProcessLock("fill_library_gaps")
+    if not lock.acquire():
+        print("Another gap-fill process is currently running. Exiting.", flush=True)
+        return 1
+
+    try:
+        return _run(args)
+    finally:
+        lock.release()
+
+
+def _run(args: argparse.Namespace) -> int:
+    print("=== KARAOKE LIBRARY GAP FILL: CHORDS V2 & MOOD V2 ===", flush=True)
     with localcache.connect() as conn:
         candidates = fetch_candidates(
             conn,
@@ -219,13 +234,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             max_per_artist=args.max_per_artist,
         )
         total = len(candidates)
-        print(f"Found {total} candidate track(s) needing chords v2 or mood v2.")
+        print(f"Found {total} candidate track(s) needing chords v2 or mood v2.", flush=True)
         if args.dry_run:
             for i, c in enumerate(candidates[:20], 1):
                 kinds = ",".join(s.get("kind", "") for s in (c.get("sources") or []))
-                print(f"  {i:>2}. [{c['track_id']:>5}] {c['artist']} - {c['title']} ({kinds})")
+                print(f"  {i:>2}. [{c['track_id']:>5}] {c['artist']} - {c['title']} ({kinds})", flush=True)
             if total > 20:
-                print(f"  ... and {total - 20} more.")
+                print(f"  ... and {total - 20} more.", flush=True)
             return 0
 
         chords_ok = 0
@@ -256,14 +271,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             print(
                 f"[{i:>3}/{total}] {res['track_id']:>5} {res['artist'][:22]:22} - {res['title'][:25]:25} "
-                f"{dl_tag:8} {chords_tag} | {mood_tag} ({res['elapsed_s']:.1f}s){err_tag}"
+                f"{dl_tag:8} {chords_tag} | {mood_tag} ({res['elapsed_s']:.1f}s){err_tag}",
+                flush=True,
             )
             if res["downloaded"] and args.delay > 0:
                 time.sleep(args.delay)
 
     print(
         f"\nSummary: {total} tracks processed | Chords v2: {chords_ok} | "
-        f"Moods v2: {mood_ok} | Downloaded: {downloads} | Errors: {errors}"
+        f"Moods v2: {mood_ok} | Downloaded: {downloads} | Errors: {errors}",
+        flush=True,
     )
     return 0
 
