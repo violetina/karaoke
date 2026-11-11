@@ -284,6 +284,81 @@ def merge_tracks(track_id_src: int, track_id_dest: int, conn) -> None:
         else:
             cur.execute("UPDATE track_analysis SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
 
+    # Preserve single-row per-track metadata tables when destination lacks a row
+    for tbl in ("track_genre", "track_moods", "track_chords", "track_tone", "track_art", "alignment_support"):
+        try:
+            cur.execute(f"SELECT 1 FROM {tbl} WHERE track_id = %s", (track_id_src,))
+            if cur.fetchone():
+                cur.execute(f"SELECT 1 FROM {tbl} WHERE track_id = %s", (track_id_dest,))
+                if cur.fetchone():
+                    cur.execute(f"DELETE FROM {tbl} WHERE track_id = %s", (track_id_src,))
+                else:
+                    cur.execute(f"UPDATE {tbl} SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
+        except Exception:
+            pass
+
+    # Preserve track_artists if destination has none
+    try:
+        cur.execute("SELECT 1 FROM track_artists WHERE track_id = %s LIMIT 1", (track_id_src,))
+        if cur.fetchone():
+            cur.execute("SELECT 1 FROM track_artists WHERE track_id = %s LIMIT 1", (track_id_dest,))
+            if cur.fetchone():
+                cur.execute("DELETE FROM track_artists WHERE track_id = %s", (track_id_src,))
+            else:
+                cur.execute("UPDATE track_artists SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
+    except Exception:
+        pass
+
+    # Move non-conflicting track_sync_offsets and track_notes
+    try:
+        cur.execute(
+            """
+            DELETE FROM track_sync_offsets s
+            USING track_sync_offsets d
+            WHERE s.track_id = %s AND d.track_id = %s AND s.mode = d.mode
+            """,
+            (track_id_src, track_id_dest),
+        )
+        cur.execute("UPDATE track_sync_offsets SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
+    except Exception:
+        pass
+
+    try:
+        cur.execute(
+            """
+            DELETE FROM track_notes s
+            USING track_notes d
+            WHERE s.track_id = %s AND d.track_id = %s AND s.kind = d.kind AND s.source = d.source
+            """,
+            (track_id_src, track_id_dest),
+        )
+        cur.execute("UPDATE track_notes SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
+    except Exception:
+        pass
+
+    # Repoint playlist and radio session references (radio_session_tracks has NO ACTION FK)
+    try:
+        cur.execute("UPDATE saved_playlist_tracks SET track_id = %s WHERE track_id = %s", (track_id_dest, track_id_src))
+    except Exception:
+        pass
+    try:
+        cur.execute("UPDATE radio_session_tracks SET imported_track_id = %s WHERE imported_track_id = %s", (track_id_dest, track_id_src))
+    except Exception:
+        pass
+
+    # Carry over missing duration/album and sum play_count onto destination track
+    cur.execute(
+        """
+        UPDATE tracks d
+        SET duration = COALESCE(d.duration, s.duration),
+            album = COALESCE(NULLIF(d.album, ''), s.album),
+            play_count = COALESCE(d.play_count, 0) + COALESCE(s.play_count, 0)
+        FROM tracks s
+        WHERE d.track_id = %s AND s.track_id = %s
+        """,
+        (track_id_dest, track_id_src),
+    )
+
     # Delete the source track row from tracks
     cur.execute("DELETE FROM tracks WHERE track_id = %s", (track_id_src,))
 
@@ -369,6 +444,38 @@ def run_deduplication(conn, dry_run: bool = False) -> int:
                 merged_count += 1
                 if src["track_id"] == t1["track_id"]:
                     break  # t1 was merged away; move to next i
+
+    # Pass 2: Repair numeric track-number artists and merge safe cross-artist
+    # duplicates (typos, collaboration token reorders, unmatched uploader handles).
+    try:
+        import importlib.util
+
+        fc_path = Path(__file__).resolve().parent / "find_channel_artist_dupes.py"
+        if fc_path.exists():
+            spec = importlib.util.spec_from_file_location("find_channel_artist_dupes", fc_path)
+            fc = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fc)
+            renamed_num, merged_num = fc.repair_numeric_artist_tracks(conn, apply=not dry_run)
+            _, buckets = fc.find_and_classify(conn)
+            cross_merged = 0
+            for cat in ("AUTO_TYPO_VARIANT", "AUTO_COLLAB_REORDER", "AUTO_CHANNEL_UPLOADER"):
+                for s, chosen, reason, _ in buckets.get(cat, []):
+                    if chosen is None or s["track_id"] in merged_away or chosen["track_id"] in merged_away:
+                        continue
+                    print(f"Cross-artist ({cat}, {reason}): '{s['artist']}' - '{s['title']}' (ID {s['track_id']})")
+                    print(f"              merge into: '{chosen['artist']}' - '{chosen['title']}' (ID {chosen['track_id']})")
+                    if not dry_run:
+                        merge_tracks(s["track_id"], chosen["track_id"], conn)
+                    merged_away.add(s["track_id"])
+                    cross_merged += 1
+            if renamed_num or merged_num or cross_merged:
+                print(
+                    f"Cross-artist cleanup: {renamed_num} numeric artist(s) renamed, "
+                    f"{merged_num + cross_merged} track(s) merged."
+                )
+            merged_count += merged_num + cross_merged
+    except Exception as exc:
+        print(f"Cross-artist cleanup warning: {exc}")
 
     verb = "Would merge" if dry_run else "Merged"
     print(f"Deduplication complete. {verb} {merged_count} duplicate track(s).")

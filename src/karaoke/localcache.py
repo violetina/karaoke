@@ -1587,6 +1587,73 @@ def find_track_id_relaxed(artist: str, title: str,
     return None
 
 
+def find_track_id_for_unmatched_uploader(
+    artist: str, title: str, conn: Connection
+) -> Optional[int]:
+    """Resolve (uploader_artist, title) to a unique resolved library track.
+
+    When a browser tab reports a YouTube uploader/channel name (which is
+    explicitly ``unmatched`` in ``artist_lookups`` or purely numeric) and the
+    song title does not repeat the real artist, match against tracks whose
+    artist IS resolved in ``artist_lookups`` (excluding placeholders/numbers).
+    Only returns a ``track_id`` when all matching resolved tracks belong to a
+    single canonical artist, avoiding false merges on common song titles.
+    """
+    a = (artist or "").strip()
+    t = (title or "").strip()
+    if not a or not t:
+        return None
+
+    try:
+        is_numeric = bool(re.match(r"^\d{1,3}$", a))
+        if not is_numeric:
+            row = conn.execute(
+                "SELECT status FROM artist_lookups WHERE lower(artist_text) = lower(%s) LIMIT 1",
+                (a,),
+            ).fetchone()
+            status = (row["status"] if isinstance(row, dict) else row[0]) if row else None
+            if status != "unmatched":
+                return None
+
+        want_titles = _title_keys(t) | _title_keys(clean_title(t))
+        if not want_titles:
+            return None
+
+        cleaned = clean_title(t) or t
+        words = [w for w in re.sub(r"[^a-z0-9]+", " ", cleaned.casefold()).split() if len(w) > 2]
+        if not words:
+            return None
+        lead = max(words, key=len)
+
+        cands = conn.execute(
+            """
+            SELECT t.track_id, t.artist, t.title
+            FROM tracks t
+            JOIN artist_lookups l ON l.artist_text = t.artist
+            WHERE l.status = 'resolved'
+              AND t.artist !~ '^[0-9]{1,3}$'
+              AND NOT (t.artist LIKE '[%%]')
+              AND lower(t.title) LIKE %s
+            ORDER BY t.track_id ASC
+            LIMIT 100
+            """,
+            (f"%{lead}%",),
+        ).fetchall()
+
+        matched = [
+            r for r in cands
+            if (_title_keys(r["title"]) & want_titles)
+        ]
+        if not matched:
+            return None
+        distinct_artists = {_artist_key(r["artist"]) for r in matched if _artist_key(r["artist"])}
+        if len(distinct_artists) == 1:
+            return int(matched[0]["track_id"])
+    except Exception:
+        return None
+    return None
+
+
 def extract_youtube_id(url: str) -> Optional[str]:
     """Extract the 11-character video ID from a YouTube or YouTube Music URL, ID or filename."""
     if not url:

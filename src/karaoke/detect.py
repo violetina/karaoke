@@ -314,15 +314,26 @@ def record_gap(det: Detection, conn: Connection) -> None:
     Dropping it beats recording a gap nothing can ever fill.
     """
     from . import localcache
+    from .youtube import parse_youtube_title
 
     if not (det.artist or det.title):
         return
+
+    # If title is in "Artist - Title" format and artist is an uploader handle, decode cleanly!
+    artist = det.artist or "Unknown"
+    title = det.title or det.url
+    if any(sep in title for sep in (" - ", " – ", " — ")):
+        clean_a, clean_t = parse_youtube_title(title, artist)
+        if clean_a and clean_t and clean_a.lower() != artist.lower():
+            artist = clean_a
+            title = clean_t
+
     try:
         if det.url:
             kind = "youtube" if is_youtube_url(det.url) else (det.player or "player")
             localcache.add_track_source(
-                det.artist or "Unknown",
-                det.title or det.url,
+                artist,
+                title,
                 album=det.album,
                 duration=det.duration,
                 url=det.url,
@@ -330,9 +341,9 @@ def record_gap(det: Detection, conn: Connection) -> None:
                 player_name=det.player,
                 conn=conn,
             )
-        if not det.artist.strip():
-            log.debug("gap not logged, player gave no artist for %r", det.title)
+        if not artist.strip() or artist == "Unknown":
+            log.debug("gap not logged, player gave no artist for %r", title)
             return
-        localcache.log_lyric_gap(det.artist, det.title, conn)
+        localcache.log_lyric_gap(artist, title, conn)
     except Exception:
         pass

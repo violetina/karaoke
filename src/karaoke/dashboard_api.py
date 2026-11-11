@@ -824,7 +824,17 @@ async def refresh_playing_artist(body: SongActionPayload):
 
     def resolve():
         with localcache.connect() as conn:
-            track_id = localcache.find_track_id(body.artist, body.title, conn)
+            track_id = None
+            if body.url:
+                found = localcache.find_track_by_url(body.url, conn)
+                if found:
+                    track_id = found[0]
+            if track_id is None:
+                track_id = localcache.find_track_id(body.artist, body.title, conn)
+            if track_id is None:
+                track_id = localcache.find_track_id_relaxed(body.artist, body.title, conn)
+            if track_id is None:
+                track_id = localcache.find_track_id_for_unmatched_uploader(body.artist, body.title, conn)
             if track_id is None:
                 track_id = localcache.add_track_source(body.artist, body.title, url=body.url or None, kind="player", conn=conn)
             linked = conn.execute("SELECT 1 FROM track_artists WHERE track_id = %s LIMIT 1", (track_id,)).fetchone()

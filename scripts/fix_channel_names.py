@@ -91,11 +91,22 @@ def strip_quotes(title: str) -> str:
 
 def proposed(row) -> tuple[str, str]:
     """The corrected (artist, title) for a row."""
-    artist = clean_artist(row["artist"] or "")
-    title = strip_quotes(strip_artist_prefix(artist, row["title"] or ""))
+    from karaoke.youtube import parse_youtube_title
+
+    cur_artist = row["artist"] or ""
+    cur_title = row["title"] or ""
+
+    # Check if the title actually contains "Artist - Title"
+    if any(sep in cur_title for sep in (" - ", " – ", " — ")):
+        cand_a, cand_t = parse_youtube_title(cur_title, cur_artist)
+        if cand_a and cand_t and cand_a.lower() != cur_artist.lower():
+            return (cand_a, cand_t)
+
+    artist = clean_artist(cur_artist)
+    title = strip_quotes(strip_artist_prefix(artist, cur_title))
     # Also handle the title repeating the *original* channel name.
-    title = strip_quotes(strip_artist_prefix(row["artist"] or "", title))
-    return (artist or (row["artist"] or ""), title or (row["title"] or ""))
+    title = strip_quotes(strip_artist_prefix(cur_artist, title))
+    return (artist or cur_artist, title or cur_title)
 
 
 def main() -> int:
@@ -117,11 +128,35 @@ def main() -> int:
             print(f"  {row['track_id']:>4}  {row['artist']!r} - {row['title']!r}")
             print(f"        -> {artist!r} - {title!r}")
             if args.apply:
-                conn.execute(
-                    "UPDATE tracks SET artist = ?, title = ? WHERE track_id = ?",
-                    (artist, title, row["track_id"]),
-                )
-            changed += 1
+                try:
+                    with conn.transaction():
+                        conn.execute(
+                            "UPDATE tracks SET artist = %s, title = %s WHERE track_id = %s",
+                            (artist, title, row["track_id"]),
+                        )
+                    changed += 1
+                except Exception as exc:
+                    # If (artist, title) already exists in tracks, merge them using db_cleanup.merge_tracks!
+                    try:
+                        import importlib.util
+                        spec = importlib.util.spec_from_file_location(
+                            "db_cleanup", Path(__file__).resolve().parent / "db_cleanup.py"
+                        )
+                        db_clean = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(db_clean)
+                        dest = conn.execute(
+                            "SELECT track_id FROM tracks WHERE artist = %s AND title = %s",
+                            (artist, title)
+                        ).fetchone()
+                        if dest:
+                            with conn.transaction():
+                                db_clean.merge_tracks(row["track_id"], dest["track_id"], conn)
+                            print(f"        -> Merged duplicate ID {row['track_id']} into ID {dest['track_id']}")
+                            changed += 1
+                        else:
+                            print(f"        -> Failed to update: {exc}")
+                    except Exception as merge_exc:
+                        print(f"        -> Failed to update or merge: {merge_exc}")
 
         if args.apply:
             conn.commit()

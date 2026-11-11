@@ -225,11 +225,41 @@ def get_stage_state() -> dict[str, Any]:
     if artist and title:
         try:
             with localcache.connect() as conn:
-                track_id = localcache.find_track_id(artist, title, conn)
-                if track_id is None and url:
+                # 0a. Prefer URL match first (canonical for browser tabs where MPRIS artist is the uploader)
+                if url:
                     found = localcache.find_track_by_url(url, conn)
                     if found:
                         track_id = found[0]
+
+                # 0b. Check if title is in "Artist - Title" format (common when player reports uploader as artist)
+                if track_id is None and any(sep in title for sep in (" - ", " – ", " — ")):
+                    import re
+                    parts = re.split(r"\s*[-–—]\s*", title, maxsplit=1)
+                    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                        # If the split matches a known library track, adopt the clean artist and title
+                        clean_a, clean_t = parts[0].strip(), parts[1].strip()
+                        split_tid = localcache.find_track_id(clean_a, clean_t, conn) or localcache.find_track_id_relaxed(clean_a, clean_t, conn)
+                        if split_tid is not None:
+                            track_id = split_tid
+                            artist = clean_a
+                            title = clean_t
+
+                if track_id is None:
+                    track_id = localcache.find_track_id(artist, title, conn) or localcache.find_track_id_relaxed(artist, title, conn)
+
+                # 0c. If artist is an unmatched uploader/channel handle, fall back to a unique resolved track with this title
+                if track_id is None:
+                    track_id = localcache.find_track_id_for_unmatched_uploader(artist, title, conn)
+
+                # If track_id was found by URL or relaxed match, canonicalize artist and title from the database!
+                if track_id is not None:
+                    cur = conn.cursor()
+                    cur.execute("SELECT artist, title FROM tracks WHERE track_id = %s", (track_id,))
+                    t_row = cur.fetchone()
+                    if t_row and t_row["artist"] and t_row["title"]:
+                        # If current artist looks like a raw uploader handle and db has the real artist in title or artist
+                        artist = t_row["artist"]
+                        title = t_row["title"]
 
                 if track_id is not None:
                     av_mode: Optional[str] = None

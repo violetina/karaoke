@@ -219,28 +219,72 @@ def scan_and_ingest_folder(
                     album = fp.album or album
                     stats["fingerprinted"] += 1
 
-            # 1d. Fallback: Filename parser for "Artist - Title.ext" pattern
-            if not artist or artist.lower() in ("unknown", "track") or title == path.stem:
+            # 1d. Fallback: Filename & parent-directory parser when tags are missing or numeric
+            if not artist or artist.lower() in ("unknown", "track") or artist.strip().isdigit() or title == path.stem:
                 import re
                 stem = path.stem
                 parts = re.split(r'\s+-\s+', stem)
                 if len(parts) == 1 and "-" in stem:
                     parts = re.split(r'-', stem)
-                
+
                 parts = [p.strip() for p in parts if p.strip()]
-                if len(parts) >= 2:
+                fn_artist = ""
+                fn_title = ""
+                if len(parts) >= 3 and re.match(r'^(?:\d+|\(\d+\))$', parts[0]):
+                    # "12 - Beth Carvalho - Dança da Solidão"
+                    fn_artist = parts[1]
+                    fn_title = " - ".join(parts[2:])
+                elif len(parts) >= 4 and re.match(r'^(?:\d+|\(\d+\))$', parts[2]):
+                    # "Dhafer Youssef - Electric sufi - 05 - La Prière De L'Absent"
                     fn_artist = parts[0]
-                    fn_title = " - ".join(parts[1:])
-                    # Clean track number prefixes (e.g. "07 ", "(01) ", "01. ", "01 - ")
-                    fn_artist_clean = re.sub(r'^(?:\d+|\(\d+\))[\s._-]*', '', fn_artist).strip()
-                    if fn_artist_clean:
-                        fn_artist = fn_artist_clean
-                    
-                    if fn_artist and fn_title:
-                        if not artist or artist.lower() in ("unknown", "track"):
-                            artist = fn_artist
-                        if title == path.stem:
-                            title = fn_title
+                    fn_title = " - ".join(parts[3:])
+                elif len(parts) >= 2:
+                    cand_a = re.sub(r'^(?:\d+|\(\d+\))[\s._-]*', '', parts[0]).strip()
+                    cand_t = " - ".join(parts[1:])
+                    if cand_a and not cand_a.isdigit():
+                        fn_artist = cand_a
+                        fn_title = cand_t
+                    else:
+                        # "02 - Magic" -> parts[0] was just a track number!
+                        fn_title = cand_t
+                        m_paren = re.match(r'^(.+?)\s*\(([^)]+)\)\s*$', fn_title)
+                        if m_paren and not re.search(r'\b(live|remix|edit|version|remaster|feat|ft|demo|mono|stereo|cd|us|uk)\b', m_paren.group(2), re.I):
+                            # e.g. "01- La Gitane (Angelo Debarre Trio)"
+                            fn_title = m_paren.group(1).strip()
+                            fn_artist = m_paren.group(2).strip()
+
+                # If artist is still empty or purely numeric, infer from parent folder hierarchy
+                if not fn_artist or fn_artist.isdigit():
+                    _SKIP_DIRS = {"music", "music-backup-data", "album", "albums", "live", "box set", "compilation", "compilations", "ep", "singles", "ost", "soundtrack"}
+                    for parent in path.parents:
+                        pname = parent.name.strip()
+                        if not pname or pname.lower() in _SKIP_DIRS or parent == root.parent:
+                            if parent == root:
+                                break
+                            continue
+                        # Skip album folders that start with a year like "1993 - Demon Box" or "[2014] Ghost Stories"
+                        if re.match(r'^(?:\[\d{4}\]|\(\d{4}\)|\d{4})\s*[-–—]?\s*', pname):
+                            # Unless the folder itself is "(1988) Frank Zappa - 53 - Album"
+                            m_zappa = re.match(r'^\(\d{4}\)\s+([^-]+?)\s+-\s+\d+\s+-', pname)
+                            if m_zappa:
+                                fn_artist = m_zappa.group(1).strip()
+                                break
+                            continue
+                        if re.match(r'^\(\d{4}\s*-\s*\d{4}\)', pname):
+                            continue
+                        # Strip discography suffixes e.g. "COLDPLAY - DISCOGRAPHY (1998-14) [CHANNEL NEO]"
+                        cleaned_dir = re.sub(r'\s*[-_]*\s*discography.*$', '', pname, flags=re.I).strip()
+                        if cleaned_dir and not cleaned_dir.isdigit() and "by jamal" not in cleaned_dir.lower():
+                            fn_artist = cleaned_dir.title() if cleaned_dir.isupper() else cleaned_dir
+                            break
+                        if parent == root:
+                            break
+
+                if fn_artist and not fn_artist.isdigit():
+                    if not artist or artist.lower() in ("unknown", "track") or artist.strip().isdigit():
+                        artist = fn_artist
+                if fn_title and (title == path.stem or re.match(r'^\d{1,3}\s*[-.]', title)):
+                    title = fn_title
 
             if not artist or not title:
                 log.warning("Skipping %s: missing artist/title after tags & fingerprint", path.name)
