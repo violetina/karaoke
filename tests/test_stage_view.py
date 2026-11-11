@@ -87,11 +87,15 @@ def test_get_stage_state_with_playback_and_lyrics():
          patch("karaoke.playerctl.status", return_value="Playing"), \
          patch("karaoke.playerctl.art_url", return_value="https://art.example/cover.jpg"), \
          patch("karaoke.localcache.connect") as mock_conn, \
+         patch("karaoke.localcache.find_track_by_url", return_value=None), \
          patch("karaoke.localcache.find_track_id", return_value=123), \
          patch("karaoke.localcache.get_lyrics_by_track_id", return_value=fake_ly), \
          patch("karaoke.track_analysis.ensure_schema"), \
          patch("karaoke.localcache.load_active_queue", return_value=fake_queue):
 
+        # The library row the stage canonicalizes the playing artist/title from.
+        fake_conn.cursor.return_value.fetchone.return_value = {
+            "artist": "Queen", "title": "Bohemian Rhapsody"}
         mock_conn.return_value.__enter__.return_value = fake_conn
 
         state = get_stage_state()
@@ -142,11 +146,14 @@ def test_get_stage_state_passes_current_av_mode_to_lyrics_lookup():
          patch("karaoke.playerctl.status", return_value="Playing"), \
          patch("karaoke.playerctl.art_url", return_value=""), \
          patch("karaoke.localcache.connect") as mock_conn, \
+         patch("karaoke.localcache.find_track_by_url", return_value=None), \
          patch("karaoke.localcache.find_track_id", return_value=923), \
          patch("karaoke.localcache.get_lyrics_by_track_id", return_value=fake_ly) as mock_get_lyrics, \
          patch("karaoke.track_analysis.ensure_schema"), \
          patch("karaoke.localcache.load_active_queue", return_value={"current_index": 0, "rows": []}):
 
+        fake_conn.cursor.return_value.fetchone.return_value = {
+            "artist": "PJ Harvey", "title": "Man-Size"}
         mock_conn.return_value.__enter__.return_value = fake_conn
 
         get_stage_state()
