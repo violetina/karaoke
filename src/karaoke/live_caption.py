@@ -620,9 +620,7 @@ def render_captions_html() -> str:
         <option value="faster-whisper-tiny">🚀 Whisper Tiny (Fast Local)</option>
         <option value="faster-whisper-base">🎯 Whisper Base (Local)</option>
         <option value="gemini-2.5-flash">✨ Gemini 2.5 Flash (API)</option>
-        <option value="gemini-1.5-flash">✨ Gemini 1.5 Flash (API)</option>
         <option value="gemma-2-9b-it">💎 Gemma 2 9B (Dutch Refiner API)</option>
-        <option value="gemma-3-27b-it">💎 Gemma 3 27B (Dutch Refiner API)</option>
       </select>
       <input type="password" id="api-key-input" placeholder="API Key (violetina...)" class="input-key" style="display:none;" onchange="updateConfig()" />
       <button class="btn" onclick="toggleColor()">Color</button>
