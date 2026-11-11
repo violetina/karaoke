@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.1 — Genre verdict stays on the search index
+
+- The CLAP genre verdict (`genre`, `genre_score`, `genre_runner_up`, new `genre_runner_up_score`, plus `audio_genre*`) is now built into the `tracks` document from `track_genre` and refreshed by `embed_clap` after the CLAP step. Before, only `scripts/label_genres.py` wrote it, so any reindex dropped it (`genre_score` was on 569 of 18,823 docs, now 15,240). Blank verdicts produce no genre field.
+- `scripts/enqueue_mood_chords.py` also queues the `clap` step for tracks with no genre row (no CLAP vector yet), so the batch labels their genre too.
+- Orphan vector docs left by the artist cleanup were removed from `karaoke-clap` and `karaoke-progression`.
+
 ## 1.7.0 — OpenSearch Dashboards, Mood/Chords v2 search, and artist cleanup
 
 ### OpenSearch Dashboards (new)

@@ -50,19 +50,21 @@ def main() -> int:
                    COALESCE(ta.mbid, 'str:' || lower(t.artist)) AS grp,
                    COALESCE(a.name, t.artist) AS grp_name,
                    (m.track_id IS NULL OR m.mood_version < %s) AS need_mood,
-                   (c.track_id IS NULL OR c.chords_version < %s) AS need_chords
+                   (c.track_id IS NULL OR c.chords_version < %s) AS need_chords,
+                   (g.track_id IS NULL) AS need_clap
             FROM tracks t
             LEFT JOIN track_artists ta ON ta.track_id = t.track_id AND ta.position = 0
             LEFT JOIN artists a ON a.mbid = ta.mbid
             LEFT JOIN track_moods m ON m.track_id = t.track_id
             LEFT JOIN track_chords c ON c.track_id = t.track_id
+            LEFT JOIN track_genre g ON g.track_id = t.track_id
             WHERE length(trim(t.artist)) > 0
             ORDER BY t.track_id
             """,
             (MOOD_VERSION, CHORDS_VERSION),
         ).fetchall()
         from collections import Counter, defaultdict
-        rows = [r for r in allrows if r["need_mood"] or r["need_chords"]]
+        rows = [r for r in allrows if r["need_mood"] or r["need_chords"] or r["need_clap"]]
         if args.exclude_top:
             sizes = Counter(r["grp"] for r in allrows)
             names = {r["grp"]: r["grp_name"] for r in allrows}
@@ -76,7 +78,7 @@ def main() -> int:
         rows = [r for _, r in sorted(
             ((i, r) for lst in by_artist.values() for i, r in enumerate(lst)),
             key=lambda x: (x[0], x[1]["track_id"]))]
-        print(f"{len(rows)} tracks missing current mood and/or chords")
+        print(f"{len(rows)} tracks missing current mood, chords and/or a CLAP vector (genre)")
 
         queued = no_source = failed = 0
         artists_hit: set = set()
@@ -91,7 +93,8 @@ def main() -> int:
             if seen <= args.offset:
                 continue
             steps = [s for s, need in (("chords", r["need_chords"]),
-                                       ("mood", r["need_mood"])) if need]
+                                       ("mood", r["need_mood"]),
+                                       ("clap", r["need_clap"])) if need]
             url_row = conn.execute(
                 "SELECT url FROM sources WHERE track_id = %s AND kind IN "
                 "('youtube','youtube_music') ORDER BY (kind='youtube_music') DESC LIMIT 1",
