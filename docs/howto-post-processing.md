@@ -165,9 +165,20 @@ The **year** step (`resolve_year`, right after `resolve_artist` so the search do
 - Live and compilation albums are ruled out by name (no request) or by MusicBrainz secondary
   type, and get no album year. A year written in the title (`(2004)`) is used instead; a
   remaster or remix year (`(2021 Remaster)`) is kept only as a last-resort fallback.
+- A year written in the *album name* ("Intégrale #3 (1947)", "Beatport Top 100 June 2015";
+  a range like "1949-1966" gives its first year; live albums excluded) is used as a hint when
+  nothing better exists.
 - An unreachable MusicBrainz stores nothing, so the album is tried again next time.
 - `scripts/backfill_release_years.py` fills the existing library (resumable, about 1.05 s per
   album; run it as a transient `systemd-run --user` unit).
+- `scripts/backfill_release_years.py --recordings` is an opt-in second pass for tracks still
+  without a year (compilation, no-match or no album): one recording search per track, taking the
+  earliest first-release-date of the song's non-live recordings. Outcomes are stored in
+  `recording_year_lookup` and never repeated. The chain does not do this per track, so a
+  library-wide enqueue can never turn into thousands of lookups.
+
+Source priority when several exist: `album` > `recording` > `title` > `album-name` >
+`title-remaster`; a better source always replaces a worse one, never the reverse.
 
 ### 3b. Run the dashboard
 

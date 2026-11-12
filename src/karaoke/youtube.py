@@ -98,18 +98,45 @@ def clean_uploader(uploader: str) -> str:
     return out or (uploader or "").strip()
 
 
+# A right-hand side that is only a version qualifier ("Remastered 2012", "2011 Remaster",
+# "Live", "Mono"): "Song - Remastered 2012" is one title, not "Artist - Title".
+_QUALIFIER_ONLY = re.compile(
+    r"^\(?\s*(?:(?:19|20)\d{2}\s+)?"
+    r"(?:remaster(?:ed)?|re-?mastered|remix(?:ed)?|mono|stereo|live|edit|"
+    r"(?:single|album|radio|extended|original)\s+(?:version|mix|edit)|version)"
+    r"(?:\s+(?:19|20)\d{2}|\s+version)?\s*\)?$",
+    re.IGNORECASE,
+)
+
+
+def _outside_brackets(text: str, sep: str) -> int:
+    """Index of the first ``sep`` that is not inside (), [] or {}; -1 if none."""
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith(sep, i):
+            return i
+    return -1
+
+
 def _split_artist_title(text: str) -> tuple[str, str]:
     """Split "Artist - Title" on the first dash-like separator.
 
-    Returns ("", text) when there is no usable split (both sides must be
-    non-empty after stripping quotes/whitespace).
+    Returns ("", text) when there is no usable split: both sides must be
+    non-empty after stripping quotes/whitespace, the separator must not sit
+    inside brackets ("Song (2002 - Remaster)"), and the right side must not be
+    only a version qualifier ("Song - Remastered 2012").
     """
     for sep in _DASHES:
-        if sep in text:
-            left, right = text.split(sep, 1)
+        at = _outside_brackets(text, sep)
+        if at >= 0:
+            left, right = text[:at], text[at + len(sep):]
             left = left.strip().strip('"\u201c\u201d\u2018\u2019')
             right = right.strip().strip('"\u201c\u201d\u2018\u2019')
-            if left and right:
+            if left and right and not _QUALIFIER_ONLY.match(right):
                 return left, right
     return "", text.strip()
 
@@ -129,6 +156,12 @@ def parse_youtube_title(
     4. Fall back to the cleaned uploader as artist + cleaned title.
     """
     cleaned = _strip_decorations(raw_title)
+    # "Song - Remastered 2012" keeps its qualifier, in brackets like every other title.
+    for sep in _DASHES:
+        at = _outside_brackets(cleaned, sep)
+        if at >= 0 and _QUALIFIER_ONLY.match(cleaned[at + len(sep):].strip()):
+            cleaned = f"{cleaned[:at].strip()} ({cleaned[at + len(sep):].strip().strip('()')})"
+            break
     up = (uploader or "").strip()
 
     if up.lower().endswith("- topic") or up.lower().endswith("topic"):

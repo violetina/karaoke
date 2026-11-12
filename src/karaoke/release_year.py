@@ -8,7 +8,11 @@ in the title.
 What counts as the year, best first (``SOURCE_RANK``):
 
 ``album``           MusicBrainz ``first-release-date`` of the album's release-group
+``recording``       the earliest ``first-release-date`` of the song's own MusicBrainz
+                    recording (one request per track; ``--recordings`` in the backfill)
 ``title``           a bare ``(2004)`` in the title
+``album-name``      a year in the album's name ("Intégrale #3 (1947)", "Beatport Top 100
+                    June 2015"); for a range ("1949-1966") its first year. Live albums excluded
 ``title-remaster``  ``(2021 Remaster)``, ``Remix 2009``: the *reissue* year, an upper
                     bound on the original, used only when nothing better exists
 
@@ -27,7 +31,7 @@ from typing import Any, Optional
 
 from .logger import log
 
-SOURCE_RANK = {"album": 1, "title": 2, "title-remaster": 3}
+SOURCE_RANK = {"album": 1, "recording": 2, "title": 3, "album-name": 4, "title-remaster": 5}
 
 # album_release.status values
 MATCHED, NO_MATCH, LIVE, COMPILATION = "matched", "no-match", "live", "compilation"
@@ -54,6 +58,12 @@ CREATE TABLE IF NOT EXISTS track_year (
     noted_at DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_track_year_year ON track_year (year);
+CREATE TABLE IF NOT EXISTS recording_year_lookup (
+    track_id     INTEGER PRIMARY KEY REFERENCES tracks(track_id) ON DELETE CASCADE,
+    status       TEXT NOT NULL,
+    year         INTEGER,
+    looked_up_at DOUBLE PRECISION NOT NULL
+);
 """
 
 _LIVE_RE = re.compile(
@@ -69,6 +79,7 @@ _ALBUM_NOISE_RE = re.compile(
     r"reissue|version|mono|stereo|disc|disk|cd)\b[^\)\]]*[\)\]]", re.I)
 _DISC_RE = re.compile(r"\s*[-–:,]?\s*\b(?:cd|disc|disk)\s*\d+\b.*$", re.I)
 _YEAR = r"(?:19|20)\d{2}"
+_NAME_YEAR_RE = re.compile(r"(?<![\d#])((?:19|20)\d{2})(?!\d)")
 _BRACKETED_RE = re.compile(r"[\(\[]([^\)\]]*)[\)\]]")
 _DASH_SUFFIX_RE = re.compile(r"\s[-–]\s+([^\(\)\[\]]*)$")
 _PLAIN_TITLE_YEAR_RE = re.compile(rf"[\(\[]\s*({_YEAR})\s*[\)\]]")
@@ -180,6 +191,14 @@ def pick_release_group(groups: list[dict[str, Any]], album: str) -> tuple[Option
     return None, ruled_out or NO_MATCH
 
 
+def album_name_year(album: str) -> Optional[int]:
+    """The first year written in an album's name; None for live albums or none at all."""
+    if not album or is_live(album):
+        return None
+    m = _NAME_YEAR_RE.search(album)
+    return _valid_year(m.group(1)) if m else None
+
+
 def ensure_schema(conn: Any) -> None:
     conn.execute(DDL)
     conn.commit()
@@ -216,6 +235,92 @@ def apply_title_years(conn: Any) -> dict[str, int]:
             counts[found[1]] += 1
     conn.commit()
     return counts
+
+
+def apply_album_name_years(conn: Any) -> int:
+    """Write years found in album names for tracks without a better source. No network."""
+    n = 0
+    rows = conn.execute("SELECT track_id, album FROM tracks"
+                        " WHERE album ~ '(19|20)[0-9]{2}'").fetchall()
+    for r in rows:
+        year = album_name_year(r["album"])
+        if year and set_year(conn, r["track_id"], year, "album-name"):
+            n += 1
+    conn.commit()
+    return n
+
+
+def pick_recording_year(artist: str, title: str, recordings: list[dict[str, Any]]) -> Optional[int]:
+    """Earliest release year among the recordings that are this song by this artist.
+
+    Live, demo and rehearsal recordings are skipped: their date is not the song's.
+    """
+    from . import artist_identity as ai
+
+    want = ai.normalize(ai.clean_title(title))
+    years = []
+    for r in recordings:
+        if int(r.get("score") or 0) < ai.MIN_SCORE:
+            continue
+        if ai.normalize(ai.clean_title(r.get("title", ""))) != want:
+            continue
+        if not ai.credit_matches(artist, ai.credits_of(r)):
+            continue
+        if re.search(r"\b(live|demo|rehearsal|session|bootleg)\b", r.get("disambiguation", ""), re.I):
+            continue
+        year = release_year_of(r.get("first-release-date", ""))
+        if year:
+            years.append(year)
+    return min(years) if years else None
+
+
+def lookup_recording(musicbrainz: Any, artist: str, title: str,
+                     arid: str = "") -> tuple[Optional[int], str]:
+    """One recording search. ``(None, "unreachable")`` when MusicBrainz failed."""
+    from . import artist_identity as ai
+
+    who = f"arid:{arid}" if arid else f"artist:{musicbrainz.quote(artist)}"
+    data = musicbrainz.get("recording/", {
+        "query": f"recording:{musicbrainz.quote(ai.clean_title(title))} AND {who}",
+        "limit": "100"})
+    if data is None:
+        return None, "unreachable"
+    year = pick_recording_year(artist, title, data.get("recordings") or [])
+    return year, MATCHED if year else NO_MATCH
+
+
+def pending_recordings(conn: Any, limit: Optional[int] = None) -> list[dict[str, Any]]:
+    """Tracks with no year yet that are worth a recording lookup, oldest ids first."""
+    rows = conn.execute("""
+        SELECT t.track_id, t.artist, t.title, t.album,
+               (SELECT ta.mbid FROM track_artists ta
+                 WHERE ta.track_id = t.track_id AND ta.position = 0) AS arid
+        FROM tracks t
+        WHERE NOT EXISTS (SELECT 1 FROM track_year y WHERE y.track_id = t.track_id
+                          AND y.source <> 'title-remaster')
+          AND NOT EXISTS (SELECT 1 FROM recording_year_lookup l WHERE l.track_id = t.track_id)
+        ORDER BY t.track_id""").fetchall()
+    out = [dict(r) for r in rows
+           if not is_live(r["title"] or "") and not is_live(r["album"] or "")
+           and not _FULL_DATE_RE.search(r["title"] or "")]
+    return out[:limit] if limit else out
+
+
+def resolve_recording(conn: Any, musicbrainz: Any, track: dict[str, Any]) -> str:
+    """Look one track's own recording up and store the outcome (not when unreachable)."""
+    year, status = lookup_recording(musicbrainz, track["artist"], track["title"],
+                                    track.get("arid") or "")
+    if status == "unreachable":
+        return status
+    conn.execute(
+        "INSERT INTO recording_year_lookup (track_id, status, year, looked_up_at)"
+        " VALUES (%s, %s, %s, %s) ON CONFLICT (track_id) DO UPDATE SET status = EXCLUDED.status,"
+        " year = EXCLUDED.year, looked_up_at = EXCLUDED.looked_up_at",
+        (track["track_id"], status, year, time.time()))
+    if year:
+        set_year(conn, track["track_id"], year, "recording")
+    conn.commit()
+    return status
 
 
 def lookup_album(musicbrainz: Any, album: str, artist: str,
@@ -296,6 +401,10 @@ def resolve_track(track_id: int, conn: Any, musicbrainz: Any = None) -> str:
     found = title_year(row["title"])
     if found:
         set_year(conn, track_id, found[0], found[1])
+        conn.commit()
+    hint = album_name_year(row["album"])
+    if hint:
+        set_year(conn, track_id, hint, "album-name")
         conn.commit()
     if not (row["album"] or "").strip():
         return "title" if found else "no-album"

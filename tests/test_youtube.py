@@ -379,3 +379,18 @@ def test_fetch_metadata_prunes_after_download(monkeypatch, tmp_path):
     assert meta["path"] == str(downloaded)
     assert downloaded.exists()
     assert not old.exists()
+
+
+def test_a_version_qualifier_is_not_an_artist_title_split():
+    # Topic channel: the uploader is the artist.
+    assert parse_youtube_title("Porcelina Of The Vast Oceans - Remastered 2012",
+                               "The Smashing Pumpkins - Topic") == (
+        "The Smashing Pumpkins", "Porcelina Of The Vast Oceans (Remastered 2012)")
+    assert parse_youtube_title("Knife-Edge - 2012 Remaster", "Emerson, Lake & Palmer - Topic") == (
+        "Emerson, Lake & Palmer", "Knife-Edge (2012 Remaster)")
+    assert parse_youtube_title("Chill Out (Things Gonna Change) (2007 - Remaster)",
+                               "John Lee Hooker") == (
+        "John Lee Hooker", "Chill Out (Things Gonna Change) (2007 - Remaster)")
+    # A real split still works, including when the title itself has a qualifier.
+    assert parse_youtube_title("Queen - Bohemian Rhapsody (2011 Remaster)") == (
+        "Queen", "Bohemian Rhapsody (2011 Remaster)")
