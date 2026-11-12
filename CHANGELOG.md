@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.8.0 — Release years, decade playlists, and index hygiene
+
+### Release year per track (new)
+
+- New `track_year`, `album_release` and `recording_year_lookup` tables and `karaoke.release_year`. The year is looked up once per *album* (one MusicBrainz release-group request shared by all its tracks), with this priority: album, recording, `(YYYY)` in the title, a year in the album name (a range uses its first year), and last a remaster/remix year found in a title (a reissue date, fallback only). Live albums and live titles are skipped; compilations are ruled out by name or MusicBrainz secondary type.
+- `scripts/backfill_release_years.py` fills the library (resumable, about 1.05 s per request; run as a transient `systemd-run --user` unit). `--recordings` adds an opt-in per-track recording lookup for tracks still without a year. Coverage went from 0 to 82.7% of the library.
+- New chain step `resolve_year` (after `resolve_artist`, before the search document is built): one request per new album, none for known ones. The `tracks` index carries an integer `year`, written by the full build, `update_audio_fields` and `reconcile_index.py`.
+
+### Decade smart playlists (new)
+
+- `Decade: Before 1960`, `1960s` ... `2020s`, built by release year. Few songs have been played, so ranking mixes plays (2 points each, up to 3), how many other Smart:/Genre: lists picked the song (1.5 each, up to 3) and synced lyrics (1 / 0.5). Pushed to YouTube Music with the existing lists.
+
+### Index hygiene
+
+- New `scripts/reconcile_index.py` (report by default, `--apply`): deletes orphan docs in `tracks`, `tracks-lines`, `karaoke-clap` and `karaoke-progression`, rebuilds library tracks missing from `tracks`, and syncs artist, title, album, Mood/Chords v2, genre and year fields from PostgreSQL.
+- Fix: `vector_index.rebuild_from_db(track_ids=...)` read bare `tracks` rows, which lack the source, lyrics, genre and mood joins, so a targeted rebuild wrote no documents. It now uses the same joins as a full rebuild.
+- `scripts/label_genres.py` builds its OpenSearch fields through `vector_index.genre_fields` like the chain does, and clearing a verdict removes every genre field (`audio_genre*` and `genre_runner_up_score` used to linger).
+- `docs/vectors.md` rewritten with the real index sizes, the writer list and the backup procedure.
+
+### Titles and artists
+
+- `parse_youtube_title` no longer reads `Song - Remastered 2012` as `Artist - Title`, nor splits on a dash inside brackets (`Song (2002 - Remaster)`); the qualifier stays on the title. `scripts/fix_version_only_titles.py` repaired 17 existing rows (12 merged into the correct track, 5 renamed); 12 with no album to infer the artist from are reported only.
+
+### Operations
+
+- The database pool is capped at 10 connections per process with idle connections closed after 30 s (`KARAOKE_PG_POOL_MAX`, `KARAOKE_PG_POOL_MAX_IDLE`).
+- `scripts/enqueue_mood_chords.py` decides CLAP need from the vector index rather than `track_genre` rows.
+
 ## 1.7.1 — Genre verdict stays on the search index
 
 - The CLAP genre verdict (`genre`, `genre_score`, `genre_runner_up`, new `genre_runner_up_score`, plus `audio_genre*`) is now built into the `tracks` document from `track_genre` and refreshed by `embed_clap` after the CLAP step. Before, only `scripts/label_genres.py` wrote it, so any reindex dropped it (`genre_score` was on 569 of 18,823 docs, now 15,240). Blank verdicts produce no genre field.
