@@ -147,6 +147,11 @@ def index_track(track_id: int, *, conn: Any = None, os_client: Any = None,
             c.close()
 
 
+#: Every search field ``genre_fields`` can write; clearing a verdict removes all of them.
+GENRE_FIELDS = ("genre", "genre_score", "genre_runner_up", "genre_runner_up_score",
+                "audio_genre", "audio_genre_runner_up")
+
+
 def genre_fields(genre: Any, score: Any, runner_up: Any, runner_up_score: Any) -> dict[str, Any]:
     """The CLAP zero-shot genre verdict as search fields.
 
@@ -167,6 +172,17 @@ def genre_fields(genre: Any, score: Any, runner_up: Any, runner_up_score: Any) -
         if runner_up_score is not None:
             out["genre_runner_up_score"] = float(runner_up_score)
     return out
+
+
+#: Every search field ``audio_analysis_fields`` can write (reconcile removes stale ones).
+AUDIO_ANALYSIS_FIELDS = (
+    "mood_version", "audio_mood", "audio_feeling", "mood_arc", "feeling_arc",
+    "mood_swing_count", "mood_swings_per_minute", "mood_borderline_share",
+    "mood_share_happy", "mood_share_angry", "mood_share_tender", "mood_share_sad",
+    "chords_version", "harmony_style", "key_mode", "key_tonic", "blues_score",
+    "dominant_share", "cadences_per_minute", "fifth_chains_per_minute", "ii_v_i",
+    "tritone_subs", "secondary_dominants", "backdoor", "andalusian",
+)
 
 
 def audio_analysis_fields(mood_version: Any, mood_summary: Any,
@@ -715,19 +731,12 @@ def rebuild_from_db(
             artist_genres_map = localcache.get_all_artist_genres_map(conn)
             
             if track_ids:
+                # Same joins as a full rebuild (source, lyrics, genre, mood, chords):
+                # a bare SELECT * FROM tracks lacks them and yields unusable docs.
                 rows = []
-                cur = conn.cursor()
                 for batch_idx in range(0, len(track_ids), 900):
-                    batch = track_ids[batch_idx:batch_idx + 900]
-                    cur.execute(
-                        f"SELECT * FROM tracks WHERE track_id = ANY(%s)",
-                        (batch,)
-                    )
-                    rows.extend([dict(r) for r in cur.fetchall()])
-                
-                # Fetch genres and analysis inline for these rows if needed since iter_track_rows
-                # might be doing joins. For simplicity and correctness with the new signature,
-                # let's modify iter_track_rows to optionally accept track_ids.
+                    rows.extend(dict(r) for r in iter_track_rows(
+                        conn, track_ids=list(track_ids[batch_idx:batch_idx + 900])))
             else:
                 rows = list(iter_track_rows(conn))
                 

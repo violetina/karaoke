@@ -118,6 +118,22 @@ def test_rebuild_from_db_indexes_tracks_and_lines(tmp_path):
 
 
 
+def test_rebuild_with_track_ids_uses_the_full_row_joins(tmp_path):
+    """A targeted rebuild must carry source, lyrics and genre like a full one."""
+    db = tmp_path / "karaoke.db"
+    _seed_db(db)
+    fake = FakeOpenSearch()
+
+    stats = vector_index.rebuild_from_db(
+        db_path=str(db), track_ids=[1], embed=False, include_lines=True, os_client=fake)
+
+    assert (stats.seen, stats.indexed, stats.errors) == (1, 1, 0)
+    doc = fake.docs[0][2]
+    assert doc["source_url"] == "https://www.youtube.com/watch?v=_3tkup9b-iM"
+    assert doc["has_synced"] is True
+    assert stats.line_docs == 2
+
+
 def test_rebuild_batches_writes_into_bulk_requests(tmp_path):
     """All docs for a small library go out in a single _bulk call, not per-doc."""
     db = tmp_path / "karaoke.db"

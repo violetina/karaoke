@@ -1,6 +1,8 @@
 # Vectors: what exists, and what is empty
 
-Five vector fields are defined. **All five are fully populated** and indexed in OpenSearch. Coverage is monitored and kept at 100% for primary indexes.
+Five vector fields are defined, in six indexes (counts as of 2026-11-12, library of 19,168 tracks).
+Coverage is **not** 100% for the audio indexes: they need the audio file, so a track whose audio
+is gone or never downloaded can sit without a vector until the post-processing chain reaches it.
 
 `docs/vector-search-plan.md` is the older *plan* and describes proposed indexes
 rather than what runs; read this page for the current state.
@@ -9,22 +11,64 @@ rather than what runs; read this page for the current state.
 
 | index | field | dims | docs | library coverage | fed by |
 |---|---|---|---|---|---|
-| `tracks` | `lyrics_vector` | 384 | **1,066** | **100%** | `karaoke.vector_index --rebuild` |
-| `tracks-lines` | `line_vector` | 384 | **33,923** | **100% (per line)** | `--rebuild --lines` |
-| `tracks-notes` | `note_vector` | 384 | **5** | **100% (per note)** | `--rebuild --notes` |
-| `karaoke-audio` | `audio_vector` | 62 | **341** | spectral audio feature vectors | `recordings`, `vectorize_cached.py` |
-| `karaoke-clap` | `clap_vector` | 512 | **194** | CLAP zero-shot audio vectors | `autoclassify.py`, `clap_index.py` |
+| `tracks` | `lyrics_vector` | 384 | **19,168** | 100% (every track, even without lyrics, see below) | `karaoke.vector_index`, chain step `rebuild_vectors` |
+| `tracks-lines` | `line_vector` | 384 | **297,167** | per synced line: 8,632 tracks have timed lyrics | `--rebuild --lines` |
+| `tracks-notes` | `note_vector` | 384 | **6** | per note | `--rebuild --notes` |
+| `karaoke-audio` | `audio_vector` | 62 | **381** | 260 captured recordings + 121 library tracks | `recordings`, `vectorize_cached.py` |
+| `karaoke-clap` | `clap_vector` | 512 | **18,904** | 98.6% (264 tracks without one) | chain step `embed_clap` |
+| `karaoke-progression` | `progression_vector` | chord/key movement | **18,939** | 98.8% (229 tracks without one) | chain step `analyze_harmony` |
+
+The `tracks` documents also carry the flat audio-analysis fields (Mood v2, Chords v2 and
+the CLAP genre verdict); see [Search fields written outside the embedding step](#search-fields-written-outside-the-embedding-step).
+
+## Keeping the indexes in step with PostgreSQL
+
+PostgreSQL is the source of truth; every index is derived. The live write paths are:
+
+| writer | writes |
+|---|---|
+| chain step `rebuild_vectors` (`vector_index.index_track`) | the whole `tracks` document (+ lines) |
+| chain step `embed_clap` | `karaoke-clap` vector, then `vector_index.update_audio_fields` for mood, chords and genre |
+| `scripts/label_genres.py` | `track_genre` rows, mirrored through `vector_index.genre_fields` (the same helper as the chain) |
+| `scripts/reconcile_index.py` | brings all of the above back in line after batches, merges or renames |
+
+`scripts/reconcile_index.py` (report only; add `--apply`) deletes docs whose track no longer
+exists, rebuilds tracks missing from `tracks` (targeted by id, with lines), and partial-updates
+documents whose artist/title/album or Mood/Chords/genre fields differ from PostgreSQL, removing
+fields the database no longer backs. Tracks missing a CLAP or progression doc need audio: queue
+them with `scripts/enqueue_mood_chords.py` and the Celery workers. A blank genre verdict produces
+no genre field at all, and a blank `audio_genre*` string counts as absent.
+
+Never call `rebuild_from_db()` without `track_ids=[...]` after a subset batch: a bare call
+re-embeds the whole library. A targeted call reads rows through `iter_track_rows`, the same
+joins as a full rebuild (source, lyrics, genre, mood, chords).
+
+### Backups
+
+Audio vectors cannot be regenerated once the audio is gone, so they are copied out:
+
+```bash
+python scripts/vector_backup.py backup          # clap, audio, progression -> Postgres vector_backup
+python scripts/vector_backup.py verify
+python scripts/vector_backup.py export backups/vectors-YYYYMMDD.jsonl.gz   # portable copy
+python scripts/backup_opensearch_to_postgres.py --indices tracks,tracks-notes   # opensearch_snapshots
+```
+
+Both backups only upsert. Documents deleted from OpenSearch (merged or removed tracks) stay in
+the backup, so a restore would bring them back: `verify` reports them as `only_in_backup`.
+Prune deliberately, not automatically, because those vectors are irreplaceable.
 
 ## Gap-Fill & Vector Sampler Pipeline
 
-Run `python scripts/fill_analysis_and_vector_gaps.py`:
-1. Identifies all tracks lacking Key/BPM/Energy analysis or CLAP genre labels.
-2. Generates `~/.local/share/karaoke/playlist_gap_fill.json`.
-3. Runs zero-shot CLAP classification & audio feature extraction.
-4. Updates OpenSearch vector indices (`tracks`, `tracks-lines`).
+The current route for filling gaps is the Celery chain: `scripts/enqueue_mood_chords.py --limit N`
+publishes only the steps each track is missing (mood, chords, and `clap` when the track has no
+vector in `karaoke-clap`). Older standalone scripts predate it
+(`fill_analysis_and_vector_gaps.py`, `fill_library_gaps.py`, `fill_local_gaps.py`,
+`batch_enrich_chords_and_vectors.py`, `batch_process_chords_vectors.py`, `backfill_*.py`);
+prefer the chain unless you need a sequential run with a per-track CSV report.
 
-PostgreSQL remains the source of truth; all of these are derived, and all but one
-are rebuildable.
+PostgreSQL remains the source of truth; all of these are derived, and all but the audio
+vectors are rebuildable.
 
 ## Two audio spaces, answering different questions
 
@@ -63,9 +107,9 @@ It remains useful for what it is good at — near-duplicate detection between tw
 captures of the same performance — and it is free, needing neither model nor
 network.
 
-Documents are `source: recording` (154, one per captured performance, keyed by
+Documents are `source: recording` (260, one per captured performance, keyed by
 start time because the same song heard twice is two observations) or
-`source: library` (120, one per track, the release itself). Comparing across
+`source: library` (121, one per track, the release itself). Comparing across
 the two is not purely musical: a capture is taken from the sink monitor, so it
 is a clean digital copy rather than a microphone recording, but it still passes
 through whatever mixing and resampling the sink applied.
@@ -97,9 +141,12 @@ will not install here (no cp314 wheels, and the ebuild's `libclang` dependency
 exists in no repo).
 
 Stored in **both** places: `track_genre` in PostgreSQL is the source of truth, and
-`genre` / `genre_score` / `genre_runner_up` are mirrored onto the CLAP and
-track documents so a search can filter without a join. 116 tracks are labelled;
-4 matched nothing and are deliberately left unlabelled.
+the verdict is mirrored onto the track document (`genre`, `genre_score`, `genre_runner_up`,
+`genre_runner_up_score` and the `audio_genre*` copies) and the CLAP document (`genre`,
+`genre_score`, `genre_runner_up`) so a search can filter without a join. 15,396 tracks are
+labelled; about 3,500 CLAP-embedded tracks matched no label and are deliberately left
+without a row or field. Chain, `label_genres.py` and `reconcile_index.py` all build the
+fields through `vector_index.genre_fields`.
 
 `k` in the TUI labels the sampled excerpt too, which is the only route for a
 Spotify-only track — with no downloadable audio, the 45-second capture is the
@@ -121,11 +168,11 @@ breaking Portishead (`trip hop` → `hip hop`) and Will Smith (`hip hop` →
 
 ## Lyrics: well covered, with one trap
 
-944 of 1,066 tracks have approved lyrics and a genuine `lyrics_vector`, so semantic lyric search works broadly.
+10,788 of 19,168 tracks have lyrics (8,774 of them timed) and a genuine `lyrics_vector`, so semantic lyric search covers a little over half the library.
 
 The trap: **a track with no words still gets a vector.** `_embedding_text`
 falls back to `"{title} {artist} {album}"` when a track has no plain lyrics,
-and that goes into the same field a lyric query searches. 122 of the indexed
+and that goes into the same field a lyric query searches. about 8,400 of the indexed
 documents are in that state, so a search for a half-remembered line can return
 an instrumental because its *title* is semantically close — and nothing in the
 result says which basis it matched on.
@@ -135,6 +182,14 @@ result says which basis it matched on.
 `track_notes` holds text about a track that is not its lyrics — artist
 biographies, raw transcriptions — and is now fully indexed under the `tracks-notes`
 index using the command `--notes`.
+
+## Search fields written outside the embedding step
+
+Mood v2 (`audio_mood`, `audio_feeling`, `mood_arc`, `mood_share_*`, ...) and Chords v2
+(`harmony_style`, `key_mode`, `blues_score`, `ii_v_i`, ...) are flattened by
+`vector_index.audio_analysis_fields` from `track_moods` / `track_chords` at the current version
+only; the mood timeline is made after the search document, so `update_audio_fields` adds them.
+Current coverage in `tracks`: genre 15,396, audio mood 16,718, harmony 16,797.
 
 ## What is queryable, and what is not
 

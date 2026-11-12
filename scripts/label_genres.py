@@ -1,6 +1,6 @@
 """Label every CLAP-embedded track with a genre, and store it both places.
 
-SQLite is the source of truth, as everywhere else here; the OpenSearch copy
+PostgreSQL is the source of truth, as everywhere else here; the OpenSearch copy
 exists so a search can filter or facet on it without a join back to the
 database.
 """
@@ -10,7 +10,7 @@ import argparse
 import time
 from typing import Optional
 
-from karaoke import clap_vector, genre, localcache
+from karaoke import clap_vector, genre, localcache, vector_index
 from karaoke.logger import log
 
 
@@ -19,10 +19,10 @@ def _forget_genre(client, track_id: int) -> None:
     from karaoke.config import settings
     from karaoke.vector_index import track_doc_id
 
-    script = {"script": {"source":
-              "ctx._source.remove('genre'); "
-              "ctx._source.remove('genre_score'); "
-              "ctx._source.remove('genre_runner_up')"}}
+    # Every field vector_index.genre_fields can write, or a cleared verdict
+    # would leave audio_genre* / genre_runner_up_score behind on the document.
+    script = {"script": {"source": "".join(
+        f"ctx._source.remove('{f}'); " for f in vector_index.GENRE_FIELDS)}}
     for index, doc in ((clap_vector.CLAP_INDEX, clap_vector.doc_id(track_id)),
                        (settings.index_name, track_doc_id(track_id))):
         try:
@@ -100,9 +100,9 @@ def run(*, overwrite: bool = False, dry_run: bool = False,
         # Mirror onto both documents: the CLAP one so a sounds-like result can
         # show a label, and the track document so ordinary search can filter.
         try:
-            body = {"doc": {"genre": verdict.genre,
-                            "genre_score": verdict.score,
-                            "genre_runner_up": verdict.runner_up}}
+            body = {"doc": vector_index.genre_fields(
+                verdict.genre, verdict.score, verdict.runner_up,
+                getattr(verdict, "runner_up_score", None))}
             client.update(index=clap_vector.CLAP_INDEX,
                           id=clap_vector.doc_id(track_id), body=body)
         except Exception:

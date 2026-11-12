@@ -22,6 +22,10 @@ clean-tools                  Remove cached helper tools
 ctrl-api                     Launch the host-side control API (playback; needs a desktop session)
 dashboard                    Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
 dashboard-build              Build the Vue 3 dashboard frontend bundle
+dashboards-forward           Expose in-cluster OpenSearch Dashboards on http://localhost:5601
+dashboards-import            Regenerate and import OpenSearch Dashboards saved objects (index patterns, visualizations, dashboards)
+dashboards-install           Deploy OpenSearch Dashboards 3.8.0 into kind-karaoke and import saved objects
+dashboards-uninstall         Remove OpenSearch Dashboards Helm release and stop the port-forward unit
 db-cleanup                   Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
@@ -39,7 +43,7 @@ format                       Run formatters
 health                       Run the karaoke platform health check (services, ports, cluster, DB)
 healthz                      Verify systemd karaoke services and K3s apps are healthy
 help                         Show available targets
-index-youtube-cache          Add cached YouTube downloads to SQLite so they show in browse
+index-youtube-cache          Add cached YouTube downloads to PostgreSQL so they show in browse
 install                      Install dependencies and the karaoke package
 install-audio                Install the isolated key/tempo analysis stack (essentia, librosa) into $(AUDIO_VENV)
 install-confluence           Install optional Confluence publishing dependencies
@@ -48,7 +52,7 @@ k8s-deploy                   Deploy the library API to the kind cluster
 k8s-load                     Load the image into the kind cluster
 k8s-logs                     Follow library API pod logs
 k8s-port-forward             Expose the library API on http://localhost:8080
-k8s-seed-db                  Copy the local SQLite library into the cluster PVC
+k8s-seed-db                  Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
 k8s-status                   Show deployed karaoke resources
 k8s-undeploy                 Remove the karaoke API from the cluster (keeps the PVC)
 lint                         Run lint checks
@@ -76,8 +80,8 @@ test-audio                   Verify the audio + identify + lyrics stack (mic, so
 tui                          Launch the clean karaoke control-surface TUI prototype
 upgrade-timings              Upgrade cached lyrics to word-level timing via YouTube captions
 upgrade-timings-dry-run      Preview which cached tracks can gain word-level timing
-vector-index                 Rebuild OpenSearch vector indexes from SQLite (set LINES=1 for line docs)
-vector-index-dry-run         Preview SQLite -> OpenSearch vector indexing without writing
+vector-index                 Rebuild OpenSearch vector indexes from PostgreSQL (set LINES=1 for line docs)
+vector-index-dry-run         Preview PostgreSQL -> OpenSearch vector indexing without writing
 vector-status                Show OpenSearch vector index status and rebuild progress
 venv                         Create virtual environment
 view_makeflow                Open generated SVG locally

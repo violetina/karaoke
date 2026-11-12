@@ -455,6 +455,19 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.dashboard_api
 
+
+## Av Align
+
+::: karaoke.av_align
+
+## Line Looper
+
+::: karaoke.line_looper
+
+## Queue Follower
+
+::: karaoke.queue_follower
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the
