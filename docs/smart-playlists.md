@@ -51,6 +51,21 @@ Within each, the more dedicated artist (fewer broad genres) first.
 | Radio Discoveries Set | the songs radio mode found, sequenced |
 | Sing-along Favourites | most played songs with synced lyrics |
 
+**Decade: …** — Before 1960, 1960s, 1970s, 1980s, 1990s, 2000s, 2010s, 2020s. A
+song belongs to a decade by its release year (`track_year`: album, recording, title or
+album-name year; a remaster year found in a title is a reissue date and does not
+count). Songs with no known year are in no decade list. Few songs have been played,
+so the ranking mixes three signals instead of play count alone:
+
+| Signal | Points |
+|---|---|
+| plays (up to 3) | 2 each |
+| other Smart:/Genre: lists that already picked the song (up to 3) | 1.5 each |
+| synced lyrics / plain lyrics | 1 / 0.5 |
+
+The Decade lists are built last in a refresh, so they see the lists saved in the same
+run. A decade with few playable songs (Before 1960) comes out shorter than 99.
+
 ## How every list is shaped
 
 1. **Playable only** — a YouTube / YouTube Music source (the kiosk plays them).

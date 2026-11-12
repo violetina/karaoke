@@ -468,6 +468,11 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.queue_follower
 
+
+## Release Year
+
+::: karaoke.release_year
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the

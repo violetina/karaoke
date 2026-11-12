@@ -1,6 +1,6 @@
 """Playlists that rebuild themselves from what the library knows.
 
-Two kinds, all named so they can be told apart from hand-made lists:
+Three kinds, all named so they can be told apart from hand-made lists:
 
 * ``Genre: <name>`` -- the same match as the TUI's ``H`` genre filter: an
   artist's genres (broad or specific) when the artist is classified, the
@@ -8,6 +8,9 @@ Two kinds, all named so they can be told apart from hand-made lists:
 * ``Smart: <name>`` -- rules over the analysis: the mood timeline's feelings,
   swings and sound-vs-words contrast, and the CLAP timbre of a playlist you
   already have ("More like Komijn 2025").
+
+* ``Decade: <name>`` -- songs by release year (``track_year``), ranked by play
+  count mixed with how many other smart lists picked them.
 
 Every list keeps to songs that can be played (a YouTube source), favours
 songs with synced lyrics -- this is a karaoke library -- allows two songs per
@@ -256,6 +259,53 @@ def discover_ids(conn) -> list[int]:
     return [int(r["track_id"]) for r in rows]
 
 
+#: (rule name suffix, first year, last year); the oldest list has no lower bound.
+DECADES = (("Before 1960", 0, 1959), ("1960s", 1960, 1969), ("1970s", 1970, 1979),
+           ("1980s", 1980, 1989), ("1990s", 1990, 1999), ("2000s", 2000, 2009),
+           ("2010s", 2010, 2019), ("2020s", 2020, 2029))
+
+
+def decade_ids(conn, first: int, last: int, exclude_playlist: str = "") -> list[int]:
+    """Tracks released in ``first``..``last``, best first.
+
+    Few songs have been played, so play count alone cannot rank a decade: it is
+    mixed with how many *other* smart/genre lists already picked the song (a vetted
+    signal from the mood and genre rules) and with karaoke-readiness (synced lyrics).
+    A song's year is the release year in ``track_year``; a remaster/remix year found in
+    a title is a reissue date and does not place a song in a decade.
+    """
+    rows = conn.execute("""
+        SELECT t.track_id,
+               2.0 * LEAST(COALESCE(t.play_count, 0), 3)
+             + 1.5 * LEAST(COALESCE(o.lists, 0), 3)
+             + CASE WHEN EXISTS (SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id
+                                  AND COALESCE(l.synced_lyrics, '') != '') THEN 1.0
+                    WHEN EXISTS (SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id
+                                  AND COALESCE(l.plain_lyrics, '') != '') THEN 0.5
+                    ELSE 0 END AS score
+        FROM tracks t
+        JOIN track_year y ON y.track_id = t.track_id AND y.source <> 'title-remaster'
+        LEFT JOIN (
+            SELECT spt.track_id, COUNT(DISTINCT sp.playlist_id) AS lists
+            FROM saved_playlist_tracks spt
+            JOIN saved_playlists sp ON sp.playlist_id = spt.playlist_id
+            WHERE sp.source_kind = %s AND sp.name <> %s AND spt.track_id IS NOT NULL
+            GROUP BY spt.track_id
+        ) o ON o.track_id = t.track_id
+        WHERE y.year BETWEEN %s AND %s
+        ORDER BY score DESC, t.track_id""",
+        (SOURCE_KIND, exclude_playlist, first, last)).fetchall()
+    return [int(r["track_id"]) for r in rows]
+
+
+def _decade_rule(label: str, first: int, last: int) -> Rule:
+    name = f"Decade: {label}"
+    return Rule(name,
+                f"Songs from {label}: most played and most picked by the other lists first, "
+                "synced lyrics preferred, in flow order",
+                lambda conn, osc: decade_ids(conn, first, last, exclude_playlist=name))
+
+
 def _genre_rule(genre: str) -> Rule:
     return Rule(f"Genre: {genre.title()}",
                 f"Like the TUI's H filter on '{genre}', lyrics first, in flow order",
@@ -307,7 +357,7 @@ RULES: tuple[Rule, ...] = tuple(_genre_rule(g) for g in GENRES) + (
     Rule("Smart: To Discover",
          "Tracks you have never played, grouped smoothly by genre",
          lambda conn, osc: discover_ids(conn)),
-)
+) + tuple(_decade_rule(*d) for d in DECADES)
 
 
 # -- shaping -------------------------------------------------------------------

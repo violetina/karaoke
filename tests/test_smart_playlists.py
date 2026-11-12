@@ -111,7 +111,7 @@ def test_refresh_dry_run_saves_nothing(monkeypatch):
 def test_every_rule_has_a_distinct_name():
     names = [r.name for r in sp.RULES]
     assert len(names) == len(set(names))
-    assert all(n.startswith(("Genre: ", "Smart: ")) for n in names)
+    assert all(n.startswith(("Genre: ", "Smart: ", "Decade: ")) for n in names)
 
 
 def test_genre_penalty_grades_same_related_unrelated_unknown():
@@ -218,3 +218,40 @@ def test_a_weak_family_is_not_an_option():
                          (genre, broad, w))
         conn.commit()
         assert sp.genre_options([_row(1, "Frank Zappa")], conn) == {1: ["rock"]}
+
+
+def test_decade_lists_exist_and_cover_every_year_once():
+    names = [r.name for r in sp.RULES if r.name.startswith("Decade: ")]
+    assert names[0] == "Decade: Before 1960" and names[-1] == "Decade: 2020s"
+    spans = [(first, last) for _, first, last in sp.DECADES]
+    assert all(b[0] == a[1] + 1 for a, b in zip(spans, spans[1:]))
+
+
+def test_decade_ids_rank_by_play_count_other_lists_and_lyrics_and_skip_reissue_years():
+    from karaoke import localcache, release_year
+
+    with localcache.connect() as conn:
+        release_year.ensure_schema(conn)
+        for tid, plays in ((1, 0), (2, 3), (3, 0), (4, 0), (5, 0), (6, 0)):
+            conn.execute("INSERT INTO tracks (track_id, artist, title, play_count)"
+                         " VALUES (%s, %s, %s, %s)", (tid, f"A{tid}", f"T{tid}", plays))
+        for tid, year, source in ((1, 1994, "album"), (2, 1991, "recording"), (3, 1999, "title"),
+                                  (4, 1995, "title-remaster"), (5, 1989, "album"),
+                                  (6, 2001, "album")):
+            conn.execute("INSERT INTO track_year (track_id, year, source, noted_at)"
+                         " VALUES (%s,%s,%s,0)", (tid, year, source))
+        conn.execute("INSERT INTO lyrics (track_id, kind, synced_lyrics, plain_lyrics, source)"
+                     " VALUES (1, 'approved', '[00:01.00]hi', 'hi', 'lrclib')")
+        # track 3 was picked by two other smart lists; the list being built does not count
+        for pid in ("smart-dreamy", "smart-party", "smart-decade-1990s"):
+            conn.execute("INSERT INTO saved_playlists (playlist_id, name, source_kind,"
+                         " created_at, updated_at) VALUES (%s, %s, 'smart', 0, 0)",
+                         (pid, {"smart-dreamy": "Smart: Dreamy", "smart-party": "Smart: Party",
+                                "smart-decade-1990s": "Decade: 1990s"}[pid]))
+            conn.execute("INSERT INTO saved_playlist_tracks (playlist_id, position, track_id, artist, title)"
+                         " VALUES (%s, 0, 3, 'A3', 'T3')", (pid,))
+        conn.commit()
+        ids = sp.decade_ids(conn, 1990, 1999, exclude_playlist="Decade: 1990s")
+        # 2: 3 plays (6.0); 3: two other lists (3.0); 1: synced lyrics (1.0).
+        # 4 (reissue year), 5 (1989) and 6 (2001) are not in the decade.
+        assert ids == [2, 3, 1]
