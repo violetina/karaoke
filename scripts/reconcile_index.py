@@ -25,7 +25,7 @@ from typing import Any, Iterable
 
 from opensearchpy import helpers
 
-from karaoke import clap_vector, localcache, vector_index
+from karaoke import clap_vector, localcache, release_year, vector_index
 from karaoke.config import settings
 from karaoke.vector_index import (AUDIO_ANALYSIS_FIELDS, GENRE_FIELDS, audio_analysis_fields,
                                   genre_fields)
@@ -33,15 +33,17 @@ from karaoke.vector_index import (AUDIO_ANALYSIS_FIELDS, GENRE_FIELDS, audio_ana
 LINES_INDEX = f"{settings.index_name}-lines"
 PROGRESSION_INDEX = "karaoke-progression"
 IDENTITY = ("artist", "title", "album")
-MANAGED = IDENTITY + AUDIO_ANALYSIS_FIELDS + GENRE_FIELDS
+MANAGED = IDENTITY + AUDIO_ANALYSIS_FIELDS + GENRE_FIELDS + ("year",)
 CLAP_MANAGED = ("genre", "genre_score", "genre_runner_up")
 
 SQL = """
 SELECT t.track_id, t.artist, t.title, t.album,
        tm.mood_version, tm.summary AS mood_summary,
        tc.chords_version, tc.harmony AS chord_harmony,
-       tg.genre, tg.score AS genre_score, tg.runner_up, tg.runner_up_score
+       tg.genre, tg.score AS genre_score, tg.runner_up, tg.runner_up_score,
+       ty.year AS release_year
 FROM tracks t
+LEFT JOIN track_year ty ON ty.track_id = t.track_id
 LEFT JOIN track_moods tm ON tm.track_id = t.track_id
 LEFT JOIN track_chords tc ON tc.track_id = t.track_id
 LEFT JOIN track_genre tg ON tg.track_id = t.track_id
@@ -55,6 +57,8 @@ def expected_fields(row: Any) -> dict[str, Any]:
                                         row["chords_version"], row["chord_harmony"]))
     fields.update(genre_fields(row["genre"], row["genre_score"], row["runner_up"],
                                row["runner_up_score"]))
+    if row["release_year"]:
+        fields["year"] = int(row["release_year"])
     return fields
 
 
@@ -104,6 +108,7 @@ def run(apply: bool) -> int:
         print("OpenSearch unreachable")
         return 1
     with localcache.connect() as conn:
+        release_year.ensure_schema(conn)
         rows = {int(r["track_id"]): r for r in conn.execute(SQL).fetchall()}
     print(f"database: {len(rows)} tracks   mode: {'APPLY' if apply else 'dry-run'}")
     known = set(rows)

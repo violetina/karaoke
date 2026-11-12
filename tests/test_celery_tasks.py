@@ -362,6 +362,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     mock_upgrade_task = MagicMock()
     mock_sync_task = MagicMock()
     mock_artist_task = MagicMock()
+    mock_year_task = MagicMock()
     mock_rebuild_task = MagicMock()
     mock_clap_task = MagicMock()
     mock_finish_task = MagicMock()
@@ -387,6 +388,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
     monkeypatch.setattr(tasks, "upgrade_timings", mock_upgrade_task)
     monkeypatch.setattr(tasks, "sync_lyrics", mock_sync_task)
     monkeypatch.setattr(tasks, "resolve_artist", mock_artist_task)
+    monkeypatch.setattr(tasks, "resolve_year", mock_year_task)
     monkeypatch.setattr(tasks, "rebuild_vectors", mock_rebuild_task)
     monkeypatch.setattr(tasks, "embed_clap", mock_clap_task)
     monkeypatch.setattr(tasks, "finish_postprocess", mock_finish_task)
@@ -422,6 +424,7 @@ def test_postprocess_track_orchestrates_flow(monkeypatch):
         mock_upgrade_task.s.return_value,
         mock_sync_task.s.return_value,
         mock_artist_task.s.return_value,
+        mock_year_task.s.return_value,
         mock_rebuild_task.s.return_value,
         mock_clap_task.s.return_value,
         mock_finish_task.s.return_value,
@@ -456,7 +459,7 @@ def test_default_postprocess_leaves_out_the_timing_upgrade(monkeypatch):
         monkeypatch, {"artist": "A", "title": "B", "url": "http://youtube.com/v"})
     assert "upgrade_timings" not in names
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
-                     "analyze_harmony", "sync_lyrics", "resolve_artist", "rebuild_vectors",
+                     "analyze_harmony", "sync_lyrics", "resolve_artist", "resolve_year", "rebuild_vectors",
                      "embed_clap", "finish_postprocess"]
 
 
@@ -466,7 +469,8 @@ def test_asking_for_timings_puts_the_upgrade_back_in_order(monkeypatch):
                       "include_timings": True})
     assert names == ["resolve_track_id", "download_audio", "analyze_audio",
                      "analyze_harmony", "upgrade_timings", "sync_lyrics",
-                     "resolve_artist", "rebuild_vectors", "embed_clap", "finish_postprocess"]
+                     "resolve_artist", "resolve_year", "rebuild_vectors", "embed_clap",
+                     "finish_postprocess"]
 
 
 def test_enqueue_postprocess_uses_orchestrator(monkeypatch):

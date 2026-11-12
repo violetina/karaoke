@@ -137,7 +137,7 @@ front of the fast steps of the next song:
 
 | Queue | Worker | Runs |
 |---|---|---|
-| `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, artist, vectors, finish |
+| `karaoke-postprocess-celery` | `karaoke-celery-worker` (4 processes) | resolve, download, analysis, harmony, artist, year, vectors, finish |
 | `karaoke-sync` | `karaoke-celery-sync` (2 processes, 3 threads each) | Whisper lyric sync (`make celery-sync-worker`) |
 | `karaoke-clap` | `karaoke-celery-clap` (4 processes, each with its own model copy) | CLAP timbre embedding, CLAP genre label, and mood |
 
@@ -157,6 +157,17 @@ carries the artist's genres) links the song to its MusicBrainz artists:
 - The step never retries and never fails the chain. MusicBrainz requests are
   paced machine-wide through a lock file, so four workers and a running
   `make artists` together stay within one request a second.
+
+The **year** step (`resolve_year`, right after `resolve_artist` so the search document carries
+`year`) finds the track's release year, one MusicBrainz request per *album*:
+
+- An album already in `album_release` costs nothing; its tracks get the stored year.
+- Live and compilation albums are ruled out by name (no request) or by MusicBrainz secondary
+  type, and get no album year. A year written in the title (`(2004)`) is used instead; a
+  remaster or remix year (`(2021 Remaster)`) is kept only as a last-resort fallback.
+- An unreachable MusicBrainz stores nothing, so the album is tried again next time.
+- `scripts/backfill_release_years.py` fills the existing library (resumable, about 1.05 s per
+  album; run it as a transient `systemd-run --user` unit).
 
 ### 3b. Run the dashboard
 

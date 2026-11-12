@@ -44,7 +44,9 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
     ``"artist"`` (not linked to MusicBrainz artists, and its artist string is
     either new or resolved before -- an ``unmatched`` or ``failed`` string is
     left to ``make artists``, so a library-wide enqueue cannot turn into
-    thousands of MusicBrainz lookups). Empty list = nothing to do.
+    thousands of MusicBrainz lookups) and ``"year"`` (the track's album has no
+    release-year lookup yet: one request per album, shared by all its tracks).
+    Empty list = nothing to do.
 
     ``vectors``, ``chords`` and ``clap`` are answered by OpenSearch rather than
     the database, and ``artist`` may cost MusicBrainz lookups. Pass
@@ -108,6 +110,14 @@ def needs_postprocessing(track_id: int, conn: Connection, *,
 
     if include_search_artefacts and _needs_artist(track_id, conn):
         pending.append("artist")
+
+    # One MusicBrainz request per *album* not looked up yet, so a library-wide
+    # enqueue is bounded by the number of new albums, not tracks.
+    if include_search_artefacts:
+        from . import release_year
+
+        if release_year.needs_year(track_id, conn):
+            pending.append("year")
 
     return pending
 

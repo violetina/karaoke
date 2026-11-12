@@ -152,6 +152,8 @@ Several tables are managed directly by application modules rather than the legac
 | `track_artists` | `artist_identity.py` | Tracks to MBID artists in credit order, role (`main`/`featured`), join phrases, recording MBID, and resolution method (`recording`/`name`). |
 | `artist_lookups` | `artist_identity.py` | Resolution tracking per artist string (`resolved`, `unmatched`, `failed`) and method. |
 | `artist_wikidata` | `artist_wikidata.py` | Cached Wikidata facts per MBID: kind, genres, country, labels, members, influences, instruments, dates, Commons image, and streaming IDs (Spotify, Discogs, Apple Music, YouTube). |
+| `album_release` | `release_year.py` | One MusicBrainz release-group lookup per artist + album (`status` `matched`/`no-match`/`live`/`compilation`, `year`, release-group id). An album present here is never looked up again. |
+| `track_year` | `release_year.py` | A track's release `year` and its `source`: `album` (MusicBrainz first-release-date), `title` (a bare `(2004)` in the title) or `title-remaster` (reissue year, fallback only). Better sources are never overwritten by worse ones. |
 
 ## Unified event store
 

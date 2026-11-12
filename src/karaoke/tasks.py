@@ -74,6 +74,8 @@ def postprocess_track(self, payload: dict[str, Any]) -> None:
             sync_lyrics.s(),
             # Before the search document, which carries the artist's genres.
             resolve_artist.s(),
+            # Also before it: the document carries the release year.
+            resolve_year.s(),
             rebuild_vectors.s(),
             # Last, on its own queue and worker: if that worker is down, only
             # the timbre vector waits -- lyrics, chords and search are done.
@@ -126,7 +128,7 @@ class PostprocessContext:
 
 
 #: Every step a chain knows, in the order needs_postprocessing reports them.
-STEPS = ("analysis", "timings", "sync", "vectors", "chords", "clap", "mood", "artist")
+STEPS = ("analysis", "timings", "sync", "vectors", "chords", "clap", "mood", "artist", "year")
 
 
 def _forced_steps(payload: dict[str, Any]) -> list[str]:
@@ -477,6 +479,27 @@ def resolve_artist(self, context_dict: dict[str, Any]) -> dict[str, Any]:
     from . import postprocess_worker, localcache
     with localcache.connect() as conn:
         postprocess_worker.run_artist_logic(context.track_id, conn)
+    return context.to_dict()
+
+
+@app.task(bind=True, name="karaoke.tasks.resolve_year")
+def resolve_year(self, context_dict: dict[str, Any]) -> dict[str, Any]:
+    """Release year of the track's album (one MusicBrainz request per new album).
+
+    Best effort, no retry: an unreachable MusicBrainz stores nothing, so the
+    album is tried again on the next run.
+    """
+    context = PostprocessContext.from_dict(context_dict)
+    if context.track_id is None or "year" not in context.pending:
+        return context.to_dict()
+    log.info("celery resolve_year: %s - %s", context.artist, context.title)
+    from . import localcache, release_year
+    try:
+        with localcache.connect() as conn:
+            release_year.resolve_track(context.track_id, conn)
+    except Exception:
+        log.warning("postprocess: release year failed for track %s", context.track_id,
+                    exc_info=True)
     return context.to_dict()
 
 

@@ -62,6 +62,9 @@ def iter_track_rows(conn: Any, track_id: Optional[int] = None, track_ids: Option
                   "'' AS audio_genre, '' AS audio_genre_runner_up, "
                   "NULL AS audio_genre_score, NULL AS audio_genre_runner_up_score")
     genre_join = "LEFT JOIN track_genre tg ON tg.track_id = t.track_id" if has_track_genre else ""
+    has_year = localcache.table_exists(conn, "track_year")
+    year_col = "ty.year AS release_year," if has_year else "NULL AS release_year,"
+    year_join = "LEFT JOIN track_year ty ON ty.track_id = t.track_id" if has_year else ""
 
     query = f"""
         SELECT
@@ -77,10 +80,12 @@ def iter_track_rows(conn: Any, track_id: Optional[int] = None, track_ids: Option
             l.synced_lyrics,
             l.plain_lyrics,
             {genre_cols},
+            {year_col}
             tm.mood_version, tm.summary AS mood_summary,
             tc.chords_version, tc.harmony AS chord_harmony
         FROM tracks t
         {genre_join}
+        {year_join}
         LEFT JOIN track_moods tm ON tm.track_id = t.track_id
         LEFT JOIN track_chords tc ON tc.track_id = t.track_id
         LEFT JOIN sources s ON s.source_id = (
@@ -229,7 +234,7 @@ def audio_analysis_fields(mood_version: Any, mood_summary: Any,
 
 
 def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = None) -> bool:
-    """Refresh just the Mood v2, Chords v2 and CLAP genre fields of one indexed track.
+    """Refresh just the Mood v2, Chords v2, CLAP genre and release-year fields of one indexed track.
 
     The mood timeline is made last in the post-processing chain, after the
     search document was written, so it would otherwise only reach OpenSearch on
@@ -247,11 +252,14 @@ def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = Non
             os_client = get_os_client()
         if os_client is None:
             return False
+        has_year = localcache.table_exists(c, "track_year")
         row = c.execute(
             "SELECT tm.mood_version, tm.summary AS mood_summary,"
             " tc.chords_version, tc.harmony AS chord_harmony,"
-            " tg.genre, tg.score AS genre_score, tg.runner_up, tg.runner_up_score"
+            " tg.genre, tg.score AS genre_score, tg.runner_up, tg.runner_up_score,"
+            + (" ty.year AS release_year" if has_year else " NULL AS release_year") +
             " FROM tracks t"
+            + (" LEFT JOIN track_year ty ON ty.track_id = t.track_id" if has_year else "") +
             " LEFT JOIN track_moods tm ON tm.track_id = t.track_id"
             " LEFT JOIN track_chords tc ON tc.track_id = t.track_id"
             " LEFT JOIN track_genre tg ON tg.track_id = t.track_id"
@@ -262,6 +270,8 @@ def update_audio_fields(track_id: int, *, conn: Any = None, os_client: Any = Non
                                        row["chords_version"], row["chord_harmony"])
         fields.update(genre_fields(row["genre"], row["genre_score"],
                                    row["runner_up"], row["runner_up_score"]))
+        if row["release_year"]:
+            fields["year"] = int(row["release_year"])
         if not fields:
             return False
         os_client.update(index=settings.index_name, id=track_doc_id(track_id),
@@ -324,6 +334,8 @@ def build_track_doc(
         audio_g, row["audio_genre_score"] if "audio_genre_score" in keys else None,
         audio_ru, row["audio_genre_runner_up_score"] if "audio_genre_runner_up_score" in keys else None,
     ))
+    if "release_year" in keys and row["release_year"]:
+        doc["year"] = int(row["release_year"])
     doc.update(audio_analysis_fields(
         row["mood_version"] if "mood_version" in keys else None,
         row["mood_summary"] if "mood_summary" in keys else None,

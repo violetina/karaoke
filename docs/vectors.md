@@ -189,6 +189,7 @@ Mood v2 (`audio_mood`, `audio_feeling`, `mood_arc`, `mood_share_*`, ...) and Cho
 (`harmony_style`, `key_mode`, `blues_score`, `ii_v_i`, ...) are flattened by
 `vector_index.audio_analysis_fields` from `track_moods` / `track_chords` at the current version
 only; the mood timeline is made after the search document, so `update_audio_fields` adds them.
+The release `year` (integer, from `track_year`; see [post-processing](howto-post-processing.md)) is written the same way and is absent when unknown.
 Current coverage in `tracks`: genre 15,396, audio mood 16,718, harmony 16,797.
 
 ## What is queryable, and what is not
