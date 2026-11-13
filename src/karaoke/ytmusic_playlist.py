@@ -846,8 +846,19 @@ def import_ytmusic_playlist_to_library(
     conn: Optional[Connection] = None,
     resolve_lyrics: bool = True,
     client: Optional[YTMusicClient] = None,
+    enqueue_postprocess: bool = False,
 ) -> dict[str, Any]:
-    """Import tracks from a YouTube Music playlist into local SQLite."""
+    """Import tracks from a YouTube Music playlist into local SQLite.
+
+    ``enqueue_postprocess`` additionally publishes each newly-touched track to
+    the real post-processing pipeline (download, key/BPM analysis, mood,
+    chords, CLAP vectors) via ``postprocess_queue.publish_postprocess_task``.
+    Off by default: plain import only adds library rows + lyrics, matching
+    existing callers' expectations. Gated per-track on
+    ``postprocess_queue.needs_postprocessing`` so tracks the library already
+    has fully analyzed (common overlap for a classic-rock/80s mix) don't get
+    a wasted re-download and worker slot.
+    """
     from . import lyrics
 
     yt = client or YTMusicClient()
@@ -862,6 +873,8 @@ def import_ytmusic_playlist_to_library(
         "added_tracks": 0,
         "synced_lyrics": 0,
         "plain_lyrics": 0,
+        "enqueued": 0,
+        "already_analyzed": 0,
         "items": [],
     }
 
@@ -899,6 +912,15 @@ def import_ytmusic_playlist_to_library(
                 "url": url,
                 "has_synced": bool(ly and ly.synced_raw),
             })
+
+            if enqueue_postprocess and track_id is not None:
+                from . import postprocess_queue
+                pending = postprocess_queue.needs_postprocessing(track_id, c)
+                if pending:
+                    if postprocess_queue.publish_postprocess_task(artist, title, url, full=True):
+                        stats["enqueued"] += 1
+                else:
+                    stats["already_analyzed"] += 1
     finally:
         if own_conn:
             c.close()
@@ -1047,6 +1069,7 @@ def ytmusic_playlist_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--sync", action="store_true", help="Sync karaoke-ready tracks to YouTube Music playlist")
     parser.add_argument("--bidirectional", action="store_true", help="Perform bi-directional sync (remote <-> local)")
     parser.add_argument("--import-playlist", metavar="PLAYLIST_ID", help="Import a YouTube Music playlist into local library")
+    parser.add_argument("--enqueue", action="store_true", help="Also publish imported tracks to the post-processing pipeline (download, key/BPM, mood, chords, CLAP vectors)")
     parser.add_argument("--name", default=DEFAULT_PLAYLIST_NAME, help=f"Playlist name (default: '{DEFAULT_PLAYLIST_NAME}')")
     parser.add_argument("--limit", type=int, help="Limit number of tracks to export")
     parser.add_argument("--dry-run", action="store_true", help="Preview actions without modifying YouTube Music")
@@ -1079,10 +1102,15 @@ def ytmusic_playlist_main(argv: list[str] | None = None) -> None:
 
     if args.import_playlist:
         print(f"Importing YouTube Music playlist {args.import_playlist}...")
-        stats = import_ytmusic_playlist_to_library(args.import_playlist, client=client)
+        stats = import_ytmusic_playlist_to_library(
+            args.import_playlist, client=client, enqueue_postprocess=args.enqueue,
+        )
         print(f"Imported {stats['added_tracks']}/{stats['total_tracks']} tracks:")
         print(f" - Synced lyrics matched: {stats['synced_lyrics']}")
         print(f" - Plain lyrics matched:  {stats['plain_lyrics']}")
+        if args.enqueue:
+            print(f" - Enqueued for analysis: {stats['enqueued']}")
+            print(f" - Already analyzed:      {stats['already_analyzed']}")
         return
 
     if args.bidirectional:

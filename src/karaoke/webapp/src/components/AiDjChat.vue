@@ -11,7 +11,19 @@
         <div class="dj-title">
           <span class="name">AI DJ &amp; MC</span>
           <select
-            v-if="availableModels.length > 0"
+            v-if="availableProviders.length > 1"
+            class="provider-select"
+            v-model="selectedProvider"
+            @click.stop
+            @change="handleProviderChange"
+            title="Switch AI provider"
+          >
+            <option v-for="p in availableProviders" :key="p.id" :value="p.id">
+              {{ p.label }}
+            </option>
+          </select>
+          <select
+            v-if="selectedProvider === 'ollama' && availableModels.length > 0"
             class="model-select"
             v-model="selectedModel"
             @click.stop
@@ -22,7 +34,16 @@
               {{ m.name }} {{ m.parameter_size ? `(${m.parameter_size})` : '' }}
             </option>
           </select>
-          <span v-else class="model-badge">Ollama qwen3 · MCP Integrated</span>
+          <select
+            v-else-if="selectedProvider !== 'ollama' && currentProviderModels.length > 0"
+            class="model-select"
+            v-model="selectedCloudModel"
+            @click.stop
+            title="Switch model for this provider"
+          >
+            <option v-for="m in currentProviderModels" :key="m" :value="m">{{ m }}</option>
+          </select>
+          <span v-if="availableProviders.length <= 1 && availableModels.length === 0" class="model-badge">Ollama qwen3 · MCP Integrated</span>
         </div>
       </div>
 
@@ -111,6 +132,14 @@ const messagesRef = ref(null)
 
 const availableModels = ref([])
 const selectedModel = ref('qwen3:latest')
+const availableProviders = ref([])
+const selectedProvider = ref(localStorage.getItem('aidj_provider') || 'ollama')
+const selectedCloudModel = ref('')
+
+const currentProviderModels = computed(() => {
+  const p = availableProviders.value.find(p => p.id === selectedProvider.value)
+  return p ? p.models : []
+})
 
 const fetchModels = async () => {
   try {
@@ -129,6 +158,30 @@ const fetchModels = async () => {
   }
 }
 
+const fetchProviders = async () => {
+  try {
+    const res = await fetch('/api/dj/providers')
+    if (res.ok) {
+      const data = await res.json()
+      const all = data.providers || []
+      // Only list providers actually usable right now (key configured, or
+      // Ollama which needs none) -- don't show Claude/GPT as dead options.
+      availableProviders.value = all.filter(p => p.available)
+      // If the persisted choice is no longer available (key removed), fall
+      // back to ollama rather than silently sending a dead provider.
+      if (!availableProviders.value.some(p => p.id === selectedProvider.value)) {
+        selectedProvider.value = 'ollama'
+      }
+      const current = availableProviders.value.find(p => p.id === selectedProvider.value)
+      if (current && current.models.length > 0) {
+        selectedCloudModel.value = current.models[0]
+      }
+    }
+  } catch (err) {
+    // fallback: ollama-only, matches pre-existing behavior
+  }
+}
+
 const handleModelChange = async () => {
   try {
     await fetch('/api/dj/models', {
@@ -141,8 +194,17 @@ const handleModelChange = async () => {
   }
 }
 
+const handleProviderChange = () => {
+  localStorage.setItem('aidj_provider', selectedProvider.value)
+  const current = availableProviders.value.find(p => p.id === selectedProvider.value)
+  if (current && current.models.length > 0) {
+    selectedCloudModel.value = current.models[0]
+  }
+}
+
 onMounted(() => {
   fetchModels()
+  fetchProviders()
 })
 
 const messages = ref([
@@ -205,7 +267,8 @@ const handleSend = async () => {
         message: query,
         current_artist: props.currentArtist,
         current_title: props.currentTitle,
-        model: selectedModel.value,
+        model: selectedProvider.value === 'ollama' ? selectedModel.value : selectedCloudModel.value,
+        provider: selectedProvider.value,
       }),
     })
 
@@ -235,6 +298,10 @@ const handleSend = async () => {
             if (['queue_suggestion', 'queue_track'].includes(data.action) && data.track) {
               // Even legacy server action frames only become a confirmation button.
               if (!queueSuggestions.value.includes(data.track)) queueSuggestions.value.push(data.track)
+            }
+            if (data.error) {
+              streamingText.value += `\n[DJ booth error: ${data.error}]`
+              scrollToBottom()
             }
           } catch (err) {
             // non-json line

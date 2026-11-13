@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.0 — Multi-provider AI DJ chat, ingestion fixes, and playlist analysis
+
+### Multi-provider AI DJ (new)
+
+- New `karaoke.ai_providers` registry: the AI DJ chat (`/api/dj/chat`) can now run against Claude (Anthropic), GPT (OpenAI) or Gemini (Google) in addition to the existing local Ollama default. Each cloud provider is enabled by setting its API key in `.env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — none are required, and a provider with no key simply doesn't appear as available. `GET /api/dj/providers` lists configured providers and whether each is currently usable. Optional `config/ai_providers.json` overrides model lists/base URLs without code changes (never raw keys, only env var names).
+- The dashboard's AI DJ dock now has a provider dropdown alongside the existing model dropdown, persisted per-browser via `localStorage`.
+- See `docs/howto-configure-ai-providers.md`.
+
+### Fix: "vibe of" questions about a currently-playing, not-yet-ingested track
+
+- The DJ chat used to free-style an unrelated suggestion when asked about the vibe of a track that was playing but not yet in the library, because detection was gated on whether a generic OpenSearch fuzzy search returned *any* facts — which it almost always does, even for a made-up title. Detection now checks directly whether the specific (artist, title) pair resolves in the library.
+- Fixed a real event-loop stall: the ingestion branch ran a synchronous RabbitMQ publish (~1s) and a blocking DB insert directly inside the async SSE generator, which could block uvicorn from flushing even the already-queued acknowledgment token. Both now run via `asyncio.to_thread`.
+- On a cache miss for the currently-playing track, the chat now acknowledges immediately, triggers real ingestion (download, analysis, mood, chords, vectors) through the existing Celery pipeline, and streams the grounded answer once it lands (bounded poll, falls back to a "still working" message on timeout).
+
+### YouTube Music playlist import can push tracks through full analysis
+
+- `karaoke-ytmusic-playlist --import-playlist <ID> --enqueue` additionally publishes each imported track that isn't already fully analyzed to the post-processing pipeline (download, key/BPM, mood, chords, CLAP vectors), gated per-track on `needs_postprocessing` so tracks the library already has analyzed are skipped rather than wastefully re-queued.
+
 ## 1.8.0 — Release years, decade playlists, and index hygiene
 
 ### Release year per track (new)

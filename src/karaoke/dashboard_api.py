@@ -1486,6 +1486,7 @@ class ChatRequest(BaseModel):
     current_artist: Optional[str] = None
     current_title: Optional[str] = None
     model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class DJModelConfigRequest(BaseModel):
@@ -1532,6 +1533,13 @@ async def set_dj_model(req: DJModelConfigRequest):
     return {"status": "ok", "current": _CURRENT_DJ_MODEL}
 
 
+@app.get("/api/dj/providers")
+async def list_dj_providers():
+    """List configured AI providers (Ollama local + any cloud providers with a key set)."""
+    from . import ai_providers
+    return {"providers": ai_providers.list_providers()}
+
+
 def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "") -> str:
     """Retrieve grounded facts from OpenSearch and PostgreSQL matching the user's question."""
     facts = []
@@ -1548,7 +1556,6 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
     if any(k in q_lower for k in ("suggest", "next", "after", "recommend", "follow")):
         try:
             from . import mcp_server
-            import json
             raw_sugg = mcp_server.suggest_next_tracks(artist=now_artist, title=now_title, limit=3)
             data_sugg = json.loads(raw_sugg)
             suggs = data_sugg.get("suggestions", [])
@@ -1761,7 +1768,6 @@ async def dj_chat_endpoint(body: ChatRequest):
                 row = c.fetchone()
             if not row:
                 try:
-                    import json
                     from .osclient import client
                     os_c = client()
                     res = os_c.search(
@@ -1789,7 +1795,6 @@ async def dj_chat_endpoint(body: ChatRequest):
     artist_context = ""
     if now_artist:
         try:
-            import json
             from .osclient import client
             os_c = client()
 
@@ -1836,55 +1841,167 @@ async def dj_chat_endpoint(body: ChatRequest):
     # Retrieve real facts from OpenSearch / Postgres based on the user query
     query_facts = _retrieve_query_facts(user_msg, now_artist=now_artist, now_title=now_title)
 
-    system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context, query_facts=query_facts)
+    chosen_provider = (body.provider or "").strip() or "ollama"
+    chosen_model = body.model.strip() if (body.model and body.model.strip()) else (
+        _CURRENT_DJ_MODEL if chosen_provider == "ollama" else None
+    )
 
-    chosen_model = body.model.strip() if (body.model and body.model.strip()) else _CURRENT_DJ_MODEL
-
-    ollama_payload = {
-        "model": chosen_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_msg},
-        ],
-        "stream": True,
-    }
+    # Detect: user is asking about the vibe/feel of a track that is NOT in our
+    # library/OpenSearch (query_facts empty for a vibe-style question) but
+    # whose title matches the song actually playing right now. In that case
+    # the track simply hasn't been ingested/analyzed yet -- don't let the
+    # model free-style a tangential suggestion; kick off real ingestion and
+    # analysis and answer with the real result once it lands.
+    ingest_target = _detect_unanalyzed_now_playing(user_msg, now_artist, now_title, query_facts)
 
     async def chat_event_stream():
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=ollama_payload) as resp:
-                    full_text = ""
-                    async for chunk in resp.aiter_lines():
-                        if not chunk:
-                            continue
-                        try:
-                            import json
-                            item = json.loads(chunk)
-                            token = item.get("message", {}).get("content", "")
-                            full_text += token
-                            if token:
-                                yield {"event": "token", "data": json.dumps({"token": token})}
-                            if item.get("done", False):
-                                # Check for command triggers
-                                focus_match = re.search(r"\[FOCUS:\s*([^\]]+)\]", full_text)
-                                if focus_match:
-                                    target_artist = focus_match.group(1).strip()
-                                    yield {"event": "action", "data": json.dumps({"action": "focus_artist", "artist": target_artist})}
-                                queue_match = re.search(r"\[QUEUE:\s*([^\]]+)\]", full_text)
-                                if queue_match:
-                                    target_track = queue_match.group(1).replace('"', '').replace("'", "").strip()
-                                    # Strip leading current artist prefix if LLM included it (e.g. "CurrentArtist - TargetArtist - Title")
-                                    if now_artist and target_track.lower().startswith(f"{now_artist.lower()} -"):
-                                        target_track = target_track[len(now_artist) + 2:].strip().lstrip("-").strip()
-                                    yield {"event": "action", "data": json.dumps({"action": "queue_suggestion", "track": target_track})}
-                                yield {"event": "done", "data": json.dumps({"status": "complete"})}
-                        except json.JSONDecodeError:
-                            continue
-            except Exception as e:
-                _log.warning("Ollama stream error: %s", e)
-                yield {"event": "error", "data": json.dumps({"error": f"Ollama connection error: {str(e)}"})}
+        if ingest_target:
+            async for event in _ingest_then_answer_stream(
+                ingest_target, user_msg, now_artist, now_title, artist_context,
+                chosen_provider, chosen_model,
+            ):
+                yield event
+            return
+
+        system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context, query_facts=query_facts)
+        full_text = ""
+        try:
+            from . import ai_providers
+            async for token in ai_providers.stream_chat(chosen_provider, chosen_model, system_prompt, user_msg):
+                full_text += token
+                yield {"event": "token", "data": json.dumps({"token": token})}
+
+            focus_match = re.search(r"\[FOCUS:\s*([^\]]+)\]", full_text)
+            if focus_match:
+                target_artist = focus_match.group(1).strip()
+                yield {"event": "action", "data": json.dumps({"action": "focus_artist", "artist": target_artist})}
+            queue_match = re.search(r"\[QUEUE:\s*([^\]]+)\]", full_text)
+            if queue_match:
+                target_track = queue_match.group(1).replace('"', '').replace("'", "").strip()
+                # Strip leading current artist prefix if LLM included it (e.g. "CurrentArtist - TargetArtist - Title")
+                if now_artist and target_track.lower().startswith(f"{now_artist.lower()} -"):
+                    target_track = target_track[len(now_artist) + 2:].strip().lstrip("-").strip()
+                yield {"event": "action", "data": json.dumps({"action": "queue_suggestion", "track": target_track})}
+            yield {"event": "done", "data": json.dumps({"status": "complete"})}
+        except Exception as e:
+            _log.warning("%s DJ chat stream error: %s", chosen_provider, e)
+            yield {"event": "error", "data": json.dumps({"error": f"{chosen_provider} connection error: {str(e)}"})}
 
     return EventSourceResponse(chat_event_stream())
+
+
+def _detect_unanalyzed_now_playing(user_msg: str, now_artist: str, now_title: str, query_facts: str) -> Optional[Dict[str, str]]:
+    """Return {"artist", "title"} if the user is asking about the vibe/mood of
+    a track that is currently playing but is NOT actually in our library yet.
+
+    Gating this on whether `query_facts` came back empty is unreliable:
+    OpenSearch's fuzzy multi_match against artist-cache/lyrics almost always
+    matches *something* for any query, including a nonsense title (e.g. it
+    matched unrelated bands for a made-up song name during live testing).
+    So instead we check directly whether the specific (artist, title) pair
+    the user is asking about actually resolves to a library track.
+    """
+    if not now_artist or not now_title:
+        return None
+    q_lower = user_msg.lower()
+    if not any(k in q_lower for k in ("vibe", "mood", "feel", "sound like", "about this song", "about this track")):
+        return None
+    # Does the user's question actually reference the now-playing title (fuzzy)?
+    import difflib
+    import re as _re
+    title_match = _re.search(r"vibe of\s+(.+?)[\?\.!]*$", user_msg, _re.IGNORECASE)
+    asked_title = title_match.group(1).strip().strip("'\"") if title_match else user_msg
+    ratio = difflib.SequenceMatcher(None, asked_title.lower(), now_title.lower()).ratio()
+    if ratio < 0.5 and now_title.lower() not in q_lower and asked_title.lower() not in now_title.lower():
+        return None
+    # The real test: is this specific track actually in our library?
+    from . import localcache
+    with localcache.connect() as conn:
+        track_id = localcache.find_track_id_relaxed(now_artist, now_title, conn)
+    if track_id is not None:
+        return None  # already in the library -- a genuinely-known-but-sparse track, not an ingest case
+    return {"artist": now_artist, "title": now_title}
+
+
+async def _ingest_then_answer_stream(
+    target: Dict[str, str], user_msg: str, now_artist: str, now_title: str,
+    artist_context: str, provider_id: str, model: Optional[str],
+    max_wait_s: float = 90.0, poll_interval_s: float = 4.0,
+):
+    """Acknowledge immediately, trigger real ingestion/analysis for a track
+    that's playing but not yet in our library, then stream the real vibe
+    answer once mood/chord/analysis data lands (or a timeout message).
+    """
+    artist, title = target["artist"], target["title"]
+    yield {
+        "event": "token",
+        "data": json.dumps({"token": f"That one's not analyzed yet — let me listen to '{title}' by {artist} and ingest it now. One moment..."}),
+    }
+    yield {"event": "ingest_started", "data": json.dumps({"artist": artist, "title": title})}
+
+    from . import localcache
+    from . import postprocess_queue
+
+    def _do_ingest_sync():
+        """Blocking DB + pika work -- must run off the event loop.
+
+        `publish_postprocess_task` alone measured ~1s (a synchronous pika
+        connection to RabbitMQ); running it directly inside this async
+        generator stalled the whole event loop, so uvicorn could not even
+        flush the ack token already queued above until it returned.
+        """
+        with localcache.connect() as conn:
+            c = conn.cursor()
+            c.execute("SELECT track_id FROM tracks WHERE artist = %s AND title = %s LIMIT 1", (artist, title))
+            row = c.fetchone()
+            track_id = dict(row)["track_id"] if row else None
+            if track_id is None:
+                c.execute(
+                    "INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id",
+                    (artist, title),
+                )
+                inserted = c.fetchone()
+                track_id = dict(inserted)["track_id"] if inserted else None
+                conn.commit()
+        postprocess_queue.publish_postprocess_task(artist, title, "", full=True)
+
+    try:
+        await asyncio.to_thread(_do_ingest_sync)
+    except Exception as exc:
+        _log.warning("Could not enqueue ingestion for %s - %s: %s", artist, title, exc)
+        yield {"event": "error", "data": json.dumps({"error": f"Could not start ingestion: {exc}"})}
+        return
+
+
+    waited = 0.0
+    facts = ""
+    while waited < max_wait_s:
+        await asyncio.sleep(poll_interval_s)
+        waited += poll_interval_s
+        facts = _retrieve_query_facts(user_msg, now_artist=artist, now_title=title)
+        if facts.strip():
+            break
+
+    if not facts.strip():
+        yield {
+            "event": "token",
+            "data": json.dumps({"token": f" Still working on '{title}' in the background -- ask me again about its vibe in a bit once analysis finishes."}),
+        }
+        yield {"event": "done", "data": json.dumps({"status": "complete"})}
+        return
+
+    yield {"event": "token", "data": json.dumps({"token": " Got it! Here's the vibe:\n\n"})}
+    system_prompt = _dj_chat_system_prompt(artist, title, artist_context, query_facts=facts)
+    try:
+        from . import ai_providers
+        full_text = ""
+        async for token in ai_providers.stream_chat(provider_id, model, system_prompt, user_msg):
+            full_text += token
+            yield {"event": "token", "data": json.dumps({"token": token})}
+        yield {"event": "done", "data": json.dumps({"status": "complete"})}
+    except Exception as e:
+        _log.warning("%s DJ chat stream error (post-ingest): %s", provider_id, e)
+        yield {"event": "error", "data": json.dumps({"error": f"{provider_id} connection error: {str(e)}"})}
 
 
 # ---------------------------------------------------------------------------
