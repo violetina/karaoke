@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Smart playlists: sub-genres, rotation, upload by default
+
+- 24 new `Genre:` sub-genre lists (Alternative Rock, Indie Rock, Post-Punk, Shoegaze & Dream Pop, Trip Hop & Downtempo, Swing & Gypsy Jazz, Ska & Dub, Industrial ...), defined in `SUBGENRES`. They match on OpenSearch (`karaoke-artists` genres and the `tracks` genre fields) as well as PostgreSQL (`artist_genres`, `track_genre`), because the specific tags are richer in the index.
+- Lists no longer open with the same songs after every rebuild. On repopulate, unplayed songs from the tail of the previous list move up, fresh songs follow, and songs from the previous opening third and already-played songs go to the back with a small flow-order penalty (`STALE_PENALTY`). Selectors now rank fewer plays first. `Smart: Sing-along Favourites` and the `Decade:` lists keep ranking by plays.
+- The YouTube Music sync now follows the new order: items ahead of the new opener are removed and re-appended, so a rotated start shows at the top there too (playlist ids are unchanged).
+- `make smart-playlists` now uploads to YouTube Music by default. `LOCAL=1` rebuilds without uploading, `DRY=1` previews, `ONLY="Genre: Industrial"` rebuilds one list. `PUSH=1` is no longer needed.
+
 ## 1.9.0 — Multi-provider AI DJ chat, ingestion fixes, and playlist analysis
 
 ### Multi-provider AI DJ (new)

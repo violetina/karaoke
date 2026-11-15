@@ -255,3 +255,69 @@ def test_decade_ids_rank_by_play_count_other_lists_and_lyrics_and_skip_reissue_y
         # 2: 3 plays (6.0); 3: two other lists (3.0); 1: synced lyrics (1.0).
         # 4 (reissue year), 5 (1989) and 6 (2001) are not in the decade.
         assert ids == [2, 3, 1]
+
+
+def test_rotate_candidates_moves_unplayed_tail_up_and_demotes_played_and_head():
+    rows = [_row(i, f"Act {i}") for i in range(1, 8)]
+    # Previous list had tracks 1..6 in positions 1..6 (head_cut = 6 // 3 = 2 -> [1, 2]).
+    # Track 6 at the tail was played (play_count=2); tracks 3, 4, 5 at the tail were not played.
+    # Track 7 is a fresh unplayed entrant not on the previous list.
+    prev_pos = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
+    play_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 2, 7: 0}
+    rotated, stale = sp.rotate_candidates(rows, prev_pos, play_counts)
+    # Unplayed tail from end upward (5, 4, 3), then fresh (7), then old head (1, 2), then played (6).
+    assert [r["track_id"] for r in rotated] == [5, 4, 3, 7, 1, 2, 6]
+    assert stale == {1, 2, 6}
+
+
+def test_flow_order_penalizes_stale_tracks_so_fresh_songs_lead(monkeypatch):
+    rows = [_row(5, "Tail"), _row(1, "OldHead"), _row(4, "TailTwo")]
+    tracks = {r["track_id"]: dj_suggest.Track(r["track_id"]) for r in rows}
+    monkeypatch.setattr(dj_suggest, "_load", lambda ids, conn, osc: tracks)
+    # OldHead (1) has a slightly higher raw score from 5 (0.8 vs 0.7), but STALE_PENALTY=0.25
+    # keeps TailTwo (4) ahead of OldHead (1).
+    monkeypatch.setattr(dj_suggest, "score",
+                        lambda s, c, st: 0.8 if c.track_id == 1 else 0.7)
+    out = sp.flow_order(rows, MagicMock(), None, tracks=tracks, stale_ids={1})
+    assert [r["track_id"] for r in out] == [5, 4, 1]
+
+
+def test_push_ytmusic_reorders_when_playlist_rotates():
+    yt = MagicMock()
+    yt.get_playlist.return_value = {"tracks": [
+        {"videoId": "vid00000001", "setVideoId": "s1"},
+        {"videoId": "vid00000002", "setVideoId": "s2"}]}
+    rule = sp.Rule("Smart: Test", "desc", lambda c, o: [])
+    # Rotated: track 2 is now first, track 1 moved to the end.
+    pid = sp.push_ytmusic(rule, [_row(2, "B"), _row(1, "A")], yt,
+                          existing={"smart: test": "PLold"})
+    assert pid == "PLold"
+    # Track 1 ahead of track 2 is removed so track 2 becomes #1, then track 1 is re-appended at the end.
+    yt.remove_playlist_items.assert_called_once_with(
+        "PLold", [{"videoId": "vid00000001", "setVideoId": "s1"}])
+    yt.add_playlist_items.assert_called_once_with("PLold", ["vid00000001"])
+
+
+def test_subgenre_ids_combines_opensearch_and_postgres():
+    from karaoke import localcache
+
+    osc = MagicMock()
+    osc.search.side_effect = [
+        {"hits": {"hits": [{"_source": {
+            "mbid": "mbid-joy",
+            "library_names": ["Joy Division"],
+            "genres": ["post-punk", "gothic rock"],
+        }}]}},
+        {"hits": {"hits": [{"_source": {"track_id": 3}}]}},
+    ]
+    with localcache.connect() as conn:
+        localcache.ensure_artist_genres_table(conn)
+        for tid, artist in ((1, "Joy Division"), (2, "The Cure"), (3, "Unclassified Act")):
+            conn.execute("INSERT INTO tracks (track_id, artist, title, play_count)"
+                         " VALUES (%s, %s, %s, 0)", (tid, artist, f"Song {tid}"))
+        conn.execute("INSERT INTO artist_genres VALUES ('the cure', 'post-punk', 'punk', 8, 'mb', 0)")
+        conn.commit()
+        ids = sp.subgenre_ids(("post-punk", "proto-punk"), conn, osc)
+        # 1 (OpenSearch top genre match) and 2 (Postgres artist_genres match) before 3 (track-level OS fallback)
+        assert set(ids[:2]) == {1, 2}
+        assert ids[2] == 3

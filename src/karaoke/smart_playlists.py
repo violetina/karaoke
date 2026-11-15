@@ -27,9 +27,14 @@ among a list's candidates is the odd one out for that feeling ("Party" is
 mostly rock in this library; its lone country song is the weird mix), so such
 songs only fill a list that would otherwise come up short.
 
+Lists rotate between rebuilds: unplayed songs from the tail of the previous
+list lead the new one, and the previous opening third and played songs go to
+the back (:func:`rotate_candidates`), so a list does not start the same way twice.
+
 Rebuilding replaces each list's contents in place: the saved playlist row and,
-with ``--push``, the YouTube Music playlist of the same name (its id, and so
-any kiosk link to it, survive). Nothing here deletes a playlist.
+with ``--push`` (the default of ``make smart-playlists``), the YouTube Music
+playlist of the same name (its id, and so any kiosk link to it, survive).
+Nothing here deletes a playlist.
 
     python -m karaoke.smart_playlists            # rebuild, local only
     python -m karaoke.smart_playlists --push     # and sync YouTube Music
@@ -97,8 +102,49 @@ RELATED_FAMILIES = {
 }
 SOURCE_KIND = "smart"
 
+#: Fraction of the previous playlist treated as the "head" that already opened a session.
+HEAD_FRACTION = 3
+#: Transition penalty on tracks from the previous head or already played, so unplayed tail/fresh songs lead.
+STALE_PENALTY = 0.25
+
+#: Rules where a high play_count is the point of the list, not a reason to demote a track out of the pool.
+PLAY_POSITIVE_RULES = frozenset({"Smart: Sing-along Favourites"})
+
 GENRES = ("blues", "jazz", "folk", "soul", "reggae", "country", "latin",
           "ambient", "electronic", "hip hop", "punk", "metal")
+
+#: (playlist suffix after "Genre: ", matching artist/OpenSearch/CLAP sub-genre tags).
+SUBGENRES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Alternative Rock", ("alternative rock", "alt-rock")),
+    ("Indie Rock", ("indie rock", "slacker rock")),
+    ("Indie Pop", ("indie pop", "jangle pop", "chamber pop", "twee pop")),
+    ("Art & Experimental Rock", ("art rock", "experimental rock", "avant-prog", "krautrock")),
+    ("Progressive Rock", ("progressive rock", "prog rock", "symphonic prog")),
+    ("Psychedelic Rock", ("psychedelic rock", "psych rock", "acid rock", "space rock",
+                          "space rock revival", "neo-psychedelia")),
+    ("Hard Rock & Glam", ("hard rock", "glam rock", "sleaze rock")),
+    ("Blues Rock", ("blues rock", "blues-rock", "british blues", "punk blues")),
+    ("Folk Rock & Singer-Songwriter", ("folk rock", "singer-songwriter", "indie folk",
+                                       "contemporary folk", "freak folk", "anti-folk")),
+    ("Post-Punk", ("post-punk", "post-punk revival", "proto-punk", "art punk", "dance-punk")),
+    ("New Wave & Synth-Pop", ("new wave", "synth-pop", "synthpop", "electropop", "dark wave")),
+    ("Shoegaze & Dream Pop", ("shoegaze", "dream pop", "post-rock")),
+    ("Stoner & Doom", ("stoner rock", "desert rock", "stoner metal", "doom metal", "sludge metal")),
+    ("Grunge & Noise Rock", ("grunge", "post-grunge", "noise rock", "post-hardcore")),
+    ("Garage Rock", ("garage rock", "garage rock revival", "garage punk", "pub rock")),
+    ("Funk & Disco", ("funk", "funk rock", "funk metal", "disco", "boogie", "jazz-funk")),
+    ("Trip Hop & Downtempo", ("trip hop", "trip-hop", "downtempo")),
+    ("IDM & Breakbeat", ("idm", "glitch", "breakcore", "ambient techno", "drum and bass", "breakbeat")),
+    ("Techno & House", ("techno", "house", "electro", "electro house", "acid techno",
+                        "deep house", "french house", "tech house")),
+    ("Swing & Gypsy Jazz", ("gypsy jazz", "jazz manouche", "swing", "big band", "vocal jazz", "dixieland")),
+    ("Jazz Fusion & Bop", ("jazz fusion", "jazz rock", "hard bop", "post-bop",
+                           "bebop", "cool jazz", "modal jazz")),
+    ("Ska & Dub", ("ska", "dub", "rocksteady", "2 tone", "ska punk")),
+    ("Americana & Alt-Country", ("americana", "alt-country", "alternative country",
+                                 "country rock", "outlaw country", "rockabilly", "bluegrass")),
+    ("Industrial", ("industrial", "industrial rock", "industrial metal", "ebm", "electro-industrial")),
+)
 
 
 @dataclass(frozen=True)
@@ -111,14 +157,134 @@ class Rule:
 
 # -- selectors ---------------------------------------------------------------
 
-#: Lyrics first: synced, then plain, then none. Most played next.
+#: Lyrics first: synced, then plain, then none. Unplayed tracks next (negative play_count).
 _KARAOKE_ORDER = """
     CASE WHEN EXISTS (SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id
                        AND COALESCE(l.synced_lyrics, '') != '') THEN 0
          WHEN EXISTS (SELECT 1 FROM lyrics l WHERE l.track_id = t.track_id
                        AND COALESCE(l.plain_lyrics, '') != '') THEN 1
          ELSE 2 END,
-    t.play_count DESC NULLS LAST, t.track_id"""
+    COALESCE(t.play_count, 0) ASC, t.track_id"""
+
+
+def _opensearch_subgenre_matches(tags: list[str], os_client: Any
+                                 ) -> tuple[set[str], set[str], set[str], set[str], set[int]]:
+    """Query OpenSearch ``karaoke-artists`` and ``tracks`` for sub-genre tags.
+
+    Returns ``(top_mbids, all_mbids, top_artists, all_artists, track_ids)``.
+    Best-effort: returns empty sets if ``os_client`` is None or unreachable.
+    """
+    top_mbids: set[str] = set()
+    all_mbids: set[str] = set()
+    top_artists: set[str] = set()
+    all_artists: set[str] = set()
+    track_ids: set[int] = set()
+    if os_client is None or not tags:
+        return top_mbids, all_mbids, top_artists, all_artists, track_ids
+    try:
+        from .artist_index import ARTIST_INDEX
+        res = os_client.search(index=ARTIST_INDEX, body={
+            "size": 2000,
+            "_source": ["mbid", "library_names", "genres"],
+            "query": {"terms": {"genres": tags}},
+        })
+        for h in (res.get("hits", {}).get("hits") or []):
+            src = h.get("_source") or {}
+            mbid = src.get("mbid")
+            g_list = [str(g).strip().lower() for g in (src.get("genres") or []) if g]
+            is_top = bool(g_list and g_list[0] in tags)
+            if mbid:
+                all_mbids.add(str(mbid))
+                if is_top:
+                    top_mbids.add(str(mbid))
+            for ln in (src.get("library_names") or []):
+                norm = str(ln).strip().lower()
+                if norm:
+                    all_artists.add(norm)
+                    if is_top:
+                        top_artists.add(norm)
+    except Exception:
+        pass
+    try:
+        from .config import settings
+        res_t = os_client.search(index=settings.index_name, body={
+            "size": 3000,
+            "_source": ["track_id"],
+            "query": {"bool": {"should": [
+                {"terms": {"genre.keyword": tags}},
+                {"terms": {"audio_genre.keyword": tags}},
+                {"terms": {"artist_genres.keyword": tags}},
+            ], "minimum_should_match": 1}},
+        })
+        for h in (res_t.get("hits", {}).get("hits") or []):
+            tid = (h.get("_source") or {}).get("track_id")
+            if tid is not None:
+                track_ids.add(int(tid))
+    except Exception:
+        pass
+    return top_mbids, all_mbids, top_artists, all_artists, track_ids
+
+
+def subgenre_ids(tags: tuple[str, ...] | list[str] | str, conn, os_client: Any = None) -> list[int]:
+    """Tracks matching a sub-genre cluster across OpenSearch and PostgreSQL, best first."""
+    from . import localcache
+
+    wanted = [t.strip().lower() for t in (tags if isinstance(tags, (tuple, list)) else (tags,))
+              if t and t.strip()]
+    if not wanted:
+        return []
+    top_mbids, all_mbids, top_artists, all_artists, os_tids = _opensearch_subgenre_matches(wanted, os_client)
+    mbid_tids: set[int] = set()
+    top_mbid_tids: set[int] = set()
+    if all_mbids and localcache.table_exists(conn, "track_artists"):
+        try:
+            for r in conn.execute(
+                "SELECT track_id, mbid FROM track_artists WHERE position = 0 AND mbid = ANY(%s)",
+                (list(all_mbids),),
+            ).fetchall():
+                tid = int(r["track_id"])
+                mbid_tids.add(tid)
+                if r["mbid"] in top_mbids:
+                    top_mbid_tids.add(tid)
+        except Exception:
+            pass
+
+    rows = conn.execute(f"""
+        WITH spec AS (
+            SELECT artist_normalized,
+                   sum(weight) FILTER (WHERE lower(trim(genre)) = ANY(%(tags)s)) AS matched_w,
+                   max(weight) AS top_w,
+                   count(DISTINCT lower(trim(broad_genre))) AS n_broad
+            FROM artist_genres
+            GROUP BY artist_normalized
+        )
+        SELECT t.track_id FROM tracks t
+        LEFT JOIN track_genre g ON g.track_id = t.track_id
+        LEFT JOIN spec s ON s.artist_normalized = lower(trim(t.artist))
+        WHERE COALESCE(s.matched_w, 0) > 0
+           OR lower(trim(t.artist)) = ANY(%(os_artists)s)
+           OR t.track_id = ANY(%(mbid_tids)s)
+           OR (s.n_broad IS NULL
+               AND NOT (lower(trim(t.artist)) = ANY(%(os_artists)s))
+               AND (lower(trim(COALESCE(g.genre, ''))) = ANY(%(tags)s)
+                    OR t.track_id = ANY(%(os_tids)s)))
+        ORDER BY CASE WHEN (COALESCE(s.matched_w, 0) > 0 AND 2 * s.matched_w >= s.top_w)
+                        OR lower(trim(t.artist)) = ANY(%(os_top_artists)s)
+                        OR t.track_id = ANY(%(top_mbid_tids)s) THEN 0
+                      WHEN COALESCE(s.matched_w, 0) > 0
+                        OR lower(trim(t.artist)) = ANY(%(os_artists)s)
+                        OR t.track_id = ANY(%(mbid_tids)s) THEN 1
+                      ELSE 2 END,
+                 s.n_broad NULLS LAST,
+                 {_KARAOKE_ORDER}""", {
+        "tags": wanted,
+        "os_artists": list(all_artists),
+        "os_top_artists": list(top_artists),
+        "mbid_tids": list(mbid_tids),
+        "top_mbid_tids": list(top_mbid_tids),
+        "os_tids": list(os_tids),
+    }).fetchall()
+    return [int(r["track_id"]) for r in rows]
 
 
 def genre_ids(genre: str, conn) -> list[int]:
@@ -312,52 +478,63 @@ def _genre_rule(genre: str) -> Rule:
                 lambda conn, osc, g=genre: genre_ids(g, conn))
 
 
-RULES: tuple[Rule, ...] = tuple(_genre_rule(g) for g in GENRES) + (
-    Rule("Smart: Bittersweet & Ironic",
-         "Sound and words pull opposite ways: a warm sound over dark words, or a cynical tone",
-         lambda conn, osc: mood_ids(conn, "m.summary->>'contrast' IN ('bittersweet', 'ironic')")),
-    Rule("Smart: Slow Burn",
-         "Starts quiet, ends loud: the build-ups",
-         lambda conn, osc: slow_burn_ids(conn)),
-    Rule("Smart: Dreamy",
-         "Dreamy and wistful: floating, spacey, a little far away",
-         lambda conn, osc: feeling_ids(conn, "dreamy", "wistful")),
-    Rule("Smart: Blue & Frustrated",
-         "The blues feeling: aching, frustrated, not angry",
-         lambda conn, osc: feeling_ids(conn, "frustrated", "blue")),
-    Rule("Smart: Longing",
-         "Missing someone, something, somewhere",
-         lambda conn, osc: feeling_ids(conn, "longing", "melancholic")),
-    Rule("Smart: Romantic",
-         "Romantic, tender, hopeful",
-         lambda conn, osc: feeling_ids(conn, "romantic", "tender", "hopeful")),
-    Rule("Smart: Party",
-         "Festive, cheerful, energetic, uplifting",
-         lambda conn, osc: feeling_ids(conn, "festive", "cheerful", "energetic", "uplifting")),
-    Rule("Smart: Mood Swings",
-         "Songs that change their mind: three or more mood swings",
-         lambda conn, osc: mood_ids(conn, "(m.summary->>'swing_count')::int >= 3",
-                                    order="(m.summary->>'swings_per_minute')::float DESC")),
-    Rule("Smart: More Sunday",
-         "Sounds like your 'sunday' list, without repeating it",
-         lambda conn, osc: sounds_like_playlist("sunday", conn, osc)),
-    Rule("Smart: More Komijn",
-         "Sounds like 'Komijn 2025', without repeating it",
-         lambda conn, osc: sounds_like_playlist("Komijn 2025", conn, osc)),
-    Rule("Smart: Radio Discoveries Set",
-         "Songs radio mode found, sequenced as a set",
-         lambda conn, osc: playlist_track_ids("Karaoke: Radio Discoveries", conn)),
-    Rule("Smart: Sing-along Favourites",
-         "Your most played songs with synced lyrics",
-         lambda conn, osc: sing_along_ids(conn)),
-    Rule("Smart: Borderline Moods",
-         "Songs that shift or sit between two clear moods (rate weighted)",
-         lambda conn, osc: mood_ids(conn, "(m.summary->>'borderline_share')::float > 0.3",
-                                    order="(m.summary->>'borderline_share')::float DESC")),
-    Rule("Smart: To Discover",
-         "Tracks you have never played, grouped smoothly by genre",
-         lambda conn, osc: discover_ids(conn)),
-) + tuple(_decade_rule(*d) for d in DECADES)
+def _subgenre_rule(label: str, tags: tuple[str, ...]) -> Rule:
+    return Rule(f"Genre: {label}",
+                f"Sub-genre '{label}' ({', '.join(tags[:3])}) from OpenSearch & library tags, in flow order",
+                lambda conn, osc, ts=tags: subgenre_ids(ts, conn, osc))
+
+
+RULES: tuple[Rule, ...] = (
+    tuple(_genre_rule(g) for g in GENRES)
+    + tuple(_subgenre_rule(label, tags) for label, tags in SUBGENRES)
+    + (
+        Rule("Smart: Bittersweet & Ironic",
+             "Sound and words pull opposite ways: a warm sound over dark words, or a cynical tone",
+             lambda conn, osc: mood_ids(conn, "m.summary->>'contrast' IN ('bittersweet', 'ironic')")),
+        Rule("Smart: Slow Burn",
+             "Starts quiet, ends loud: the build-ups",
+             lambda conn, osc: slow_burn_ids(conn)),
+        Rule("Smart: Dreamy",
+             "Dreamy and wistful: floating, spacey, a little far away",
+             lambda conn, osc: feeling_ids(conn, "dreamy", "wistful")),
+        Rule("Smart: Blue & Frustrated",
+             "The blues feeling: aching, frustrated, not angry",
+             lambda conn, osc: feeling_ids(conn, "frustrated", "blue")),
+        Rule("Smart: Longing",
+             "Missing someone, something, somewhere",
+             lambda conn, osc: feeling_ids(conn, "longing", "melancholic")),
+        Rule("Smart: Romantic",
+             "Romantic, tender, hopeful",
+             lambda conn, osc: feeling_ids(conn, "romantic", "tender", "hopeful")),
+        Rule("Smart: Party",
+             "Festive, cheerful, energetic, uplifting",
+             lambda conn, osc: feeling_ids(conn, "festive", "cheerful", "energetic", "uplifting")),
+        Rule("Smart: Mood Swings",
+             "Songs that change their mind: three or more mood swings",
+             lambda conn, osc: mood_ids(conn, "(m.summary->>'swing_count')::int >= 3",
+                                        order="(m.summary->>'swings_per_minute')::float DESC")),
+        Rule("Smart: More Sunday",
+             "Sounds like your 'sunday' list, without repeating it",
+             lambda conn, osc: sounds_like_playlist("sunday", conn, osc)),
+        Rule("Smart: More Komijn",
+             "Sounds like 'Komijn 2025', without repeating it",
+             lambda conn, osc: sounds_like_playlist("Komijn 2025", conn, osc)),
+        Rule("Smart: Radio Discoveries Set",
+             "Songs radio mode found, sequenced as a set",
+             lambda conn, osc: playlist_track_ids("Karaoke: Radio Discoveries", conn)),
+        Rule("Smart: Sing-along Favourites",
+             "Your most played songs with synced lyrics",
+             lambda conn, osc: sing_along_ids(conn)),
+        Rule("Smart: Borderline Moods",
+             "Songs that shift or sit between two clear moods (rate weighted)",
+             lambda conn, osc: mood_ids(conn, "(m.summary->>'borderline_share')::float > 0.3",
+                                        order="(m.summary->>'borderline_share')::float DESC")),
+        Rule("Smart: To Discover",
+             "Tracks you have never played, grouped smoothly by genre",
+             lambda conn, osc: discover_ids(conn)),
+    )
+    + tuple(_decade_rule(*d) for d in DECADES)
+)
 
 
 # -- shaping -------------------------------------------------------------------
@@ -547,7 +724,8 @@ def transition(cur, cand) -> float:
 def flow_order(rows: list[dict[str, Any]], conn, os_client,
                families: Optional[dict[int, Optional[str]]] = None,
                tracks: Optional[dict[int, Any]] = None,
-               acts: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
+               acts: Optional[dict[int, str]] = None,
+               stale_ids: Optional[set[int]] = None) -> list[dict[str, Any]]:
     """Sequence the rows as a set: each next song follows the last best.
 
     Starts from the first row (the rule's best pick) and greedily takes the
@@ -557,7 +735,9 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
     ``CLUSTER_OVER`` songs is played out as one block before the list moves
     on. Smaller families go between blocks; genre-less songs may go anywhere,
     a block included, wherever they fit -- kept out of blocks they all piled
-    up at the end of the list.
+    up at the end of the list. When ``stale_ids`` (tracks from the previous
+    list's opening head or already played) is given, they take a small
+    :data:`STALE_PENALTY` so unplayed tail and fresh songs sequence first.
     """
     from collections import Counter
 
@@ -571,6 +751,7 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
     blocks = {f for f, n in Counter(fam.get(r["track_id"]) for r in rows).items()
               if f and n > CLUSTER_OVER}
     by_id = {r["track_id"]: r for r in rows}
+    stale = stale_ids or set()
 
     def act_of(tid: int) -> str:
         return (acts or {}).get(tid) or dj_suggest.artist_key(by_id[tid]["artist"])
@@ -590,6 +771,8 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
             same_act = act_of(tid) == cur_act
             if families is not None:
                 s -= genre_penalty(cur_fam, fam.get(tid))
+            if tid in stale:
+                s -= STALE_PENALTY
             return s - (1.0 if same_act else 0.0)
 
         pool = left
@@ -601,18 +784,128 @@ def flow_order(rows: list[dict[str, Any]], conn, os_client,
     return [by_id[t] for t in order]
 
 
+def previous_state(rule_name: str, rows: list[dict[str, Any]], conn
+                   ) -> tuple[dict[int, int], dict[int, int]]:
+    """Return ``(prev_positions, play_counts)`` for ``rows`` from the database.
+
+    ``prev_positions`` maps ``track_id -> 1-based position`` in the currently
+    saved playlist for ``rule_name`` (before it is overwritten). ``play_counts``
+    maps ``track_id -> play_count`` from ``tracks``, incremented when the song
+    was logged in ``play_events`` since the playlist was last saved.
+    """
+    from . import localcache
+
+    if conn is None or not rows:
+        return {}, {}
+    prev_pos: dict[int, int] = {}
+    play_counts: dict[int, int] = {}
+    pid = slug(rule_name)
+    updated_at = 0.0
+    try:
+        if localcache.table_exists(conn, "saved_playlists"):
+            pl = conn.execute(
+                "SELECT updated_at FROM saved_playlists WHERE playlist_id = %s",
+                (pid,),
+            ).fetchone()
+            if pl and pl.get("updated_at"):
+                updated_at = float(pl["updated_at"])
+        if localcache.table_exists(conn, "saved_playlist_tracks"):
+            for i, r in enumerate(conn.execute(
+                "SELECT track_id, position FROM saved_playlist_tracks"
+                " WHERE playlist_id = %s AND track_id IS NOT NULL ORDER BY position",
+                (pid,),
+            ).fetchall(), start=1):
+                prev_pos[int(r["track_id"])] = int(r["position"] or i)
+    except Exception:
+        pass
+    tids = [int(r["track_id"]) for r in rows if r.get("track_id") is not None]
+    try:
+        if tids and localcache.table_exists(conn, "tracks"):
+            for r in conn.execute(
+                "SELECT track_id, COALESCE(play_count, 0) AS play_count"
+                " FROM tracks WHERE track_id = ANY(%s)",
+                (tids,),
+            ).fetchall():
+                play_counts[int(r["track_id"])] = int(r["play_count"] or 0)
+        if updated_at > 0 and localcache.table_exists(conn, "play_events"):
+            recent = {
+                (str(r["artist"] or "").strip().lower(), song_key(str(r["title"] or "")))
+                for r in conn.execute(
+                    "SELECT artist, title FROM play_events"
+                    " WHERE event = 'play' AND ts >= %s",
+                    (updated_at,),
+                ).fetchall()
+            }
+            if recent:
+                for r in rows:
+                    key = (str(r.get("artist") or "").strip().lower(),
+                           song_key(str(r.get("title") or "")))
+                    if key in recent:
+                        tid = int(r["track_id"])
+                        play_counts[tid] = play_counts.get(tid, 0) + 1
+    except Exception:
+        pass
+    return prev_pos, play_counts
+
+
+def rotate_candidates(rows: list[dict[str, Any]], prev_pos: dict[int, int],
+                      play_counts: dict[int, int], *,
+                      penalize_plays: bool = True) -> tuple[list[dict[str, Any]], set[int]]:
+    """Reorder candidates so unplayed end-of-list songs move up and played/head songs sink.
+
+    Returns ``(reordered_rows, stale_track_ids)``:
+    - Tier 0: unplayed songs from the tail of the previous playlist (``pos > head_cut``),
+      ordered from the end of the previous list upward (``-pos``) so songs that sat
+      at the bottom move to the top.
+    - Tier 1: fresh unplayed songs that were not in the previous playlist.
+    - Tier 2: unplayed songs from the opening head of the previous playlist
+      (``pos <= head_cut``), rotated behind the tail and fresh tracks.
+    - Tier 3: played songs (``play_count > 0`` when ``penalize_plays`` is True),
+      ordered by fewest plays first.
+    """
+    has_plays = penalize_plays and any(v > 0 for v in play_counts.values())
+    if not prev_pos and not has_plays:
+        return list(rows), set()
+
+    head_cut = max(1, len(prev_pos) // HEAD_FRACTION) if prev_pos else 0
+    stale: set[int] = set()
+
+    def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        idx, r = item
+        tid = int(r["track_id"])
+        plays = play_counts.get(tid, 0) if penalize_plays else 0
+        pos = prev_pos.get(tid)
+        if plays > 0:
+            stale.add(tid)
+            return (3, plays, pos if pos is not None else idx)
+        if pos is not None and pos > head_cut:
+            return (0, -pos, idx)
+        if pos is None:
+            return (1, 0, idx)
+        stale.add(tid)
+        return (2, pos, idx)
+
+    ordered = [r for _, r in sorted(enumerate(rows), key=sort_key)]
+    return ordered, stale
+
+
 def build(rule: Rule, conn, os_client) -> list[dict[str, Any]]:
     """The rule's playlist rows, ready to save or push."""
     from . import dj_suggest
 
     ids = rule.select(conn, os_client)
     candidates = playable(ids, conn)
+    penalize = not (rule.name in PLAY_POSITIVE_RULES or rule.name.startswith("Decade: "))
+    prev_pos, play_counts = previous_state(rule.name, candidates, conn)
+    candidates, stale_ids = rotate_candidates(
+        candidates, prev_pos, play_counts, penalize_plays=penalize)
     acts = act_keys(candidates, conn)
     pool = cap_per_act(candidates, limit=POOL_TRACKS, acts=acts)
     tracks = dj_suggest._load([r["track_id"] for r in pool], conn, os_client)
     families = assign_families(genre_options(pool, conn), tracks)
     rows = prefer_common_families(pool, families, MAX_TRACKS)
-    return flow_order(rows, conn, os_client, families=families, tracks=tracks, acts=acts)
+    return flow_order(rows, conn, os_client, families=families, tracks=tracks,
+                      acts=acts, stale_ids=stale_ids)
 
 
 # -- saving --------------------------------------------------------------------
@@ -643,10 +936,12 @@ def save_local(rule: Rule, rows: list[dict[str, Any]], conn, url: str = "") -> s
 
 
 def push_ytmusic(rule: Rule, rows: list[dict[str, Any]], yt, existing: dict[str, str]) -> str:
-    """Make the YouTube Music playlist of this name hold exactly these songs.
+    """Make the YouTube Music playlist of this name hold these songs in order.
 
     Reuses a playlist with the same title (its id and links survive):
-    removes what no longer belongs, adds what is new. Creates it otherwise.
+    keeps the longest leading subsequence already in ``rows`` order, removes
+    stale or rotated-down items before it, and appends the rest in ``rows``
+    order so a rotated opener actually moves to the top on YouTube Music too.
     """
     from .ytmusic_playlist import extract_video_id
 
@@ -656,12 +951,25 @@ def push_ytmusic(rule: Rule, rows: list[dict[str, Any]], yt, existing: dict[str,
         return yt.create_playlist(rule.name, description=rule.description, video_ids=vids)
     current = (yt.get_playlist(pid, limit=500) or {}).get("tracks") or []
     wanted = set(vids)
+    # Match the longest prefix of `vids` that already appears in order inside `current`.
+    vid_idx = 0
+    kept_set_ids: set[str] = set()
+    kept_vids: set[str] = set()
+    for t in current:
+        v = t.get("videoId")
+        sv = t.get("setVideoId")
+        if not v or not sv:
+            continue
+        if vid_idx < len(vids) and v == vids[vid_idx]:
+            kept_set_ids.add(sv)
+            kept_vids.add(v)
+            vid_idx += 1
     stale = [{"videoId": t["videoId"], "setVideoId": t["setVideoId"]} for t in current
-             if t.get("videoId") and t.get("setVideoId") and t["videoId"] not in wanted]
-    have = {t.get("videoId") for t in current} - {s["videoId"] for s in stale}
+             if t.get("videoId") and t.get("setVideoId")
+             and (t["videoId"] not in wanted or t["setVideoId"] not in kept_set_ids)]
     if stale:
         yt.remove_playlist_items(pid, stale)
-    missing = [v for v in vids if v not in have]
+    missing = [v for v in vids if v not in kept_vids]
     if missing:
         yt.add_playlist_items(pid, missing)
     return pid

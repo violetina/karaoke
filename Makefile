@@ -219,8 +219,8 @@ dashboard: ## Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
 dashboard-build: ## Build the Vue 3 dashboard frontend bundle
 	cd src/karaoke/webapp && npm run build
 
-smart-playlists: ## Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
-	$(PYTHON) -m karaoke.smart_playlists $${PUSH:+--push} $${DRY:+--dry-run}
+smart-playlists: ## Rebuild and upload the Genre:/Smart:/Decade: playlists to YouTube Music (DRY=1 previews, LOCAL=1 skips upload, ONLY="...")
+	$(PYTHON) -m karaoke.smart_playlists $(if $(or $(DRY),$(LOCAL),$(filter 0,$(PUSH))),,--push) $(if $(DRY),--dry-run,) $(if $(ONLY),--only "$(ONLY)",)
 
 artists: ## Resolve artists to MusicBrainz, rewrite their genres, fetch Wikidata, rebuild the artist index
 	$(PYTHON) scripts/resolve_artists.py
