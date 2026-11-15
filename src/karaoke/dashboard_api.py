@@ -329,7 +329,12 @@ async def proxy_mood_cover_image(mood: str = "neutral", art_url: Optional[str] =
             if art_url:
                 url += f"&art_url={urllib.parse.quote(art_url)}"
             r = await client.get(url)
+            if r.status_code >= 400:
+                # Do not relay an error body as an image: the browser shows a broken cover.
+                raise HTTPException(status_code=502, detail=f"cover unavailable ({r.status_code})")
             return StreamingResponse(r.aiter_bytes(), media_type=r.headers.get("content-type", "image/jpeg"))
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 

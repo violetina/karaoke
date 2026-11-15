@@ -1289,15 +1289,30 @@ def get_mood_cover_image(mood: str = "neutral", art_url: Optional[str] = None):
     import os, random
     from fastapi.responses import FileResponse, RedirectResponse
     from urllib.parse import urlparse, unquote
+    from fastapi.responses import Response
     from karaoke import moodframe
 
+    def _read_now(path: str):
+        # The player's art lives in a short-lived Chrome temp file that can be
+        # deleted between an exists() check and FileResponse opening it (which
+        # then raised mid-response: a 500 and a broken stage). Read the bytes
+        # immediately; None means gone, so fall through to the mood pool.
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return None
+        return Response(data, headers={"Cache-Control": "no-store"},
+                        media_type="image/png" if data.startswith(b"\x89PNG") else
+                        "image/jpeg" if data.startswith(b"\xff\xd8") else
+                        "image/webp" if data[:4] == b"RIFF" else "application/octet-stream")
+
     if art_url:
-        if art_url.startswith("file://"):
-            p = unquote(urlparse(art_url).path)
-            if os.path.exists(p):
-                return FileResponse(p)
-        elif os.path.exists(art_url):
-            return FileResponse(art_url)
+        if art_url.startswith("file://") or (os.path.isabs(art_url) and os.path.exists(art_url)):
+            local = unquote(urlparse(art_url).path) if art_url.startswith("file://") else art_url
+            resp = _read_now(local)
+            if resp is not None:
+                return resp
         elif art_url.startswith("http://") or art_url.startswith("https://"):
             return RedirectResponse(art_url)
 
