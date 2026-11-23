@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 — Mood-still API and smart-playlist rotation
+
+### Mood-still API (new)
+
+- New `GET /api/mood-still` on the control API (`127.0.0.1:8765`) renders a 1920×1080 PNG "mood still" for a track — a dark field with a bright core whose colour, saturation and geometry are driven by the song's measured features (musical key → base hue, BPM → ring frequency, energy → saturation/value/vignette, dominant mood → hue shift, chord quality → shape). It joins the existing mood-image family (`/api/mood-pixels`, `/api/mood-art`, `/api/mood-feeling-image`, `/api/mood-cover-image`) as a loopback-only, desktop-only, no-auth endpoint returning `image/png`.
+- When no features are passed, the route auto-resolves the **currently playing** track's measured key/BPM/energy/genre from the MCP `get_now_playing` payload (falling back to a direct Postgres lookup of `track_analysis`/`track_genre` if the MCP cache is cold). Any query argument (`energy`, `bpm`, `key`, `genre`, `title`, `artist`, `form`, `seed`) overrides the live value; `energy`/`bpm` default to `None` so omitting them yields the song's real shape rather than a generic default.
+- **Advances with the song:** passing `elapsed` folds the current highlighted lyric word, the current mood from the v2 mood timeline, and the active-line progress into the render, so the same track produces a different still as it plays. Rendered PNG bytes are cached per resolved `(mood, energy, bpm, key, genre, title, artist, form, seed, elapsed, word, mood, phase)` tuple for byte-identical, ~0.1 s repeat responses.
+- New `src/karaoke/mood_still.py` renderer. Two new covered moods — `aggressive` (blazing red, max contrast — a notch past *angry*) and `bluesy` (deep, dim club-blue) — added to `moodart.MOOD_TARGETS`, with generated pixel-art (`scripts/generate_mood_images.py`) and `aggressive`/`bluesy` entries in the control API's `FEELING_FALLBACKS`, so those feelings no longer silently fall back to *angry*/*blue*.
 
 ### Smart playlists: sub-genres, rotation, upload by default
 

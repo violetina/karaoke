@@ -671,7 +671,96 @@ def make_blue_2():
     draw.ellipse([18, 50, 46, 58], fill=(30, 90, 180))
     return im
 
+def make_aggressive_1():
+    # Jagged crimson shards exploding from a white-hot core
+    im = make_gradient((25, 3, 8), (60, 8, 12), curve=1.3)
+    pixels = im.load()
+    draw = ImageDraw.Draw(im)
+    r = random.Random(911)
+    # Radial clashing shards
+    for _ in range(14):
+        ang = r.uniform(0, math.tau)
+        length = r.randint(22, 31)
+        ex = 32 + math.cos(ang) * length
+        ey = 32 + math.sin(ang) * length
+        shade = r.choice([(255, 40, 40), (220, 20, 30), (255, 90, 30)])
+        draw.line([(32, 32), (ex, ey)], fill=shade, width=r.choice([1, 2]))
+    # Lightning cracks
+    for _ in range(4):
+        x = r.randint(6, 58)
+        pts = [(x, 0)]
+        for seg in range(5):
+            x += r.randint(-4, 4)
+            pts.append((max(0, min(63, x)), (seg + 1) * 12))
+        draw.line(pts, fill=(255, 200, 120), width=1)
+    # White-hot core
+    draw.ellipse([27, 27, 37, 37], fill=(255, 230, 210))
+    draw.ellipse([29, 29, 35, 35], fill=(255, 255, 255))
+    return im
+
+def make_aggressive_2():
+    # Clenched neon warning chevrons stabbing upward
+    im = make_gradient((30, 4, 6), (12, 2, 4))
+    draw = ImageDraw.Draw(im)
+    # Stacked chevrons
+    for i, y in enumerate(range(50, 8, -12)):
+        c = [(255, 60, 40), (255, 120, 20), (255, 40, 80)][i % 3]
+        draw.line([(10, y), (32, y - 14), (54, y)], fill=c, width=3)
+    # Impact sparks
+    r = random.Random(322)
+    for _ in range(18):
+        x = r.randint(4, 60)
+        y = r.randint(4, 60)
+        pixels_c = (255, 240, 180)
+        draw.point((x, y), fill=pixels_c)
+    return im
+
+def make_bluesy_1():
+    # Lone guitar silhouette under a single dim blue stage light
+    im = make_gradient((6, 10, 32), (14, 22, 55), curve=1.1)
+    draw = ImageDraw.Draw(im)
+    pixels = im.load()
+    # Spotlight cone
+    for y in range(0, 50):
+        half = int(2 + y * 0.42)
+        for x in range(32 - half, 32 + half + 1):
+            if 0 <= x < 64:
+                d = abs(x - 32) / max(half, 1)
+                pixels[x, y] = lerp_rgb(pixels[x, y], (70, 120, 210), (1 - d) * 0.35)
+    # Guitar body (teardrop) + neck
+    draw.ellipse([25, 36, 40, 54], fill=(20, 34, 70))
+    draw.ellipse([29, 41, 36, 49], fill=(8, 14, 36))
+    draw.rectangle([31, 18, 34, 38], fill=(24, 40, 80))
+    draw.rectangle([30, 15, 35, 19], fill=(40, 60, 110))
+    # One blue note glinting
+    draw.point((44, 24), fill=(140, 210, 255))
+    draw.point((45, 23), fill=(90, 160, 230))
+    return im
+
+def make_bluesy_2():
+    # Neon 'blue note' bending over wet midnight pavement
+    im = make_gradient((5, 8, 28), (16, 28, 64))
+    draw = ImageDraw.Draw(im)
+    pixels = im.load()
+    # Wet pavement reflection band
+    draw.rectangle([0, 46, 63, 63], fill=(10, 18, 44))
+    # Glowing musical note
+    draw.ellipse([22, 30, 30, 37], fill=(60, 150, 240))
+    draw.rectangle([29, 16, 31, 34], fill=(60, 150, 240))
+    draw.polygon([(31, 16), (40, 19), (31, 23)], fill=(90, 180, 255))
+    # Reflection smear
+    for rx in range(22, 42):
+        for ry in range(47, 58):
+            if (rx + ry) % 2 == 0:
+                pixels[rx, ry] = lerp_rgb(pixels[rx, ry], (40, 110, 200), 0.4)
+    return im
+
 GENERATORS = {
+    # Newly covered moods (previously fell back to angry / blue)
+    ("aggressive", "1.png"): make_aggressive_1,
+    ("aggressive", "2.png"): make_aggressive_2,
+    ("bluesy", "1.png"): make_bluesy_1,
+    ("bluesy", "2.png"): make_bluesy_2,
     # Missing 1.png
     ("uplifting", "1.png"): make_uplifting_1,
     ("uplifting", "2.png"): make_uplifting_2,
@@ -708,10 +797,71 @@ GENERATORS = {
 }
 
 base_dir = "/home/tina/karaoke/src/karaoke/static/images/moods"
-for (mood, filename), gen_fn in GENERATORS.items():
-    mdir = os.path.join(base_dir, mood)
-    os.makedirs(mdir, exist_ok=True)
-    dst = os.path.join(mdir, filename)
-    img = gen_fn()
-    img.save(dst, "PNG")
-    print(f"Generated {dst}")
+
+
+def _referenced_labels():
+    """Every mood/feeling label the running app can ask for, pulled live from
+    the code so this audit never drifts from reality."""
+    import sys
+    sys.path.insert(0, "/home/tina/karaoke/src")
+    labels, fallbacks = set(), {}
+    try:
+        from karaoke import moodart, ctrl_api, mood_timeline, sentiment  # type: ignore
+        labels |= set(moodart.MOOD_TARGETS.keys())
+        fallbacks = dict(ctrl_api.FEELING_FALLBACKS)
+        labels |= set(fallbacks) | set(fallbacks.values())
+        for attr in ("MOODS", "AUDIO_MOODS", "CHARACTERS"):
+            v = getattr(sentiment, attr, None) or getattr(mood_timeline, attr, None)
+            if v:
+                labels |= set(v)
+        fb = getattr(mood_timeline, "FEELINGS_BY_MOOD", {})
+        for m in fb.values():
+            labels |= set(m.values()) if isinstance(m, dict) else set(m)
+    except Exception as exc:  # pragma: no cover - audit is best-effort
+        print(f"  (label import failed, auditing disk only: {exc})")
+    return {l.lower().strip() for l in labels if l}, fallbacks
+
+
+def _audit():
+    labels, fallbacks = _referenced_labels()
+    have_dir = {
+        d for d in os.listdir(base_dir)
+        if os.path.isdir(os.path.join(base_dir, d))
+        and any(f.endswith(".png") for f in os.listdir(os.path.join(base_dir, d)))
+    }
+    print(f"Moods with their own pixel art ({len(have_dir)}): {sorted(have_dir)}")
+    missing_own = sorted(l for l in labels if l not in have_dir)
+    if missing_own:
+        print("\nLabels WITHOUT their own art (served via fallback):")
+        for m in missing_own:
+            chain, cur, seen = [], m, set()
+            while cur in fallbacks and cur not in seen:
+                seen.add(cur)
+                cur = fallbacks[cur]
+                chain.append(cur)
+            dest = next((c for c in chain if c in have_dir), "neutral")
+            print(f"  {m:14s} -> {dest}")
+    else:
+        print("\nEvery referenced mood/feeling has its own base image. ✓")
+    return missing_own
+
+
+if __name__ == "__main__":
+    import sys
+    if "--audit" in sys.argv:
+        _audit()
+        raise SystemExit(0)
+    force = "--force" in sys.argv
+    written = 0
+    for (mood, filename), gen_fn in GENERATORS.items():
+        mdir = os.path.join(base_dir, mood)
+        os.makedirs(mdir, exist_ok=True)
+        dst = os.path.join(mdir, filename)
+        if os.path.exists(dst) and not force:
+            continue
+        img = gen_fn()
+        img.save(dst, "PNG")
+        written += 1
+        print(f"Generated {dst}")
+    print(f"\n{written} image(s) written ({'forced' if force else 'missing-only'}).")
+    _audit()

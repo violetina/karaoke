@@ -74,6 +74,10 @@ MOOD_TARGETS: dict[str, MoodTarget] = {
     "defiant": MoodTarget(hue=0.02, saturation=0.95, value=0.70, contrast=0.60),
     "ironic": MoodTarget(hue=0.28, saturation=0.80, value=0.60, contrast=0.45),
     "bittersweet": MoodTarget(hue=0.10, saturation=0.55, value=0.60, contrast=0.35),
+    # Red, blazing, max contrast — a notch past "angry".
+    "aggressive": MoodTarget(hue=0.00, saturation=0.95, value=0.60, contrast=0.70),
+    # Deep club-blue, moody and dim, moderate saturation.
+    "bluesy": MoodTarget(hue=0.62, saturation=0.65, value=0.35, contrast=0.35),
 }
 
 # How much each term counts. Hue leads, but not so far that it drags a

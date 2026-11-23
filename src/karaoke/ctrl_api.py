@@ -28,7 +28,18 @@ from pydantic import BaseModel
 from .logger import log
 from .player_open import open_song_url
 
+from karaoke import mood_still  # noqa: E402  (needed by the route helpers)
+from . import localcache  # noqa: E402
+from . import mood_timeline  # noqa: E402
+from . import chord_timeline  # noqa: E402
+from .player import timeline_from_lyrics  # noqa: E402
+
 CTRL_API_VERSION = "0.5.0"
+
+# Current-song resolution is done against the MCP ``get_now_playing`` endpoint
+# (host control API may be offline). The route below falls back to query
+# parameters when the endpoint cannot be reached, so the image still renders.
+_NOW_PLAYING_URL = os.environ.get("KARAKO_MCP_HOST", "http://127.0.0.1:8888") + "/api/now_playing"
 
 
 @asynccontextmanager
@@ -1186,6 +1197,7 @@ FEELING_FALLBACKS: dict[str, str] = {
     "dramatic": "angry",
     "tense": "angry",
     "defiant": "angry",
+    "aggressive": "angry",
     "cheerful": "happy",
     "energetic": "happy",
     "festive": "happy",
@@ -1196,6 +1208,7 @@ FEELING_FALLBACKS: dict[str, str] = {
     "hopeful": "tender",
     "melancholic": "sad",
     "blue": "sad",
+    "bluesy": "blue",
     "wistful": "sad",
     "longing": "tender",
     "ironic": "cynical",
@@ -1282,6 +1295,241 @@ def get_mood_feeling_image(mood: str = "neutral"):
         return FileResponse(fallback)
     return {"error": "feeling image not found"}
 
+
+def _resolve_track_features(mood: str, energy: Optional[float] = None,
+                            bpm: Optional[float] = None, key: Optional[str] = None,
+                            genre: Optional[str] = None,
+                            title: Optional[str] = None, artist: Optional[str] = None,
+                            form: str = "static", seed: int = 0):
+    """Build the analysis AND its PNG-cache key from measured features.
+
+    The *currently playing* track's measured features come from the MCP
+    ``get_now_playing`` payload; any query argument overrides the matching
+    field. Returns ``(DummyAnalysis, cache_key, track_id)`` so callers can do an
+    exact per-track still lookup without re-rendering.
+
+    ``energy`` and ``bpm`` default to *None* so that omitting them resolves
+    to the live track's measured values instead of the route's previous
+    ad-hoc defaults (0.5 / 120.0), which would have hidden the song's shape.
+    """
+    import urllib.request as _urlreq
+
+    mood = mood or "neutral"
+    match = {}
+    payload = {}
+    try:
+        with _urlreq.urlopen(_NOW_PLAYING_URL, timeout=3) as r:
+            payload = json.load(r)
+        match = payload.get("library_match") or {}
+    except Exception:
+        pass  # MCP offline -> query parameters govern the render
+
+    def pick(override, current):
+        return override if override is not None else current
+
+    track_id = payload.get("track_id") if isinstance(payload, dict) else None
+
+    # Fallback: if MCP did not populate library_match, check Postgres directly
+    # in case analysis/genre landed since the MCP cache or only partial rows exist.
+    if not match and track_id is not None:
+        try:
+            with localcache.connect() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT a.detected_key, a.bpm, a.energy, g.genre "
+                    "FROM tracks t "
+                    "LEFT JOIN track_analysis a ON a.track_id = t.track_id "
+                    "LEFT JOIN track_genre g ON g.track_id = t.track_id "
+                    "WHERE t.track_id = %s",
+                    (track_id,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    row_dict = dict(row)
+                    if any(row_dict.get(k) is not None for k in ("detected_key", "bpm", "energy", "genre")):
+                        match = {
+                            "key": row_dict.get("detected_key"),
+                            "bpm": float(row_dict["bpm"]) if row_dict.get("bpm") is not None else None,
+                            "energy": float(row_dict["energy"]) if row_dict.get("energy") is not None else None,
+                            "genre": row_dict.get("genre") or "",
+                        }
+        except Exception:
+            pass
+
+    has_measured = bool(match) or any(
+        x is not None for x in (energy, bpm, key, genre)
+    )
+
+    # Resolve each field: query arg wins, else the live track's measurement.
+    # energy/bpm default to None so omission resolves to the live track's shape.
+    raw_match_energy = match.get("energy")
+    raw_match_bpm = match.get("bpm")
+    res_energy = float(energy) if energy is not None else float(raw_match_energy if raw_match_energy is not None else 0.5)
+    res_bpm = float(bpm) if bpm is not None else float(raw_match_bpm if raw_match_bpm is not None else 120.0)
+    resolved_key = key if key is not None else (match.get("key") or "G# minor")
+    res_title = pick(title, (payload.get("title") or "").strip())
+    res_artist = pick(artist, (payload.get("artist") or "").strip())
+    res_genre = pick(genre, (match.get("genre") if match else "") or ("trip hop" if has_measured else ""))
+    res_form = pick(form, match.get("form") or "static")
+
+    analysis = mood_still.DummyAnalysis(
+        energy=res_energy,
+        bpm=res_bpm,
+        brightness=res_energy,
+        resolved_key=resolved_key,
+        detected_key=resolved_key if has_measured else "",
+        genre=res_genre,
+        form=res_form or "static",
+        title=res_title or "",
+        artist=res_artist or "",
+        has_measured_metadata=has_measured,
+    )
+    cache_key = (
+        mood, res_energy, res_bpm, resolved_key,
+        res_genre, res_title or "", res_artist or "",
+        res_form or "static", int(seed), has_measured,
+    )
+    return analysis, cache_key, track_id
+
+
+def _resolve_timeline_state(elapsed: Optional[float], track_id: Optional[int],
+                            bpm: float = 120.0) -> tuple[str, float, str, str, str]:
+    """Resolve the v2-timeline state for the currently playing track.
+
+    Given the current playback position (``elapsed`` seconds) this returns
+    (1) the *current highlighted word* from the lyrics v2 timeline,
+    (2) the active-line progress (0..1) used as the ``phase`` input,
+    (3) the *current mood* tag from the mood v2 timeline (``track_moods``),
+    and (4) the *current chord* (name + Roman numeral) from the chords v2
+    timeline (``track_chords``).
+
+    When ``elapsed`` is omitted, returns the default snapshot phase (0.37) so
+    static requests render an active ring composition instead of collapsing to 0.
+    When ``elapsed`` is provided for a track without a lyrics timeline, phase
+    advances deterministically with the beat period (``bpm``).
+    """
+    highlighted_word = ""
+    phase = 0.37
+    current_mood = ""
+    chord_name = ""
+    current_roman = ""
+
+    if elapsed is None:
+        return highlighted_word, phase, current_mood, chord_name, current_roman
+
+    # Default beat-driven phase when elapsed is provided, overridden if lyrics timeline exists
+    phase = (0.37 + (float(elapsed) * (float(bpm or 120.0) / 60.0) * 0.25)) % 1.0
+
+    if track_id is None:
+        return highlighted_word, phase, current_mood, chord_name, current_roman
+
+    try:
+        # Lyrics timeline is served from the local cache.
+        with localcache.connect() as conn:
+            lyrics = localcache.get_lyrics_by_track_id(track_id, conn)
+            if lyrics is not None:
+                tl = timeline_from_lyrics(lyrics)
+                if tl is not None:
+                    word_idx = tl.word_index(elapsed)
+                    if 0 <= word_idx < len(tl.lines):
+                        highlighted_word = tl.lines[word_idx][1]
+                    phase = float(tl.active_fraction(elapsed))
+
+        # Mood + chord v2 timelines live in PostgreSQL.
+        pool = localcache.get_pool()
+        conn = pool.getconn()
+        try:
+            stored_mood = mood_timeline.load(track_id, conn)
+            if stored_mood is not None:
+                seg = mood_timeline.at(stored_mood, elapsed)
+                if seg is not None:
+                    current_mood = str(seg.get("mood") or "")
+
+            stored_chord = chord_timeline.load(track_id, conn)
+            if stored_chord is not None:
+                seg = chord_timeline.at(stored_chord, elapsed)
+                if seg is not None:
+                    chord_name = str(seg.get("chord") or "")
+                    chord_roman = str(seg.get("chord_roman") or "")
+                    if not chord_name:
+                        chord_name = chord_roman
+                    current_roman = chord_roman
+        finally:
+            pool.putconn(conn)
+    except Exception:
+        log.debug("v2-timeline resolution failed for track %s at %.2f",
+                  track_id, elapsed, exc_info=True)
+
+    return highlighted_word, phase, current_mood, chord_name, current_roman
+
+
+@app.get("/api/mood-still")
+def get_mood_still(mood: str = "neutral", energy: Optional[float] = None,
+                   bpm: Optional[float] = None, key: Optional[str] = None,
+                   genre: Optional[str] = None,
+                   title: Optional[str] = None, artist: Optional[str] = None,
+                   form: str = "static", seed: int = 0,
+                   elapsed: Optional[float] = None):
+    """Render the generative mood still for a track's measured features.
+
+    Parameters resolve to the *currently playing* track's measured features
+    (``energy``, ``bpm``, ``key``, ``genre``, ``title``, ``artist``) via the
+    MCP ``get_now_playing`` payload, unless the caller overrides a single value
+    through a query argument. If ``elapsed`` is supplied the route also resolves
+    the current highlighted word and current mood from the stored v2 timelines
+    (lyrics + ``track_moods``) so the same track renders a different still as it
+    progresses; the timeline state is folded into the PNG-cache key so the same
+    song yields a fresh image at each position.
+    """
+    from collections import OrderedDict
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+    from karaoke import mood_still
+
+    # Resolve the track's measured features. Query arguments override the
+    # currently playing song, so callers can still test ad-hoc shapes.
+    analysis, cache_key, track_id = _resolve_track_features(mood, energy, bpm, key,
+                                                            genre, title, artist, form,
+                                                            seed)
+
+    # Quantize elapsed to 0.1s for deterministic caching and rendering
+    q_elapsed = round(float(elapsed), 1) if elapsed is not None else None
+
+    # Resolve the v2-timeline state (current highlighted word + active phase +
+    # current mood + current chord) so the same track renders a different still
+    # as it progresses. The chord drives the hue; mood shifts it further.
+    highlighted_word, phase, current_mood, chord_name, chord_roman = _resolve_timeline_state(
+        q_elapsed, track_id, bpm=analysis.bpm
+    )
+    analysis.highlighted_word = highlighted_word
+    analysis.phase = round(phase, 4)
+    analysis.current_mood = current_mood
+    # chord_roman (Roman numeral, e.g. "bII", "i", "IV") drives the hue offset;
+    # chord_name (e.g. "F", "Gm6", "Em") drives the quality -> saturation/value.
+    analysis.chord_roman = chord_roman
+    analysis.chord = {"chord": chord_name} if chord_name else {}
+    # Fold the timeline state into the PNG-cache key so the same song yields a
+    # fresh still whenever its lyrics / mood / chord timeline position changes.
+    cache_key = cache_key + (q_elapsed, highlighted_word, current_mood, chord_name, chord_roman, analysis.phase)
+
+    _png_cache = getattr(get_mood_still, "_png_cache", None)
+    if not isinstance(_png_cache, OrderedDict):
+        _png_cache = OrderedDict(_png_cache or {})
+        get_mood_still._png_cache = _png_cache
+    cached = _png_cache.get(cache_key)
+    if cached is not None:
+        _png_cache.move_to_end(cache_key)
+        bio = BytesIO(cached)
+        return StreamingResponse(bio, media_type="image/png")
+    pixels = mood_still.render(analysis, mood or "neutral", int(seed), elapsed=q_elapsed)
+    img_io = BytesIO()
+    pixels.save(img_io, "PNG", optimize=False)
+    img_io.seek(0)
+    _png_cache[cache_key] = img_io.getvalue()
+    while len(_png_cache) > 32:
+        _png_cache.popitem(last=False)
+    bio = BytesIO(_png_cache[cache_key])
+    return StreamingResponse(bio, media_type="image/png")
 
 @app.get("/api/mood-cover-image")
 def get_mood_cover_image(mood: str = "neutral", art_url: Optional[str] = None):
