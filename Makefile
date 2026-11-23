@@ -366,10 +366,10 @@ celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
 postprocess-enqueue-all: ## Enqueue every track missing key/BPM or word-timing for post-processing
 	$(PYTHON) scripts/enqueue_postprocess.py
 
-upgrade-timings-dry-run: ## Preview which cached tracks can gain word-level timing
+upgrade-timings-dry-run: ## [deprecated] Preview legacy line-only tracks that could gain word timing
 	$(PYTHON) -m karaoke.upgrade_timings --dry-run
 
-upgrade-timings: ## Upgrade cached lyrics to word-level timing via YouTube captions
+upgrade-timings: ## [deprecated] Backfill word-level timing on legacy cached lyrics via YouTube captions
 	$(PYTHON) -m karaoke.upgrade_timings
 
 vector-index-dry-run: ## Preview PostgreSQL -> OpenSearch vector indexing without writing
