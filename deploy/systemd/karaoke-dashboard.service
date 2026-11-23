@@ -4,6 +4,11 @@ Documentation=file:///home/tina/karaoke/docs/howto-post-processing.md
 After=network-online.target karaoke-ctrl-api.service karaoke-mcp.service
 Wants=network-online.target karaoke-ctrl-api.service karaoke-mcp.service
 PartOf=karaoke.target
+# Safety net: if it fails this many times within the interval, stop retrying and
+# park in 'failed' (visible) instead of thrashing indefinitely (see 2026-11-23
+# crash-loop that reached restart counter 1278 and helped wedge the host).
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -14,6 +19,12 @@ Environment=DASHBOARD_HOST=0.0.0.0
 ExecStart=/home/tina/karaoke/.venv/bin/python -m karaoke.dashboard_api
 Restart=on-failure
 RestartSec=3
+# uvicorn serves long-lived SSE streams (captions, stage, DJ chat); a still-connected
+# client blocks graceful shutdown, leaving the old process bound to :8900 so the next
+# start dies with "address already in use". Bound the stop and hard-kill any leftover
+# children so the port is always free before the restart.
+TimeoutStopSec=10
+KillMode=mixed
 # Confirm the port is actually listening before declaring the unit started.
 ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8900/api/health >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
 SyslogIdentifier=karaoke-dashboard
