@@ -30,11 +30,11 @@ db-cleanup                   Run track deduplication (fuzzy title + duration gua
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
 dj                           Open the interactive Karaoke AI DJ Chat booth in terminal
-docs                         Build MkDocs site
+docs                         [deprecated] Build MkDocs site — use `make wiki`
 docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)
 docs-confluence-prep         Generate Confluence-friendly docs tree
 docs-confluence-publish      Build Confluence export site
-docs-live                    Serve MkDocs locally on http://$(DOCS_ADDR)
+docs-live                    [deprecated] Serve MkDocs locally — use `make wiki`
 docs-sync                    Auto-sync documentation (API modules and Makefile targets)
 docs-write                   Regenerate generated docs
 flatten-counts               Flatten play counts for dev/training: drop fixture/repeat plays, cap at CAP (default 1; DRY=1 previews)
@@ -68,7 +68,7 @@ recording-analyse            Decompile a recording into the DB (ID=...)
 recording-show               Show a recording's derived track list (ID=...)
 recordings                   List record-mode sessions
 sample                       Detect key/BPM by recording what is playing (SECS=45 ARTIST=... TITLE=...)
-smart-playlists              Rebuild the Genre:/Smart: playlists (PUSH=1 syncs YouTube Music, DRY=1 previews)
+smart-playlists              Rebuild and upload the Genre:/Smart:/Decade: playlists to YouTube Music (DRY=1 previews, LOCAL=1 skips upload, ONLY="...")
 stats                        Show play + radio-discovery stats from the local cache
 systemd-down                 Stop all karaoke services
 systemd-install              Install/refresh the karaoke systemd --user units (symlinks to deploy/systemd)
@@ -87,6 +87,9 @@ venv                         Create virtual environment
 view_makeflow                Open generated SVG locally
 web                          Serve the TUI in a web browser using textual-serve
 webtui                       Alias for make web
+wiki                         Port docs/ into the Quartz wiki and serve it
+wiki-api                     Regenerate only the API reference (docstrings) into the wiki
+wiki-build                   Port docs/ into the Quartz wiki and build (no serve)
 yt-playlist-ingest           Download & ingest a YT Music playlist: PLAYLIST=PLxxx [DRY_RUN=1] [SKIP_CACHED=1] [NO_VECTORS=1] [FORCE_HARMONY=1] [LIMIT=N]
 ytmusic-sync                 Perform bi-directional playlist sync with YouTube Music
 ```

@@ -6,6 +6,10 @@ MKDOCS := $(VENV)/bin/mkdocs
 # mkdocs defaults to :8000, which karaoke-api already listens on (systemd --user),
 # so serving the docs there fails to bind. Default to 127.0.0.1:8085 (free port).
 DOCS_ADDR ?= 127.0.0.1:8085
+# Quartz wiki (new docs path; replaces MkDocs). Doc source stays in docs/;
+# `make wiki` ports it into the Quartz site and builds. The site is a separate
+# git repo at $(WIKI_WEB); override to point elsewhere.
+WIKI_WEB ?= $(HOME)/wiki-web
 AUDIO_VENV ?= .venv-audio
 AUDIO_PY := $(AUDIO_VENV)/bin/python
 
@@ -31,7 +35,7 @@ K8S_NAMESPACE ?= karaoke
 .DEFAULT_GOAL := help
 
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-audit docs-sync docs-confluence-prep \
-        docs-confluence-publish deps-make2graph view_makeflow lint format \
+        docs-confluence-publish wiki wiki-build wiki-api deps-make2graph view_makeflow lint format \
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
         install-audio analyze api ctrl-api mcp dj dashboard dashboard-build mpris ytmusic-sync \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
@@ -76,11 +80,22 @@ deps-make2graph: ## Fetch and build makefile2graph locally
 	@chmod +x "$(MAKE2GRAPH_BIN)"
 	@echo "[ok] make2graph ready at $(MAKE2GRAPH_BIN)"
 
-docs: ## Build MkDocs site
+docs: ## [deprecated] Build MkDocs site — use `make wiki`
 	$(MKDOCS) build
 
-docs-live: ## Serve MkDocs locally on http://$(DOCS_ADDR)
+docs-live: ## [deprecated] Serve MkDocs locally — use `make wiki`
 	$(MKDOCS) serve --dev-addr $(DOCS_ADDR)
+
+wiki: docs-write docs-sync ## Port docs/ into the Quartz wiki and serve it
+	$(PYTHON) scripts/build_docs.py
+	cd $(WIKI_WEB) && npx quartz build --serve
+
+wiki-build: docs-write docs-sync ## Port docs/ into the Quartz wiki and build (no serve)
+	$(PYTHON) scripts/build_docs.py
+	cd $(WIKI_WEB) && npx quartz build
+
+wiki-api: docs-sync ## Regenerate only the API reference (docstrings) into the wiki
+	$(PYTHON) scripts/build_docs.py --api-only
 
 docs-audit: ## Audit documentation for drift (modules, unlinked docs, targets)
 	$(PYTHON) scripts/doc_sync.py --check
