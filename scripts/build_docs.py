@@ -121,12 +121,41 @@ def convert_admonitions(text: str) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
-def _first_line(doc: str | None) -> str:
-    return doc.strip().splitlines()[0] if doc and doc.strip() else ""
+def format_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Render a real signature: type hints, defaults, *args/**kwargs, return type."""
+    a = node.args
+    parts: list[str] = []
+    posonly = list(getattr(a, "posonlyargs", []))
+    pos = posonly + list(a.args)
+    n_default = len(pos) - len(a.defaults)
+
+    def fmt(arg: ast.arg, default: ast.expr | None = None) -> str:
+        s = arg.arg
+        if arg.annotation is not None:
+            s += f": {ast.unparse(arg.annotation)}"
+        if default is not None:
+            s += f" = {ast.unparse(default)}"
+        return s
+
+    for i, arg in enumerate(pos):
+        default = a.defaults[i - n_default] if i >= n_default else None
+        parts.append(fmt(arg, default))
+        if posonly and i == len(posonly) - 1:
+            parts.append("/")
+    if a.vararg:
+        parts.append("*" + fmt(a.vararg))
+    elif a.kwonlyargs:
+        parts.append("*")
+    for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+        parts.append(fmt(arg, default))
+    if a.kwarg:
+        parts.append("**" + fmt(a.kwarg))
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
+    return f"({', '.join(parts)}){ret}"
 
 
 def render_module_api(mod_name: str) -> str:
-    """Extract a module's docstrings + public signatures (replaces mkdocstrings)."""
+    """Extract full docstrings + real signatures from source (replaces mkdocstrings)."""
     rel = mod_name.replace(".", "/")
     py_path = SRC_PKG / (rel + ".py")
     if not py_path.exists():
@@ -143,18 +172,28 @@ def render_module_api(mod_name: str) -> str:
     if mod_doc:
         parts.append(mod_doc.strip() + "\n")
 
-    defs: list[str] = []
+    def render_func(node: ast.FunctionDef | ast.AsyncFunctionDef, level: str) -> None:
+        prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+        try:
+            sig = format_signature(node)
+        except Exception:
+            sig = "(...)"
+        parts.append(f"{level} `{prefix}{node.name}{sig}`\n")
+        doc = ast.get_docstring(node)
+        if doc:
+            parts.append(doc.strip() + "\n")
+
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
-            doc = _first_line(ast.get_docstring(node))
-            defs.append(f"- `class {node.name}`" + (f" — {doc}" if doc else ""))
+            parts.append(f"### class `{node.name}`\n")
+            cls_doc = ast.get_docstring(node)
+            if cls_doc:
+                parts.append(cls_doc.strip() + "\n")
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and not sub.name.startswith("_"):
+                    render_func(sub, "####")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
-            args = [a.arg for a in node.args.args]
-            prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
-            doc = _first_line(ast.get_docstring(node))
-            defs.append(f"- `{prefix}{node.name}({', '.join(args)})`" + (f" — {doc}" if doc else ""))
-    if defs:
-        parts.append("\n".join(defs) + "\n")
+            render_func(node, "###")
     return "\n".join(parts)
 
 
