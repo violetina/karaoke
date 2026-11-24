@@ -1,3 +1,7 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see the `scan_track` MCP tool — see [mcp-server.md](../mcp-server.md). Archived in docs cleanup v1.11.0.
+
 # `scan_track` MCP tool — plan
 
 **Status: done.** Implemented 2026-10-22 on PR #124 (`feat/mcp-scan-track`).

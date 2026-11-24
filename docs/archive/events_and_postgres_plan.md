@@ -1,8 +1,12 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see the event store + PostgreSQL backend — see [database.md](../database.md). Archived in docs cleanup v1.11.0.
+
 # Event Architecture Audit & Postgres Readiness Mapping
 
 !!! note "Partially superseded — the Postgres cutover has happened"
     Verified 2026-09-17. The SQLite → Postgres migration described under
-    "Stage 2" is **done** (see [Database backend](database.md)): the app runs
+    "Stage 2" is **done** (see [Database backend](../database.md)): the app runs
     on PostgreSQL 18.4 via a `psycopg3` connection pool, which resolves the
     write-concurrency and `database is locked` limitations below.
 
@@ -11,8 +15,8 @@
     backfilled from the legacy tables and fully relayed into the
     `karaoke-event-log` OpenSearch index. The relay wakes on `pg_notify`,
     retries failures and dead-letters undeliverable events. See
-    [Unified event store](database.md#unified-event-store) and
-    [The relay worker](database.md#the-relay-worker).
+    [Unified event store](../database.md#unified-event-store) and
+    [The relay worker](../database.md#the-relay-worker).
 
     The relay runs as `karaoke-relay.service` under `karaoke.target`.
 

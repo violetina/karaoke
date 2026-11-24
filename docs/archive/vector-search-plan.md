@@ -1,10 +1,14 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see vector search — see [search.md](../search.md) and [vectors.md](../vectors.md). Archived in docs cleanup v1.11.0.
+
 # Vector search and training plan
 
 !!! note "This is the original plan, not the current state"
 
     It describes *proposed* indexes and predates the implementation.
     For what actually exists, how well each index is populated, and
-    where the gaps are, see [Vectors](vectors.md).
+    where the gaps are, see [Vectors](../vectors.md).
 
 Karaoke should be driven by the local SQLite database during playback, but it can still use OpenSearch as a rebuildable vector/training index.
 

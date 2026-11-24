@@ -35,12 +35,45 @@ import ast
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DOCS = REPO_ROOT / "docs"
 SRC_PKG = REPO_ROOT / "src"
 SUBDOC = REPO_ROOT / "src" / "karaoke" / "docs" / "index.md"
+
+
+def repo_version() -> str:
+    """Read the package version straight from pyproject.toml (no deps)."""
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else "unknown"
+
+
+def repo_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def version_banner() -> str:
+    """The one place that stamps 'which release do these docs describe'.
+
+    Regenerated on every port, so the wiki can never show docs for a version
+    other than the one currently checked out -- there is no hand-maintained
+    version number to forget to bump.
+    """
+    return (
+        f"> [!info] Docs for karaoke **v{repo_version()}** (`{repo_commit()}`)\n"
+        f"> Generated from this exact checkout by `make wiki` / `scripts/build_docs.py`.\n"
+        f"> For what changed between versions, see the "
+        f"[Releases overview](releases/index.md) (CHANGELOG-based, always current).\n\n"
+    )
 
 WIKI_WEB = Path(os.environ.get("WIKI_WEB", Path.home() / "wiki-web")).expanduser()
 DST_CONTENT = WIKI_WEB / "content"
@@ -150,7 +183,16 @@ def render_markdown(rel_posix: str, text: str) -> str:
     text = inline_snippets(text)
     if rel_posix == "api.md":
         text = expand_api_directives(text)
-    return convert_admonitions(text)
+    text = convert_admonitions(text)
+    if rel_posix == "index.md":
+        # Insert the version banner right after the H1 frontmatter line so it
+        # reads naturally as the first thing on the homepage.
+        lines = text.splitlines(keepends=True)
+        if lines and lines[0].startswith("# "):
+            text = lines[0] + "\n" + version_banner() + "".join(lines[1:])
+        else:
+            text = version_banner() + text
+    return text
 
 
 def build(api_only: bool = False) -> None:

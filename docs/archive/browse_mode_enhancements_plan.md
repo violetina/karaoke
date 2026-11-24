@@ -1,9 +1,13 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see browse mode — see [modes/browse.md](../modes/browse.md). Archived in docs cleanup v1.11.0.
+
 # Implementation Plan: Browse Mode ('H') Fixes & Enhancements
 
 !!! note "Historical implementation proposal (pre-PostgreSQL cutover)"
     Track counts and timings below are pre-cutover SQLite measurements, not
     current PostgreSQL benchmarks. The operational store is now PostgreSQL via
-    `localcache` / `KARAOKE_PG_URL` (see [Database backend](database.md)). The
+    `localcache` / `KARAOKE_PG_URL` (see [Database backend](../database.md)). The
     example SQL uses SQLite-only forms (`COLLATE NOCASE`, `:name` placeholders);
     the shipped code uses `lower(...)` and psycopg `%s` / `%(name)s` instead.
 

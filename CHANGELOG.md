@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.11.0 — Docs cleanup: archive shipped plans, version-stamped wiki, make-target deprecation sweep
+
+### Docs reorg
+
+- Archived 8 "plan" docs that already shipped (`artist_metadata_plan`, `vector-search-plan`,
+  `browse_mode_enhancements_plan`, `lyrics_waterfall_timed_detection_plan`,
+  `events_and_postgres_plan`, `saved_playlists_postgres_migration_plan`,
+  `scan_track_mcp_tool_plan`, the doc-workflow design plan) into `docs/archive/`,
+  each banner-linked to the live doc that actually describes current behaviour.
+  Still-open plans (`disk_chord_backfill_plan`, the Chromecast dual-playback plan)
+  stay where they are.
+- `docs/releases/` stopped being hand-authored after 1.4.0 and silently drifted
+  6 versions stale. `CHANGELOG.md` is now the documented single source of truth
+  for release notes going forward; `docs/releases/index.md` says so and the old
+  0.7.0–1.4.0 pages are kept only as historical snapshots.
+- **The wiki now always names its own version.** `scripts/build_docs.py` stamps
+  the homepage with `Docs for karaoke vX.Y.Z (commit)` read straight from
+  `pyproject.toml` + `git rev-parse` on every port — there's no second version
+  number to remember to bump, so the docs can't silently drift behind the code
+  again the way the release pages did.
+
+### Make targets
+
+- `[deprecated since 1.11.0]` added to the targets already marked deprecated
+  (`docs`, `docs-live`, `upgrade-timings`, `upgrade-timings-dry-run`) and to
+  `k8s-seed-db` (previously just said "obsolete, do not use" with no version).
+  They still run; `make help` now tells you when and that an alternative exists.
+
 ## 1.10.0 — Mood-still API and smart-playlist rotation
 
 ### Mood-still API (new)

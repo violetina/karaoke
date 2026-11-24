@@ -1,3 +1,7 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see saved playlists — see [database.md](../database.md) and [smart-playlists.md](../smart-playlists.md). Archived in docs cleanup v1.11.0.
+
 # Saved Playlists & Omitted SQLite Tables Migration Plan
 
 !!! success "Resolved — all four execution steps are done"
@@ -9,7 +13,7 @@
     returned by `find_playlist_by_video_id`. `localcache.get_saved_playlists`
     returns all 24 playlists and `tests/test_saved_playlists.py` passes.
     Retained for the root-cause analysis; see
-    [Database backend](database.md) for current state.
+    [Database backend](../database.md) for current state.
 
 ## Problem Summary
 When pressing `L` (`action_browse_playlists`) in the TUI, the saved YouTube playlist modal shows **"No saved playlists found"** (returns `None`/empty).

@@ -1,9 +1,13 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see lyric timing — see [tui.md](../tui.md) and [tui-visuals.md](../tui-visuals.md). Archived in docs cleanup v1.11.0.
+
 # Implementation Plan: Lyrics Detection Waterfall & Timed Version Priority
 
 !!! note "Historical implementation proposal (pre-PostgreSQL cutover)"
     Storage references below predate the cutover; the lyrics cache is now
     PostgreSQL via `localcache` / `KARAOKE_PG_URL` (see
-    [Database backend](database.md)). Example SQL written with `?` placeholders
+    [Database backend](../database.md)). Example SQL written with `?` placeholders
     is SQLite-only; the shipped psycopg code uses `%s`. Any "~100ms" timings are
     illustrative, not guarantees.
 

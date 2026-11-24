@@ -1,3 +1,7 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see docs automation — superseded by `scripts/doc_sync.py` + `scripts/build_docs.py` + the Quartz wiki (`make wiki`). Archived in docs cleanup v1.11.0.
+
 # Implementation Plan: Structured Documentation Agent & Cost-Efficient Workflow
 
 ## Goal Description

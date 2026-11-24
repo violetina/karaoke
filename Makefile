@@ -80,10 +80,10 @@ deps-make2graph: ## Fetch and build makefile2graph locally
 	@chmod +x "$(MAKE2GRAPH_BIN)"
 	@echo "[ok] make2graph ready at $(MAKE2GRAPH_BIN)"
 
-docs: ## [deprecated] Build MkDocs site — use `make wiki`
+docs: ## [deprecated since 1.11.0] Build MkDocs site — use `make wiki`
 	$(MKDOCS) build
 
-docs-live: ## [deprecated] Serve MkDocs locally — use `make wiki`
+docs-live: ## [deprecated since 1.11.0] Serve MkDocs locally — use `make wiki`
 	$(MKDOCS) serve --dev-addr $(DOCS_ADDR)
 
 wiki: docs-write docs-sync ## Port docs/ into the Quartz wiki and serve it
@@ -257,7 +257,7 @@ k8s-deploy: k8s-load ## Deploy the library API to the kind cluster
 	kubectl --context $(KUBE_CONTEXT) apply -k deploy/k8s
 	kubectl --context $(KUBE_CONTEXT) -n $(K8S_NAMESPACE) rollout status deploy/karaoke-api --timeout=120s
 
-k8s-seed-db: ## Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
+k8s-seed-db: ## [deprecated since 1.11.0] Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
 	./scripts/seed_db.sh
 
 k8s-status: ## Show deployed karaoke resources
@@ -366,10 +366,10 @@ celery-flower: ## Run the Celery/Flower dashboard on http://127.0.0.1:5555
 postprocess-enqueue-all: ## Enqueue every track missing key/BPM or word-timing for post-processing
 	$(PYTHON) scripts/enqueue_postprocess.py
 
-upgrade-timings-dry-run: ## [deprecated] Preview legacy line-only tracks that could gain word timing
+upgrade-timings-dry-run: ## [deprecated since 1.11.0] Preview legacy line-only tracks that could gain word timing
 	$(PYTHON) -m karaoke.upgrade_timings --dry-run
 
-upgrade-timings: ## [deprecated] Backfill word-level timing on legacy cached lyrics via YouTube captions
+upgrade-timings: ## [deprecated since 1.11.0] Backfill word-level timing on legacy cached lyrics via YouTube captions
 	$(PYTHON) -m karaoke.upgrade_timings
 
 vector-index-dry-run: ## Preview PostgreSQL -> OpenSearch vector indexing without writing

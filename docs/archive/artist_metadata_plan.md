@@ -1,3 +1,7 @@
+> [!note] Archived — implemented, kept for history
+> This plan shipped and is no longer the current reference. For how it
+> actually works today, see artist metadata resolution — see [database.md](../database.md) and `src/karaoke/artist_wikidata.py`. Archived in docs cleanup v1.11.0.
+
 # Artist identity and metadata — plan
 
 **Status: steps 1–5 merged (#139–#142, #144), complete.** Written 2026-10-25.

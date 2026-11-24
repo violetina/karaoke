@@ -104,17 +104,19 @@ nav:
   - Plans & Design:
       - Roadmap / TODO: todo.md
       - Disk chord backfill plan: disk_chord_backfill_plan.md
-      - Artist identity and metadata plan: artist_metadata_plan.md
-      - Vector search plan: vector-search-plan.md
-      - Browse mode enhancements plan: browse_mode_enhancements_plan.md
-      - Lyrics waterfall timed detection plan: lyrics_waterfall_timed_detection_plan.md
       - Chromecast dual playback plan: chromecast_dual_playback_and_two_part_experience_plan.md
-      - Doc workflow plan: design/documentation-agent-workflow-plan.md
-      - Events & Postgres migration plan: events_and_postgres_plan.md
-      - Saved playlists Postgres migration plan: saved_playlists_postgres_migration_plan.md
-      - scan_track MCP tool plan: scan_track_mcp_tool_plan.md
       - TUI first concept: design/karaoke-tui-first-concept.md
+      - Archive (implemented, kept for history):
+          - Artist identity and metadata plan: archive/artist_metadata_plan.md
+          - Vector search plan: archive/vector-search-plan.md
+          - Browse mode enhancements plan: archive/browse_mode_enhancements_plan.md
+          - Lyrics waterfall timed detection plan: archive/lyrics_waterfall_timed_detection_plan.md
+          - Doc workflow plan: archive/design__documentation-agent-workflow-plan.md
+          - Events & Postgres migration plan: archive/events_and_postgres_plan.md
+          - Saved playlists Postgres migration plan: archive/saved_playlists_postgres_migration_plan.md
+          - scan_track MCP tool plan: archive/scan_track_mcp_tool_plan.md
   - Releases:
+      - Overview (read this first): releases/index.md
       - Version 1.4.0: releases/1.4.0.md
       - Version 1.3.0: releases/1.3.0.md
       - Version 1.2.0: releases/1.2.0.md
