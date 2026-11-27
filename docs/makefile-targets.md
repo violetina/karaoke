@@ -12,6 +12,7 @@ auth-status                  Report Spotify token validity and playback-window s
 auth-youtube                 Sign in to YouTube / YT Music (Premium) in the playback Chrome profile
 batch-enrich-vectors         Batch enrich tracks with chords, CLAP vectors, feeling & AV sync: [LIMIT=N] [WORKERS=N] [SYNC_AV=1] [ONLY_DISK=1]
 batch-sync-av                Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
+bench-dj                     Benchmark the dashboard AI DJ per Ollama model: speed, facts vs DB, CPU/GPU load (MODELS="a b", TRACK=74)
 browse                       Launch the interactive song browser TUI
 browse-log                   Follow TUI/open debug logs
 celery-flower                Run the Celery/Flower dashboard on http://127.0.0.1:5555
@@ -30,11 +31,11 @@ db-cleanup                   Run track deduplication (fuzzy title + duration gua
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
 dj                           Open the interactive Karaoke AI DJ Chat booth in terminal
-docs                         [deprecated] Build MkDocs site — use `make wiki`
+docs                         [deprecated since 1.11.0] Build MkDocs site — use `make wiki`
 docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)
 docs-confluence-prep         Generate Confluence-friendly docs tree
 docs-confluence-publish      Build Confluence export site
-docs-live                    [deprecated] Serve MkDocs locally — use `make wiki`
+docs-live                    [deprecated since 1.11.0] Serve MkDocs locally — use `make wiki`
 docs-sync                    Auto-sync documentation (API modules and Makefile targets)
 docs-write                   Regenerate generated docs
 flatten-counts               Flatten play counts for dev/training: drop fixture/repeat plays, cap at CAP (default 1; DRY=1 previews)
@@ -52,7 +53,7 @@ k8s-deploy                   Deploy the library API to the kind cluster
 k8s-load                     Load the image into the kind cluster
 k8s-logs                     Follow library API pod logs
 k8s-port-forward             Expose the library API on http://localhost:8080
-k8s-seed-db                  Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
+k8s-seed-db                  [deprecated since 1.11.0] Legacy SQLite snapshot copy (obsolete for the PostgreSQL API; do not use)
 k8s-status                   Show deployed karaoke resources
 k8s-undeploy                 Remove the karaoke API from the cluster (keeps the PVC)
 lint                         Run lint checks
@@ -78,8 +79,8 @@ systemd-up                   Start all karaoke services via the target
 test                         Run tests
 test-audio                   Verify the audio + identify + lyrics stack (mic, songrec, LRCLIB)
 tui                          Launch the clean karaoke control-surface TUI prototype
-upgrade-timings              Upgrade cached lyrics to word-level timing via YouTube captions
-upgrade-timings-dry-run      Preview which cached tracks can gain word-level timing
+upgrade-timings              [deprecated since 1.11.0] Backfill word-level timing on legacy cached lyrics via YouTube captions
+upgrade-timings-dry-run      [deprecated since 1.11.0] Preview legacy line-only tracks that could gain word timing
 vector-index                 Rebuild OpenSearch vector indexes from PostgreSQL (set LINES=1 for line docs)
 vector-index-dry-run         Preview PostgreSQL -> OpenSearch vector indexing without writing
 vector-status                Show OpenSearch vector index status and rebuild progress
