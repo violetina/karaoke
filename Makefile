@@ -231,8 +231,8 @@ dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
 bench-dj: ## Benchmark the dashboard AI DJ per Ollama model: speed, facts vs DB, CPU/GPU load (MODELS="a b", TRACK=74)
 	$(PYTHON) scripts/bench_dj_models.py $(foreach m,$(MODELS),--model $(m)) $(if $(TRACK),--track-id $(TRACK))
 
-bench-dj-smart: ## Benchmark the AI DJ on one analysed song per smart playlist (MODELS="a b", ONLY='^Genre')
-	$(PYTHON) scripts/bench_dj_models.py --smart-playlists $(ONLY) --label smart-playlists $(foreach m,$(MODELS),--model $(m))
+bench-dj-smart: ## Benchmark the AI DJ on one analysed song per smart playlist (MODELS="a b", ONLY='^Genre', MAX=12 for a quick screen)
+	$(PYTHON) scripts/bench_dj_models.py --smart-playlists $(ONLY) $(if $(MAX),--max-tracks $(MAX)) --label smart-playlists $(foreach m,$(MODELS),--model $(m))
 
 dashboard: ## Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
 	$(PYTHON) -m karaoke.dashboard_api
