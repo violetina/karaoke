@@ -233,3 +233,133 @@ def test_ai_dj_tools_edit_the_same_queue(fake_library):
     out = json.loads(mcp_server.edit_live_queue("clear"))
     assert out["removed"] == 2 and _ids() == ([1], 0)
     assert json.loads(mcp_server.edit_live_queue("bogus"))["ok"] is False
+
+
+# --- radio keep-going (5x5 rolling window on new radio detection) -------------
+
+class _FakeSuggestion:
+    def __init__(self, track_id, artist=None, title=None):
+        self.track_id = track_id
+        self.artist = artist or f"A{track_id}"
+        self.title = title or f"T{track_id}"
+
+
+def test_radio_keep_going_5x5_batches_and_rotation(fake_library):
+    """5 detections grow 5->10->15->20->25; 6th & 7th rotate the oldest 5 out, no doubles."""
+    from karaoke import queue_suggest
+
+    localcache.set_queue_autopilot(True)
+    live_queue._RADIO_EVICTED_IDS.clear()
+    live_queue._RADIO_EVICTED_PAIRS.clear()
+
+    # Map each seed song to candidate IDs (including overlaps and the seed itself
+    # to confirm deduplication).
+    seed_map = {
+        ("RadioArtist1", "RadioTitle1"): 101,
+        ("RadioArtist2", "RadioTitle2"): 102,
+        ("RadioArtist3", "RadioTitle3"): 103,
+        ("RadioArtist4", "RadioTitle4"): 104,
+        ("RadioArtist5", "RadioTitle5"): 105,
+        ("RadioArtist6", "RadioTitle6"): 106,
+        ("RadioArtist7", "RadioTitle7"): 107,
+    }
+    pool_by_seed = {
+        101: [101, 1, 2, 3, 4, 5, 6],
+        102: [1, 2, 6, 7, 8, 9, 10, 11],
+        103: [5, 10, 11, 12, 13, 14, 15, 16],
+        104: [16, 17, 18, 19, 20, 21],
+        105: [21, 22, 23, 24, 25, 26],
+        # 6th batch includes 1..5 (about to be rotated out) to verify they are NOT re-added
+        106: [1, 2, 3, 26, 27, 28, 29, 30],
+        # 7th batch also includes 1..5 (already evicted earlier) to verify evicted memory holds
+        107: [1, 2, 6, 7, 31, 32, 33, 34, 35],
+    }
+
+    def fake_find(artist, title, conn=None):
+        return seed_map.get((artist, title))
+
+    def fake_suggest(seed_id, limit=10, **kw):
+        return [_FakeSuggestion(tid) for tid in pool_by_seed.get(seed_id, [])]
+
+    with patch.object(localcache, "find_track_id", side_effect=fake_find), \
+         patch.object(localcache, "find_track_id_relaxed", side_effect=fake_find), \
+         patch.object(queue_suggest, "suggest_for_track", side_effect=fake_suggest):
+        for idx in range(1, 6):
+            res = collection.radio_keep_going_refill(f"RadioArtist{idx}", f"RadioTitle{idx}")
+            assert res["ok"] is True
+            assert res["added"] == 5
+            assert res["rotated"] == 0
+            assert res["total"] == idx * 5
+            # Repeating the same detected song is a no-op
+            dup = collection.radio_keep_going_refill(f"RadioArtist{idx}", f"RadioTitle{idx}")
+            assert dup["added"] == 0 and dup["reason"] == "unchanged_song"
+
+        ids_at_25, _ = _ids()
+        assert ids_at_25 == list(range(1, 26))
+        assert len(set(ids_at_25)) == 25
+
+        # 6th detection rotates out 1..5 and appends 26..30
+        res6 = collection.radio_keep_going_refill("RadioArtist6", "RadioTitle6")
+        assert res6["ok"] is True and res6["added"] == 5 and res6["rotated"] == 5 and res6["total"] == 25
+        ids_after_6, _ = _ids()
+        assert ids_after_6 == list(range(6, 31))
+
+        # 7th detection rotates out 6..10 and appends 31..35 (still never re-adding 1..5)
+        res7 = collection.radio_keep_going_refill("RadioArtist7", "RadioTitle7")
+        assert res7["ok"] is True and res7["added"] == 5 and res7["rotated"] == 5 and res7["total"] == 25
+        ids_after_7, _ = _ids()
+        assert ids_after_7 == list(range(11, 36))
+
+
+def test_radio_keep_going_unknown_song_retries_on_next_detection(fake_library):
+    """If the detected song isn't in the library or yields 0 matches, leave queue alone and succeed on next song."""
+    from karaoke import queue_suggest
+
+    localcache.set_queue_autopilot(True)
+    with patch.object(localcache, "find_track_id", return_value=None), \
+         patch.object(localcache, "find_track_id_relaxed", return_value=None):
+        miss = collection.radio_keep_going_refill("Unknown Band", "Unknown Track")
+    assert miss["added"] == 0 and miss["reason"] == "seed_not_found"
+    assert localcache.load_active_queue()["rows"] == []
+
+    # Next detection changes to a known track -> seeds 5 songs
+    with patch.object(localcache, "find_track_id", return_value=200), \
+         patch.object(queue_suggest, "suggest_for_track",
+                      return_value=[_FakeSuggestion(i) for i in range(41, 48)]):
+        hit = collection.radio_keep_going_refill("Known Band", "Known Track")
+    assert hit["ok"] is True and hit["added"] == 5 and hit["total"] == 5
+    assert _ids() == ([41, 42, 43, 44, 45], 0)
+
+
+def test_radio_keep_going_preserves_user_playlist_and_honors_autopilot_flag(fake_library):
+    """Never clobber a non-empty user playlist, and do nothing when Keep Going is off."""
+    _seed([1, 2, 3], 0)  # playlist_id == 'p1' (user queue)
+    localcache.set_queue_autopilot(True)
+    res = collection.radio_keep_going_refill("Any", "Song")
+    assert res["added"] == 0 and res["reason"] == "queue_not_empty"
+    assert _ids() == ([1, 2, 3], 0)
+
+    # Empty queue but Keep Going is off
+    localcache.save_active_queue("", "", [], current_index=0)
+    localcache.set_queue_autopilot(False)
+    res_off = collection.radio_keep_going_refill("Any", "Song")
+    assert res_off["added"] == 0 and res_off["reason"] == "disabled"
+
+
+def test_radio_keep_going_dedups_by_artist_title_across_duplicate_track_ids(fake_library):
+    """Two library rows with different track_ids but the same (artist, title) count as a double."""
+    from karaoke import queue_suggest
+
+    localcache.set_queue_autopilot(True)
+    dup_rows = [
+        {"track_id": 10, "artist": "Bowie", "title": "Heroes", "url": "u10", "kind": "youtube"},
+        {"track_id": 11, "artist": "bowie", "title": "HEROES", "url": "u11", "kind": "youtube"},
+        {"track_id": 12, "artist": "Bowie", "title": "Starman", "url": "u12", "kind": "youtube"},
+    ]
+    with patch.object(localcache, "find_track_id", return_value=99), \
+         patch.object(queue_suggest, "suggest_for_track",
+                      return_value=[_FakeSuggestion(r["track_id"], r["artist"], r["title"]) for r in dup_rows]), \
+         patch.object(collection, "rows_for", return_value=dup_rows):
+        res = collection.radio_keep_going_refill("SeedArtist", "SeedTitle")
+    assert res["ok"] is True and res["added"] == 2
+    assert _ids() == ([10, 12], 0)

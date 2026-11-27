@@ -1185,6 +1185,14 @@ def ensure_queue_schema(conn: Connection) -> None:
             "ALTER TABLE active_queue_state "
             "ADD COLUMN IF NOT EXISTS autopilot BOOLEAN DEFAULT FALSE"
         )
+        # FLOAT4 (REAL) only has ~24 bits of mantissa (~128 s resolution at
+        # current epoch timestamps), so consecutive sub-minute edits collided
+        # on updated_at. Widening to DOUBLE PRECISION is a fast metadata-only
+        # or single-row rewrite on id=1.
+        conn.execute(
+            "ALTER TABLE active_queue_state "
+            "ALTER COLUMN updated_at TYPE DOUBLE PRECISION"
+        )
         conn.commit()
         ensure_saved_searches_and_playlists_schema(conn)
     except psycopg.Error as exc:
@@ -2235,8 +2243,12 @@ def mutate_active_queue(fn, conn: Optional[Connection] = None) -> Any:
         # The pool runs in autocommit, so the row lock only holds inside an
         # explicit transaction block (a savepoint if the caller has one open).
         with c.transaction():
+            c.execute(
+                "INSERT INTO active_queue_state (id, playlist_id, name, current_index, updated_at, items_json) "
+                "VALUES (1, '', '', 0, 0, '[]') ON CONFLICT (id) DO NOTHING"
+            )
             row = c.execute(
-                "SELECT playlist_id, name, current_index, items_json "
+                "SELECT playlist_id, name, current_index, items_json, COALESCE(autopilot, FALSE) AS autopilot "
                 "FROM active_queue_state WHERE id = 1 FOR UPDATE"
             ).fetchone()
             try:
@@ -2247,6 +2259,7 @@ def mutate_active_queue(fn, conn: Optional[Connection] = None) -> Any:
                 "playlist_id": str(row["playlist_id"] or "") if row else "",
                 "name": str(row["name"] or "") if row else "",
                 "current_index": int(row["current_index"] or 0) if row else 0,
+                "autopilot": bool(row["autopilot"]) if row else False,
                 "rows": clean_queue_rows(items if isinstance(items, list) else []),
             }
             before = json.dumps(state, sort_keys=True, default=str)
