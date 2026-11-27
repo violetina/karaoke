@@ -64,9 +64,10 @@ class Truth:
     chords: list[str] = field(default_factory=list)   # most-used first
     members: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)
+    label: str = ""              # where it was sampled from, e.g. "Genre: Jazz"
 
 
-def load_truth(track_id: int) -> Truth:
+def load_truth(track_id: int, label: str = "") -> Truth:
     from karaoke import localcache
 
     with localcache.connect() as conn:
@@ -84,18 +85,31 @@ def load_truth(track_id: int) -> Truth:
     summary = r["summary"] or {}
     truth = Truth(track_id, r["artist"], r["title"], key=r["detected_key"] or "",
                   bpm=r["bpm"], feeling=summary.get("dominant_feeling") or "",
-                  mood=summary.get("dominant") or "", chords=chord_ranking(r["chords"] or []))
-    try:
-        from karaoke.osclient import client
-        hits = client().search(index="karaoke-artist-cache", body={
-            "query": {"match_phrase": {"name": truth.artist}}, "size": 1})["hits"]["hits"]
-        if hits:
-            src = hits[0]["_source"]
-            truth.members = list(src.get("member_names") or [])
-            truth.genres = list(src.get("genres") or [])
-    except Exception:
-        pass
+                  mood=summary.get("dominant") or "", chords=chord_ranking(r["chords"] or []),
+                  label=label)
+    src = artist_cache_doc(truth.artist)
+    if src:
+        truth.members = list(src.get("member_names") or [])
+        truth.genres = list(src.get("genres") or [])
     return truth
+
+
+def artist_cache_doc(artist: str, os_c=None) -> Optional[dict[str, Any]]:
+    """The artist-cache doc whose name is exactly ``artist`` (normalised).
+
+    The phrase search is fuzzy enough to return another band ("Who" -> "The
+    Who"), so only an exact name match counts as ground truth.
+    """
+    try:
+        if os_c is None:
+            from karaoke.osclient import client
+            os_c = client()
+        hits = os_c.search(index="karaoke-artist-cache", body={
+            "query": {"match_phrase": {"name": artist}}, "size": 5})["hits"]["hits"]
+    except Exception:
+        return None
+    want = _norm(artist)
+    return next((h["_source"] for h in hits if _norm(h["_source"].get("name", "")) == want), None)
 
 
 def chord_ranking(chords: list[dict[str, Any]]) -> list[str]:
@@ -178,26 +192,44 @@ QUESTIONS = [
 ]
 
 
-def score(qid: str, answer: str, truth: Truth, conn=None) -> tuple[float, str]:
-    """Return (score 0..1, short note) for one answer."""
+def score(qid: str, answer: str, truth: Truth, conn=None) -> tuple[Optional[float], str]:
+    """Return (score 0..1, short note) for one answer.
+
+    ``None`` means "no ground truth in the library for this question" (e.g. an
+    artist with no member list), so the answer is left out of the totals
+    instead of counting as wrong.
+    """
     body = strip_tags(answer)
     if qid == "key_bpm":
-        k, b = key_mentioned(body, truth.key), bpm_mentioned(body, truth.bpm)
-        return (0.5 * k + 0.5 * b,
-                f"key {'✓' if k else '✗'} ({truth.key}), bpm {'✓' if b else '✗'} ({round(truth.bpm or 0)})")
+        parts, notes = [], []
+        if truth.key:
+            k = key_mentioned(body, truth.key)
+            parts.append(k)
+            notes.append(f"key {'✓' if k else '✗'} ({truth.key})")
+        if truth.bpm:
+            b = bpm_mentioned(body, truth.bpm)
+            parts.append(b)
+            notes.append(f"bpm {'✓' if b else '✗'} ({round(truth.bpm)})")
+        if not parts:
+            return None, "n/a: no key/BPM in library"
+        return sum(parts) / len(parts), ", ".join(notes)
     if qid == "mood":
+        if not (truth.feeling or truth.mood):
+            return None, "n/a: no mood timeline"
         hit = any_mentioned(body, [truth.feeling, truth.mood])
         return (1.0 if hit else 0.0, f"{'✓ ' + hit[0] if hit else '✗'} (expected {truth.feeling}/{truth.mood})")
     if qid == "chords":
         top = truth.chords[:6]
+        if not top:
+            return None, "n/a: no chords"
         hit = chords_mentioned(body, top)
-        s = min(1.0, len(hit) / 2) if top else 0.0
-        return (s, f"{len(hit)}/{len(top)} of top chords {top} ({', '.join(hit) or 'none'})")
+        return (min(1.0, len(hit) / 2), f"{len(hit)}/{len(top)} of top chords {top} ({', '.join(hit) or 'none'})")
     if qid == "artist":
         exp = truth.members[:5]
+        if not exp:
+            return None, "n/a: no member list in artist cache"
         hit = any_mentioned(body, exp)
-        s = min(1.0, len(hit) / 2) if exp else 0.0
-        return (s, f"members {len(hit)}/{len(exp)} ({', '.join(hit) or 'none'})")
+        return (min(1.0, len(hit) / min(2, len(exp))), f"members {len(hit)}/{len(exp)} ({', '.join(hit) or 'none'})")
     if qid == "suggest":
         q = parse_queue(answer)
         if not q:
@@ -209,6 +241,59 @@ def score(qid: str, answer: str, truth: Truth, conn=None) -> tuple[float, str]:
             return 0.0, f"'{q}' is the song already playing"
         return 1.0, f"'{q}' → track {tid}"
     return 0.0, "unknown question"
+
+
+def pick_smart_playlist_tracks(name_filter: str = "") -> list[tuple[int, str]]:
+    """One fully analysed track per smart playlist: (track_id, playlist name).
+
+    Prefers a track with key, BPM, mood timeline and chords whose artist has a
+    member list in the artist cache, so every question has ground truth. Each
+    track and each artist is used at most once across playlists.
+    """
+    from karaoke import localcache
+    try:
+        from karaoke.osclient import client
+        os_c = client()
+    except Exception:
+        os_c = None
+    flt = re.compile(name_filter, re.IGNORECASE) if name_filter else None
+    picked: list[tuple[int, str]] = []
+    used_ids: set[int] = set()
+    used_artists: set[str] = set()
+
+    def has_members(artist: str) -> bool:
+        if os_c is None:
+            return False
+        doc = artist_cache_doc(artist, os_c)
+        return bool(doc and doc.get("member_names"))
+
+    with localcache.connect() as conn:
+        pls = conn.execute("SELECT playlist_id, name FROM saved_playlists WHERE source_kind = 'smart' "
+                           "ORDER BY name").fetchall()
+        for pl in pls:
+            if flt and not flt.search(pl["name"]):
+                continue
+            cands = conn.execute(
+                """
+                SELECT t.track_id, t.artist FROM saved_playlist_tracks st
+                JOIN tracks t ON t.track_id = st.track_id
+                JOIN track_analysis a ON a.track_id = t.track_id
+                JOIN track_moods m ON m.track_id = t.track_id
+                JOIN track_chords ch ON ch.track_id = t.track_id
+                WHERE st.playlist_id = %s AND a.detected_key IS NOT NULL AND a.bpm IS NOT NULL
+                  AND m.summary->>'dominant_feeling' IS NOT NULL
+                  AND jsonb_array_length(ch.chords) > 0
+                ORDER BY st.position
+                """, (pl["playlist_id"],)).fetchall()
+            fresh = [c for c in cands if c["track_id"] not in used_ids
+                     and _norm(c["artist"]) not in used_artists]
+            if not fresh:
+                continue
+            choice = next((c for c in fresh[:12] if has_members(c["artist"])), fresh[0])
+            used_ids.add(choice["track_id"])
+            used_artists.add(_norm(choice["artist"]))
+            picked.append((int(choice["track_id"]), pl["name"]))
+    return picked
 
 
 def resolve_queue(q: str, conn) -> Optional[int]:
@@ -313,7 +398,7 @@ class Result:
     ttft_s: Optional[float] = None
     total_s: float = 0.0
     chars: int = 0
-    score: float = 0.0
+    score: Optional[float] = 0.0
     note: str = ""
     error: str = ""
     think_leak: bool = False
@@ -393,12 +478,23 @@ def ask(client: httpx.Client, model: str, question: str, truth: Truth, timeout: 
     return res
 
 
-def run(models: list[str], track_ids: list[int], timeout: float, out_dir: Path, label: str) -> Path:
+def run(models: list[str], tracks: list[tuple[int, str]], timeout: float, out_dir: Path, label: str) -> Path:
     from karaoke import localcache
 
-    truths = [load_truth(t) for t in track_ids]
+    truths = [load_truth(t, lab) for t, lab in tracks]
     results: list[Result] = []
     loads: dict[str, dict[str, Any]] = {}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = out_dir / f"dj-models-{stamp}{'-' + label if label else ''}"
+
+    def save() -> None:
+        base.with_suffix(".json").write_text(json.dumps(
+            {"truths": [asdict(t) for t in truths], "loads": loads,
+             "results": [asdict(r) for r in results]}, indent=2, ensure_ascii=False))
+        base.with_suffix(".md").write_text(report(models, truths, loads, results, label))
+
+    print(f"{len(truths)} track(s) × {len(QUESTIONS)} questions × {len(models)} model(s)", flush=True)
     with httpx.Client() as client, localcache.connect() as conn:
         for model in models:
             unload_all(client)
@@ -411,6 +507,7 @@ def run(models: list[str], track_ids: list[int], timeout: float, out_dir: Path, 
             loads[model] = {"load_s": load_s, "where": where}
             print(f"  loaded in {load_s}s ({where})", flush=True)
             for truth in truths:
+                print(f"  -- {truth.label or 'track'}: {truth.artist} – {truth.title}", flush=True)
                 for qid, q in QUESTIONS:
                     question = q.format(artist=truth.artist)
                     r = ask(client, model, question, truth, timeout)
@@ -418,55 +515,80 @@ def run(models: list[str], track_ids: list[int], timeout: float, out_dir: Path, 
                     if not r.error:
                         r.score, r.note = score(qid, r.answer, truth, conn)
                     else:
-                        r.note = r.error
+                        r.score, r.note = 0.0, r.error
                     results.append(r)
-                    print(f"  {qid:8} ttft={r.ttft_s}s total={r.total_s}s score={r.score:.2f}  {r.note}"
+                    sc = "n/a" if r.score is None else f"{r.score:.2f}"
+                    print(f"    {qid:8} ttft={r.ttft_s}s total={r.total_s}s score={sc}  {r.note}"
                           f"  gpu~{r.load.get('gpu_avg', '-')}% cpu~{r.load.get('cpu_avg', '-')}%", flush=True)
+            save()                      # progress survives an interrupted run
         unload_all(client)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    base = out_dir / f"dj-models-{stamp}{'-' + label if label else ''}"
-    base.with_suffix(".json").write_text(json.dumps(
-        {"truths": [asdict(t) for t in truths], "loads": loads,
-         "results": [asdict(r) for r in results]}, indent=2, ensure_ascii=False))
-    base.with_suffix(".md").write_text(report(models, truths, loads, results, label))
+    save()
     print(f"\nReport: {base.with_suffix('.md')}\nRaw:    {base.with_suffix('.json')}")
     return base.with_suffix(".md")
 
 
+def _facts(rs: list[Result]) -> tuple[float, int]:
+    scored = [r.score for r in rs if r.score is not None]
+    return sum(scored), len(scored)
+
+
+def _pct(got: float, n: int) -> str:
+    return f"{100 * got / n:.0f}%" if n else "–"
+
+
 def report(models: list[str], truths: list[Truth], loads: dict[str, Any],
            results: list[Result], label: str = "") -> str:
-    lines = [f"# DJ model benchmark {time.strftime('%Y-%m-%d %H:%M')}{' (' + label + ')' if label else ''}", ""]
+    lines = [f"# DJ model benchmark {time.strftime('%Y-%m-%d %H:%M')}{' (' + label + ')' if label else ''}", "",
+             f"{len(truths)} track(s). Facts = share of answerable questions scored right "
+             "(n/a = no ground truth in the library, left out).", ""]
     for t in truths:
-        lines.append(f"Track {t.track_id}: **{t.artist} – {t.title}** · key {t.key} · "
-                     f"{round(t.bpm or 0)} BPM · feeling {t.feeling} · chords {', '.join(t.chords[:6])} · "
-                     f"members {', '.join(t.members[:5])}")
+        lines.append(f"- {t.label + ': ' if t.label else ''}track {t.track_id} **{t.artist} – {t.title}** · "
+                     f"key {t.key or '–'} · {round(t.bpm) if t.bpm else '–'} BPM · feeling {t.feeling or '–'} · "
+                     f"chords {', '.join(t.chords[:6]) or '–'} · members {', '.join(t.members[:5]) or '–'}")
     lines += ["", "## Summary", "",
               "| model | load | facts | median TTFT | median total | GPU busy avg | CPU avg | GPU mem max | RAM max | errors |",
               "|---|---|---|---|---|---|---|---|---|---|"]
+    qids = list(dict.fromkeys(r.qid for r in results))
     for m in models:
         rs = [r for r in results if r.model == m]
         if not rs:
             continue
         ok = [r for r in rs if not r.error]
+        got, n = _facts(rs)
         med = lambda xs: f"{statistics.median(xs):.1f}s" if xs else "–"   # noqa: E731
         avg = lambda k: f"{statistics.fmean([r.load[k] for r in ok if k in r.load]):.0f}" if any(k in r.load for r in ok) else "–"   # noqa: E731
         mx = lambda k: f"{max([r.load[k] for r in ok if k in r.load]) / 1024:.1f} GiB" if any(k in r.load for r in ok) else "–"   # noqa: E731
         lines.append(
             f"| {m} | {loads.get(m, {}).get('load_s', '–')}s ({loads.get(m, {}).get('where', '')}) "
-            f"| {sum(r.score for r in rs):.1f}/{len(rs)} "
+            f"| **{_pct(got, n)}** ({got:.1f}/{n}) "
             f"| {med([r.ttft_s for r in ok if r.ttft_s is not None])} | {med([r.total_s for r in ok])} "
             f"| {avg('gpu_avg')}% | {avg('cpu_avg')}% | {mx('gpu_mem_mb_max')} | {mx('ram_mb_max')} "
             f"| {len(rs) - len(ok)}{' · think-leak' if any(r.think_leak for r in rs) else ''} |")
-    lines += ["", "## Per question", "", "| model | question | score | TTFT | total | note |", "|---|---|---|---|---|---|"]
+    lines += ["", "## Accuracy per question type", "", "| model | " + " | ".join(qids) + " |",
+              "|---|" + "---|" * len(qids)]
+    for m in models:
+        cells = [_pct(*_facts([r for r in results if r.model == m and r.qid == q])) for q in qids]
+        if any(c != "–" for c in cells):
+            lines.append(f"| {m} | " + " | ".join(cells) + " |")
+    if len(truths) > 1:
+        lines += ["", "## Accuracy per track", "", "| track | " + " | ".join(models) + " |",
+                  "|---|" + "---|" * len(models)]
+        for t in truths:
+            cells = [_pct(*_facts([r for r in results if r.model == m and r.track_id == t.track_id]))
+                     for m in models]
+            lines.append(f"| {t.label or t.track_id} · {t.artist} – {t.title} | " + " | ".join(cells) + " |")
+    lines += ["", "## Per question", "", "| model | track | question | score | TTFT | total | note |",
+              "|---|---|---|---|---|---|---|"]
+    names = {t.track_id: t.artist for t in truths}
     for r in results:
-        lines.append(f"| {r.model} | {r.qid} | {r.score:.2f} | {r.ttft_s if r.ttft_s is not None else '–'} "
-                     f"| {r.total_s} | {r.note.replace('|', '/')} |")
+        sc = "n/a" if r.score is None else f"{r.score:.2f}"
+        lines.append(f"| {r.model} | {names.get(r.track_id, r.track_id)} | {r.qid} | {sc} "
+                     f"| {r.ttft_s if r.ttft_s is not None else '–'} | {r.total_s} | {r.note.replace('|', '/')} |")
     lines += ["", "## Answers", ""]
     for r in results:
         a = (r.answer or r.error).strip().replace("\n", " ")
-        lines.append(f"- **{r.model} · {r.qid}**: {a[:400]}{'…' if len(a) > 400 else ''}")
+        lines.append(f"- **{r.model} · {names.get(r.track_id, r.track_id)} · {r.qid}**: {a[:400]}{'…' if len(a) > 400 else ''}")
     lines.append("")
     return "\n".join(lines)
 
@@ -505,6 +627,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--model", action="append", help="Ollama model (repeatable; default: all installed)")
     ap.add_argument("--skip", action="append", default=[], help="model to leave out (repeatable)")
     ap.add_argument("--track-id", action="append", type=int, help=f"seed track (repeatable; default {DEFAULT_TRACK_ID})")
+    ap.add_argument("--smart-playlists", nargs="?", const="", metavar="REGEX",
+                    help="one fully analysed track per smart playlist (optionally only playlists whose "
+                         "name matches REGEX, e.g. '^Genre')")
     ap.add_argument("--timeout", type=float, default=180.0, help="per-answer timeout in seconds")
     ap.add_argument("--out", type=Path, default=Path.home() / ".local/share/karaoke/bench")
     ap.add_argument("--label", default="", help="suffix for the report name, e.g. 'before-fix'")
@@ -515,7 +640,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         rescore(args.rescore)
         return 0
     models = [m for m in (args.model or installed_models()) if m not in set(args.skip)]
-    run(models, args.track_id or [DEFAULT_TRACK_ID], args.timeout, args.out, args.label)
+    if args.smart_playlists is not None:
+        tracks = pick_smart_playlist_tracks(args.smart_playlists)
+        for tid, name in tracks:
+            print(f"  {name}: track {tid}")
+    else:
+        tracks = [(t, "") for t in (args.track_id or [DEFAULT_TRACK_ID])]
+    run(models, tracks, args.timeout, args.out, args.label)
     return 0
 
 
