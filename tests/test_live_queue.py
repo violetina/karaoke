@@ -363,3 +363,34 @@ def test_radio_keep_going_dedups_by_artist_title_across_duplicate_track_ids(fake
         res = collection.radio_keep_going_refill("SeedArtist", "SeedTitle")
     assert res["ok"] is True and res["added"] == 2
     assert _ids() == ([10, 12], 0)
+
+
+def test_radio_keep_going_waits_for_new_song_vectors_while_still_heard(fake_library):
+    """A just-discovered song has no vectors yet: retry until suggestions appear."""
+    from karaoke import queue_suggest
+
+    localcache.set_queue_autopilot(True)
+    live_queue._RADIO_LAST_SEED_KEY = None
+    calls = {"n": 0}
+
+    def slow_suggest(seed_id, limit=10, **kw):
+        calls["n"] += 1
+        return [] if calls["n"] < 3 else [_FakeSuggestion(i) for i in range(61, 68)]
+
+    with patch.object(localcache, "find_track_id", return_value=300), \
+         patch.object(queue_suggest, "suggest_for_track", side_effect=slow_suggest):
+        res = collection.radio_keep_going_refill(
+            "New", "Song", wait_for_ready_s=5, poll_interval_s=0.01, still_current=lambda: True)
+    assert res["added"] == 5 and calls["n"] == 3
+
+
+def test_radio_keep_going_stops_waiting_when_song_changes(fake_library):
+    from karaoke import queue_suggest
+
+    localcache.set_queue_autopilot(True)
+    with patch.object(localcache, "find_track_id", return_value=300), \
+         patch.object(queue_suggest, "suggest_for_track", return_value=[]):
+        res = collection.radio_keep_going_refill(
+            "New", "Song", wait_for_ready_s=60, poll_interval_s=0.01, still_current=lambda: False)
+    assert res["reason"] == "song_changed"
+    assert localcache.load_active_queue()["rows"] == []

@@ -258,6 +258,7 @@ def radio_keep_going_refill(
     require_autopilot: bool = True,
     wait_for_ready_s: float = 0.0,
     poll_interval_s: float = 2.0,
+    still_current=None,
 ) -> dict[str, Any]:
     """Seed or update the rolling 5x5 radio Keep Going queue on a new song detection.
 
@@ -321,6 +322,12 @@ def radio_keep_going_refill(
                     break
             if time.monotonic() >= deadline:
                 break
+            # A brand-new radio song has no CLAP/spectral vector until its
+            # processing finishes, so suggestions stay empty for minutes.
+            # Keep waiting only while radio still hears this song; once it
+            # changes, the next detection takes over.
+            if still_current is not None and not still_current():
+                return {"added": 0, "rotated": 0, "reason": "song_changed"}
             time.sleep(max(0.05, float(poll_interval_s)))
 
         if seed_id is None:
