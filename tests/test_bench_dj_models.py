@@ -18,6 +18,9 @@ def test_bpm_tolerance():
     assert bench.bpm_mentioned("around 160 bpm", 162.0)
     assert not bench.bpm_mentioned("around 120 BPM", 162.0)
     assert not bench.bpm_mentioned("released in 1979", 162.0)
+    for text in ("a BPM of 162", "**BPM of 162**", "BPM: 161", "tempo is around 163", "**162 BPM**"):
+        assert bench.bpm_mentioned(text, 162.0), text
+    assert not bench.bpm_mentioned("BPM of 120", 162.0)
 
 
 def test_chords_whole_names_only():
