@@ -780,6 +780,13 @@ def _ensure_in_library(artist: str, title: str) -> None:
         localcache.log_event("radio", f"library_{outcome}", artist=artist, title=title)
     except Exception:
         log.debug("radio: could not queue %s - %s", artist, title, exc_info=True)
+    try:
+        from . import collection
+
+        wait_s = 60.0 if locals().get("outcome") in ("queued-full", "queued") else 0.0
+        collection.radio_keep_going_refill(artist, title, wait_for_ready_s=wait_s)
+    except Exception:
+        log.debug("radio: keep-going refill failed for %s - %s", artist, title, exc_info=True)
 
 
 def play_radio_synced(

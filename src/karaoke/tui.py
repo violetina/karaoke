@@ -2201,6 +2201,11 @@ class KaraokeTui(App):
                         length = _song_length(ref, None)
                         watcher.song_matched()
                         log.info("mic: %s - %s", ref.artist, ref.title)
+                        try:
+                            from . import collection
+                            collection.radio_keep_going_refill(ref.artist, ref.title)
+                        except Exception:
+                            log.debug("mic: radio keep-going refill failed", exc_info=True)
                     wait = plan.after_match(self.mic_elapsed(), length)
                 else:
                     wait = plan.after_miss()

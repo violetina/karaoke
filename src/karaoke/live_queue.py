@@ -27,6 +27,19 @@ from .logger import log
 LIVE_QUEUE_ID = "graph-collection"
 DEFAULT_NAME = "Karaoke: Dashboard Queue"
 
+#: Identity used for radio-seeded keep-going queues (5x5 rolling window).
+RADIO_QUEUE_ID = "radio-keep-going"
+RADIO_QUEUE_NAME = "Radio: Keep Going"
+RADIO_BATCH_SIZE = 5
+RADIO_MAX_BATCHES = 5
+
+#: Recently rotated-out track IDs and (artist, title) pairs from radio keep-going,
+#: so a song evicted from the front isn't immediately re-appended at the tail.
+_RADIO_EVICTED_IDS: list[int] = []
+_RADIO_EVICTED_PAIRS: list[tuple[str, str]] = []
+_RADIO_EVICTED_CAP = 50
+_RADIO_LAST_SEED_KEY: Optional[tuple[str, str]] = None
+
 
 def _norm(s: Any) -> str:
     return str(s or "").strip().casefold()
@@ -298,3 +311,144 @@ def append_rows(new_rows: list[dict[str, Any]], conn, *, source: str = "autopilo
 def set_index(index: int, conn=None) -> None:
     """Move only the playing position (follower / Next / Previous)."""
     localcache.set_active_queue_index(index, conn=conn)
+
+
+def _row_pair(r: dict[str, Any]) -> tuple[str, str]:
+    return (_norm(r.get("artist")), _norm(r.get("title")))
+
+
+def radio_rotate_append(
+    candidate_rows: list[dict[str, Any]],
+    conn,
+    *,
+    seed_track_id: Optional[int] = None,
+    seed_artist: str = "",
+    seed_title: str = "",
+    batch_size: int = RADIO_BATCH_SIZE,
+    max_batches: int = RADIO_MAX_BATCHES,
+    require_autopilot: bool = True,
+    source: str = "radio-keep-going",
+) -> dict[str, Any]:
+    """Append up to ``batch_size`` tracks to the radio keep-going queue, rotating the oldest batch after ``max_batches``.
+
+    Only acts when the live queue is either empty or already owned by radio
+    keep-going (``playlist_id == RADIO_QUEUE_ID``), so a user-loaded playlist
+    or manual queue is never overwritten. Avoids duplicates against the seed,
+    every currently queued track, and any rows about to be rotated out (by both
+    ``track_id`` and normalized ``(artist, title)``). Never evicts rows when no
+    new replacement tracks were found.
+    """
+    cap = max(1, int(batch_size)) * max(1, int(max_batches))
+    seed_pair = (_norm(seed_artist), _norm(seed_title))
+
+    def apply(state: dict[str, Any]) -> dict[str, Any]:
+        global _RADIO_LAST_SEED_KEY
+        if require_autopilot and not state.get("autopilot"):
+            return {"ok": False, "reason": "disabled", "added": 0, "rotated": 0, "total": len(state["rows"])}
+        rows = state["rows"]
+        cur = int(state.get("current_index", 0) or 0)
+        pid = state.get("playlist_id") or ""
+        if rows and cur >= len(rows) and pid != RADIO_QUEUE_ID:
+            rows.clear()
+            cur = 0
+            state["current_index"] = 0
+        if rows and pid != RADIO_QUEUE_ID:
+            return {"ok": False, "reason": "queue_not_empty", "added": 0, "rotated": 0, "total": len(rows)}
+
+        if not rows:
+            _RADIO_EVICTED_IDS.clear()
+            _RADIO_EVICTED_PAIRS.clear()
+            _RADIO_LAST_SEED_KEY = None
+        elif any(seed_pair) and seed_pair == _RADIO_LAST_SEED_KEY:
+            return {"ok": False, "reason": "unchanged_song", "added": 0, "rotated": 0, "total": len(rows)}
+        seen_ids: set[int] = {int(r["track_id"]) for r in rows if r.get("track_id") is not None}
+        seen_ids.update(_RADIO_EVICTED_IDS)
+        if seed_track_id is not None:
+            seen_ids.add(int(seed_track_id))
+        seen_pairs: set[tuple[str, str]] = {_row_pair(r) for r in rows if any(_row_pair(r))}
+        seen_pairs.update(_RADIO_EVICTED_PAIRS)
+        if any(seed_pair):
+            seen_pairs.add(seed_pair)
+
+        fresh: list[dict[str, Any]] = []
+        for r in candidate_rows:
+            if not r.get("url"):
+                continue
+            tid = r.get("track_id")
+            pair = _row_pair(r)
+            if tid is not None and int(tid) in seen_ids:
+                continue
+            if any(pair) and pair in seen_pairs:
+                continue
+            fresh.append(r)
+            if tid is not None:
+                seen_ids.add(int(tid))
+            if any(pair):
+                seen_pairs.add(pair)
+            if len(fresh) >= batch_size:
+                break
+
+        if not fresh:
+            return {"ok": False, "reason": "no_matches", "added": 0, "rotated": 0, "total": len(rows)}
+
+        created = not rows
+        if created:
+            state["playlist_id"] = RADIO_QUEUE_ID
+            state["name"] = RADIO_QUEUE_NAME
+            state["current_index"] = 0
+
+        rotated = 0
+        cur = int(state.get("current_index", 0) or 0)
+        if len(rows) + len(fresh) > cap and len(rows) >= batch_size and cur == 0:
+            evicted = rows[:batch_size]
+            for ev in evicted:
+                if ev.get("track_id") is not None:
+                    _RADIO_EVICTED_IDS.append(int(ev["track_id"]))
+                ep = _row_pair(ev)
+                if any(ep):
+                    _RADIO_EVICTED_PAIRS.append(ep)
+            if len(_RADIO_EVICTED_IDS) > _RADIO_EVICTED_CAP:
+                del _RADIO_EVICTED_IDS[:-_RADIO_EVICTED_CAP]
+            if len(_RADIO_EVICTED_PAIRS) > _RADIO_EVICTED_CAP:
+                del _RADIO_EVICTED_PAIRS[:-_RADIO_EVICTED_CAP]
+            del rows[:batch_size]
+            rotated = batch_size
+            cur = int(state.get("current_index", 0) or 0)
+            state["current_index"] = max(0, cur - rotated)
+
+        start_idx = len(rows)
+        rows.extend(fresh)
+        if any(seed_pair):
+            _RADIO_LAST_SEED_KEY = seed_pair
+        return {
+            "ok": True,
+            "reason": "rotated" if rotated else ("seeded" if created else "appended"),
+            "created": created,
+            "added": len(fresh),
+            "rotated": rotated,
+            "total": len(rows),
+            "added_rows": [(start_idx + i, r) for i, r in enumerate(fresh)],
+        }
+
+    res = localcache.mutate_active_queue(apply, conn=conn)
+    if res.get("added"):
+        _record("enqueued", res.get("added_rows", []), source, conn)
+        try:
+            localcache.record_queue_event(
+                "radio_keep_going",
+                track_id=seed_track_id,
+                artist=seed_artist,
+                title=seed_title,
+                queue_index=res["total"],
+                metadata={
+                    "source": source,
+                    "added": res["added"],
+                    "rotated": res["rotated"],
+                    "total": res["total"],
+                },
+                conn=conn,
+            )
+        except Exception:
+            log.debug("live_queue: record_queue_event failed", exc_info=True)
+    res.pop("added_rows", None)
+    return res

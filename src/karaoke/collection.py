@@ -186,6 +186,9 @@ def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
         return {"refilled": 0, "reason": "no_queue"}
     if not active.get("autopilot"):
         return {"refilled": 0, "reason": "disabled"}
+    from . import live_queue, live_state
+    if active.get("playlist_id") == live_queue.RADIO_QUEUE_ID and live_state.current() is not None:
+        return {"refilled": 0, "reason": "radio_managed"}
 
     rows = active["rows"]
     cur_idx = int(active.get("current_index", 0) or 0)
@@ -243,3 +246,109 @@ def advance_active_queue(conn, delta: int = 1) -> Optional[dict[str, Any]]:
         return {"index": new_idx, "row": rows[new_idx], "moved": new_idx != cur}
 
     return localcache.mutate_active_queue(apply, conn=conn)
+
+
+def radio_keep_going_refill(
+    artist: str,
+    title: str,
+    conn=None,
+    *,
+    batch_size: int = AUTOPILOT_ADD,
+    max_batches: int = 5,
+    require_autopilot: bool = True,
+    wait_for_ready_s: float = 0.0,
+    poll_interval_s: float = 2.0,
+) -> dict[str, Any]:
+    """Seed or update the rolling 5x5 radio Keep Going queue on a new song detection.
+
+    Triggered when radio mode detects a new song:
+    - Requires the live queue to be empty or already owned by radio keep-going
+      (``playlist_id == live_queue.RADIO_QUEUE_ID``), so a user's active playlist
+      is never overwritten.
+    - When ``require_autopilot`` is True, also checks that Keep Going
+      (``autopilot``) is enabled in ``active_queue_state``.
+    - Resolves the detected ``(artist, title)`` in Postgres via
+      ``find_track_id`` / ``find_track_id_relaxed`` (never OpenSearch fuzzy).
+    - Pulls similar playable tracks from ``queue_suggest.suggest_for_track``,
+      deduping against the seed and every currently queued track (both by
+      ``track_id`` and normalized ``(artist, title)``).
+    - Appends up to ``batch_size`` (5) tracks for up to ``max_batches`` (5)
+      times (25 tracks), then rotates out the first ``batch_size`` (5) tracks
+      as new batches arrive.
+    - Returns ``{"added": 0, ...}`` without modifying the queue if the detected
+      song is unknown or yields no playable suggestions, so the caller can try
+      again when the detected song changes.
+    """
+    from . import live_queue, queue_suggest
+
+    clean_artist = (artist or "").strip()
+    clean_title = (title or "").strip()
+    if not clean_artist or not clean_title:
+        return {"added": 0, "rotated": 0, "reason": "no_song"}
+
+    own = conn is None
+    c = conn or localcache.connect()
+    try:
+        active = localcache.load_active_queue(conn=c)
+        if require_autopilot and not (active and active.get("autopilot")):
+            return {"added": 0, "rotated": 0, "reason": "disabled"}
+
+        existing_rows = (active or {}).get("rows") or []
+        cur_idx = int((active or {}).get("current_index", 0) or 0)
+        pid = (active or {}).get("playlist_id") or ""
+        if existing_rows and cur_idx < len(existing_rows) and pid != live_queue.RADIO_QUEUE_ID:
+            return {"added": 0, "rotated": 0, "reason": "queue_not_empty", "total": len(existing_rows)}
+        seed_key = (clean_artist.casefold(), clean_title.casefold())
+        if existing_rows and seed_key == live_queue._RADIO_LAST_SEED_KEY:
+            return {"added": 0, "rotated": 0, "reason": "unchanged_song", "total": len(existing_rows)}
+
+        ask_limit = max(batch_size * 4, batch_size + len(existing_rows) + 15)
+        deadline = time.monotonic() + max(0.0, float(wait_for_ready_s))
+        seed_id = None
+        picks = []
+        while True:
+            seed_id = (
+                localcache.find_track_id(clean_artist, clean_title, c)
+                or localcache.find_track_id_relaxed(clean_artist, clean_title, c)
+            )
+            if seed_id is not None:
+                try:
+                    picks = queue_suggest.suggest_for_track(int(seed_id), limit=ask_limit)
+                except Exception:
+                    log.warning("radio keep-going: suggestion failed for %s - %s", clean_artist, clean_title, exc_info=True)
+                    return {"added": 0, "rotated": 0, "reason": "suggest_error"}
+                if picks:
+                    break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(0.05, float(poll_interval_s)))
+
+        if seed_id is None:
+            return {"added": 0, "rotated": 0, "reason": "seed_not_found"}
+        if not picks:
+            return {"added": 0, "rotated": 0, "reason": "no_suggestions"}
+
+        candidate_ids = [int(p.track_id) for p in picks if p.track_id is not None and int(p.track_id) != int(seed_id)]
+        candidate_rows = [r for r in rows_for(candidate_ids, c) if r.get("url")]
+        if not candidate_rows:
+            return {"added": 0, "rotated": 0, "reason": "no_playable"}
+
+        res = live_queue.radio_rotate_append(
+            candidate_rows,
+            c,
+            seed_track_id=int(seed_id),
+            seed_artist=clean_artist,
+            seed_title=clean_title,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            require_autopilot=require_autopilot,
+        )
+        if res.get("added"):
+            log.info(
+                "radio keep-going: +%d tracks (rotated %d, queue now %d) from %s - %s",
+                res["added"], res["rotated"], res["total"], clean_artist, clean_title,
+            )
+        return res
+    finally:
+        if own:
+            c.close()
