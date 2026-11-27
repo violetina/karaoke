@@ -104,3 +104,42 @@ def test_unknown_uploader_pair_is_still_repaired(monkeypatch):
     seen = _capture_prompt(monkeypatch)
     _chat("SomeUploader99", "Mogwai - Auto Rock (Official)")
     assert seen["title"] == "Auto Rock"
+
+
+def test_analysis_only_query_skips_fuzzy_opensearch_noise(monkeypatch):
+    _seed_track()
+    calls = []
+
+    class FakeOS:
+        def search(self, index, body):
+            calls.append(index)
+            return {"hits": {"hits": [{"_source": {"name": "Unrelated Band", "artist": "X", "title": "Y", "track_id": 1}}]}}
+
+    monkeypatch.setattr("karaoke.osclient.client", lambda: FakeOS())
+    facts = dashboard_api._retrieve_query_facts("What key and BPM is this?", "The Slits", "Typical Girls")
+    assert facts.startswith("Musical analysis")
+    assert "Unrelated Band" not in facts and "karaoke-artist-cache" not in calls
+
+
+def test_suggest_facts_are_ready_to_copy_queue_lines(monkeypatch):
+    import json as _json
+    monkeypatch.setattr("karaoke.osclient.client", lambda: (_ for _ in ()).throw(RuntimeError("no os")))
+    monkeypatch.setattr("karaoke.mcp_server.suggest_next_tracks",
+                        lambda artist, title, limit=3: _json.dumps({"suggestions": [
+                            {"artist": "Bowie", "title": "Heroes", "reason": "fits"},
+                            {"artist": "Pulp", "title": "Common People", "reason": "fits"}]}))
+    facts = dashboard_api._retrieve_query_facts("Suggest the next song.", "The Slits", "Typical Girls")
+    assert "RECOMMENDED NEXT SONGS" in facts
+    assert "[QUEUE: Bowie - Heroes]" in facts and "copy EXACTLY ONE" in facts
+
+
+def test_prompt_leads_with_facts_and_caps_queue(monkeypatch):
+    monkeypatch.setattr(dashboard_api, "_retrieve_query_facts", lambda *a, **k: "")
+    facts = "Musical analysis for current track 'A - B': Key: F minor (Camelot 4A) · BPM: 162"
+    prompt = dashboard_api._dj_chat_system_prompt("A", "B", query_facts=facts)
+    # facts appear before the behavioural rules, not buried at the end
+    assert prompt.index("VERIFIED FACTS") < prompt.index("CRITICAL FORMAT RULE")
+    assert "AT MOST ONE [QUEUE" in prompt
+    # the random sample-track distractor is dropped once real recs are present
+    recs = "RECOMMENDED NEXT SONGS (…):\n  1. [QUEUE: Bowie - Heroes]  (fits)"
+    assert "valid songs in the library right now" not in dashboard_api._dj_chat_system_prompt("A", "B", query_facts=recs)

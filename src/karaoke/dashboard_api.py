@@ -1633,6 +1633,24 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
     except Exception:
         os_c = None
 
+    wants_analysis = any(k in q_lower for k in ("chord", "progression", "key", "camelot", "harmony", "mood", "feeling", "bpm", "tempo", "vibe"))
+    wants_artist = any(k in q_lower for k in ("who", "member", "band", "history", "side project", "formed", "about ", "tell me about"))
+    # A pure key/BPM/chord/mood question is answered entirely by the current
+    # track's analysis. Firing the fuzzy OpenSearch artist/track searches then
+    # only prepends unrelated bands (they match *something* for any query),
+    # which buries the real numbers and misleads a small model.
+    analysis_only = wants_analysis and not wants_artist
+
+    # 0. Current track's own analysis FIRST -- it is the ground truth for
+    #    key/BPM/chord/mood questions, so a small model reads it before noise.
+    if wants_analysis:
+        try:
+            current = _current_track_analysis_fact(now_artist, now_title)
+            if current:
+                facts.append(current)
+        except Exception:
+            _log.debug("dj facts: current-track analysis lookup failed", exc_info=True)
+
     # If user query is asking for a next track / recommendation, run suggest_next_tracks!
     if any(k in q_lower for k in ("suggest", "next", "after", "recommend", "follow")):
         try:
@@ -1641,13 +1659,20 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             data_sugg = json.loads(raw_sugg)
             suggs = data_sugg.get("suggestions", [])
             if suggs:
-                formatted = [f"'{s['artist']} - {s['title']}' (reason: {s.get('reason', 'good fit')})" for s in suggs]
-                facts.append(f"Recommended next songs following current vibe: {'; '.join(formatted)}")
+                # Hand the small model ready-to-copy QUEUE lines. These already
+                # exclude the current track, so a model that just copies the
+                # first one can never suggest the song already playing.
+                lines = [f"  {i}. [QUEUE: {s['artist']} - {s['title']}]  ({s.get('reason', 'good fit')})"
+                         for i, s in enumerate(suggs, 1)]
+                facts.append(
+                    "RECOMMENDED NEXT SONGS (real library tracks, the current song is already "
+                    "excluded — to recommend, copy EXACTLY ONE of these lines as your single "
+                    "[QUEUE: ...] tag, do not invent another):\n" + "\n".join(lines))
         except Exception:
             pass
 
     # 1. Search OpenSearch artist cache for any mentioned artists
-    if os_c is not None:
+    if os_c is not None and not analysis_only:
         try:
             res = os_c.search(
                 index="karaoke-artist-cache",
@@ -1682,7 +1707,7 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             pass
 
     # 2. Search OpenSearch library tracks (lyrics / titles / sound) matching the query
-    if os_c is not None:
+    if os_c is not None and not analysis_only:
         try:
             res = os_c.search(
                 index="tracks",
@@ -1709,15 +1734,6 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
                 facts.append(f"Relevant songs in our library: {', '.join(matched_tracks)}")
         except Exception:
             pass
-
-    # 3. Check for chord / harmony or mood queries in PostgreSQL
-    if any(k in q_lower for k in ("chord", "progression", "key", "camelot", "harmony", "mood", "feeling", "bpm", "tempo", "vibe")):
-        try:
-            current = _current_track_analysis_fact(now_artist, now_title)
-            if current:
-                facts.append(current)
-        except Exception:
-            _log.debug("dj facts: current-track analysis lookup failed", exc_info=True)
 
     return "\n".join(facts)
 
@@ -1799,19 +1815,27 @@ def _dj_chat_system_prompt(
     """
     focus_instruction = f"If you want to pull up an artist's profile on screen, you may output `[FOCUS: The Artist Name]` using their EXACT name." if now_artist else ""
 
+    has_recs = "RECOMMENDED NEXT SONGS" in (query_facts or "")
+
     import urllib.parse
     from . import localcache
     with localcache.connect() as conn:
         catalog = localcache.get_all_artist_genres_map(conn)
         available_artists = list(catalog.keys())
-        
-        # Look up actual tracks so the model has guaranteed valid options
-        c = conn.cursor()
-        c.execute("SELECT artist, title FROM tracks ORDER BY RANDOM() LIMIT 5")
-        sample_tracks = [f"'{dict(r)['artist']} - {dict(r)['title']}'" for r in c.fetchall()]
-        track_hint = f"To guarantee you suggest a real song, here are some valid songs in the library right now: {', '.join(sample_tracks)}." if sample_tracks else ""
-        
+
+        # A random sample of real tracks is a weak fallback so the model has
+        # *some* valid options -- but when we already handed it grounded
+        # RECOMMENDED NEXT SONGS, these random tracks only compete with the
+        # real answer and tempt a small model to suggest one of them instead.
+        track_hint = ""
+        if not has_recs:
+            c = conn.cursor()
+            c.execute("SELECT artist, title FROM tracks ORDER BY RANDOM() LIMIT 5")
+            sample_tracks = [f"'{dict(r)['artist']} - {dict(r)['title']}'" for r in c.fetchall()]
+            track_hint = f"To guarantee you suggest a real song, here are some valid songs in the library right now: {', '.join(sample_tracks)}." if sample_tracks else ""
+
         # Fetch smart playlists to give the DJ thematic awareness
+        c = conn.cursor()
         c.execute("SELECT name FROM saved_playlists WHERE playlist_id LIKE 'smart:%' ORDER BY RANDOM() LIMIT 5")
         sample_playlists = [dict(r)["name"] for r in c.fetchall()]
         playlist_hint = f"We have these themed smart playlists ready: {', '.join(sample_playlists)}." if sample_playlists else ""
@@ -1828,9 +1852,12 @@ def _dj_chat_system_prompt(
     ) if artist_context else "\n\nDO NOT invent ANY side projects, band members, or history for artists if you aren't 100% sure of the facts."
 
     query_fact_block = (
-        f"\n\nVerified search results from our OpenSearch and library database relevant to the user query:\n"
+        f"\n\nVERIFIED FACTS from our library database and search — the ground truth for THIS question:\n"
         f"{query_facts}\n"
-        f"Use these verified facts directly in your answer if relevant."
+        f"Answer the user's question using ONLY the numbers, keys, BPM, chord names, moods, members and "
+        f"song titles in this block. If the question is about key/BPM/chords/mood, state the exact values "
+        f"from here and do NOT guess or add others. If RECOMMENDED NEXT SONGS are listed, your recommendation "
+        f"MUST be one of them."
     ) if query_facts else ""
 
     action_instructions = (
@@ -1859,12 +1886,15 @@ def _dj_chat_system_prompt(
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
         f"{playback_status} "
+        f"{query_fact_block}"
+        f"{artist_fact_block}\n\n"
         f"You have deep knowledge of music history, bands, side-projects, BPM, and Camelot keys. "
         f"Keep answers punchy, entertaining, and brief (2-3 sentences). "
         f"If the user asks about an artist, highlight their story or side-projects. Be completely factual. Do NOT invent side projects or band connections (e.g. Depeche Mode has no connection to The Cure). "
         f"{action_instructions}"
         f"{track_hint} {playlist_hint} "
         f"CRITICAL FORMAT RULE: The QUEUE bracket must ONLY contain ONE artist and ONE track title: `[QUEUE: Artist - Title]`. Never prefix it with the currently playing artist or uploader name! "
+        f"Output AT MOST ONE [QUEUE: ...] tag in your whole reply, and never the song that is currently playing. "
         f"Do NOT make up song titles based on the user's prompt. "
         f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
         f"If you aren't sure a specific song by a specific artist exists and is in the library, DO NOT output the QUEUE bracket. Just suggest the artist instead. "
@@ -1873,8 +1903,6 @@ def _dj_chat_system_prompt(
         f"Never output the literal words `QUEUE:` unless it is inside a bracket like `[QUEUE: Artist - Title]`. Do not use brackets outside of this strict format. "
         f"Never output a QUEUE or FOCUS bracket with a made-up placeholder like 'Unknown Artist' or 'The Artist Name'. "
         f"{focus_instruction}"
-        f"{artist_fact_block}"
-        f"{query_fact_block}"
     )
 
 
