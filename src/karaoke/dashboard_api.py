@@ -1711,44 +1711,75 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             pass
 
     # 3. Check for chord / harmony or mood queries in PostgreSQL
-    if any(k in q_lower for k in ("chord", "progression", "key", "camelot", "harmony", "mood", "feeling", "bpm")):
+    if any(k in q_lower for k in ("chord", "progression", "key", "camelot", "harmony", "mood", "feeling", "bpm", "tempo", "vibe")):
         try:
-            with localcache.connect() as conn:
-                c = conn.cursor()
-                # If they ask about the current playing track or a specific track
-                target_artist = now_artist
-                target_title = now_title
-                if target_artist and target_title:
-                    c.execute("""
-                        SELECT t.track_id, t.artist, t.title, a.detected_key, a.bpm, a.energy,
-                               m.summary as mood_summary, c.summary as chord_summary
-                        FROM tracks t
-                        LEFT JOIN track_analysis a ON a.track_id = t.track_id
-                        LEFT JOIN track_moods m ON m.track_id = t.track_id
-                        LEFT JOIN track_chords c ON c.track_id = t.track_id
-                        WHERE t.artist ILIKE %s AND t.title ILIKE %s
-                        LIMIT 1
-                    """, (f"%{target_artist}%", f"%{target_title}%"))
-                    row = c.fetchone()
-                    if row:
-                        r = dict(row)
-                        det = []
-                        if r.get("detected_key"): det.append(f"Key: {r['detected_key']}")
-                        if r.get("bpm"): det.append(f"BPM: {round(r['bpm'])}")
-                        if r.get("energy"): det.append(f"Energy: {r['energy']:.2f}")
-                        m_sum = r.get("mood_summary") or {}
-                        if m_sum.get("dominant"): det.append(f"Dominant Mood: {m_sum.get('dominant')}")
-                        if m_sum.get("dominant_feeling"): det.append(f"Feeling: {m_sum.get('dominant_feeling')}")
-                        c_sum = r.get("chord_summary") or {}
-                        chords_list = c_sum.get("distinct_chords") if isinstance(c_sum, dict) else None
-                        if chords_list:
-                            det.append(f"Chords: {', '.join(chords_list[:6])}")
-                        if det:
-                            facts.append(f"Musical analysis for current track '{target_artist} - {target_title}': " + " · ".join(det))
+            current = _current_track_analysis_fact(now_artist, now_title)
+            if current:
+                facts.append(current)
         except Exception:
-            pass
+            _log.debug("dj facts: current-track analysis lookup failed", exc_info=True)
 
     return "\n".join(facts)
+
+
+def _current_track_analysis_fact(artist: str, title: str) -> str:
+    """Key / BPM / energy / mood / chords of the playing track as one fact line.
+
+    Resolves the track the same way the rest of the app does (exact, then the
+    spelling-tolerant relaxed match), not with a loose ``ILIKE %artist%``, and
+    reads chords from ``track_chords.chords`` (the timeline) and
+    ``track_chords.harmony``. An earlier version selected a non-existent
+    ``track_chords.summary`` column, so this whole fact block failed silently
+    and the DJ answered key/BPM/mood/chord questions from nothing.
+    """
+    if not (artist and title):
+        return ""
+    from . import localcache
+    from .musictheory import parse_key
+
+    with localcache.connect() as conn:
+        tid = localcache.find_track_id(artist, title, conn) or localcache.find_track_id_relaxed(artist, title, conn)
+        if tid is None:
+            return ""
+        r = conn.execute(
+            """
+            SELECT a.detected_key, a.bpm, a.energy, m.summary AS mood_summary,
+                   ch.chords, ch.harmony
+            FROM tracks t
+            LEFT JOIN track_analysis a ON a.track_id = t.track_id
+            LEFT JOIN track_moods m ON m.track_id = t.track_id
+            LEFT JOIN track_chords ch ON ch.track_id = t.track_id
+            WHERE t.track_id = %s
+            """, (tid,)).fetchone()
+    if r is None:
+        return ""
+    det = []
+    if r["detected_key"]:
+        k = parse_key(r["detected_key"])
+        det.append(f"Key: {r['detected_key']}" + (f" (Camelot {k.camelot})" if k else ""))
+    if r["bpm"]:
+        det.append(f"BPM: {round(r['bpm'])}")
+    if r["energy"] is not None:
+        det.append(f"Energy: {r['energy']:.2f}")
+    m_sum = r["mood_summary"] or {}
+    if m_sum.get("dominant"):
+        det.append(f"Dominant Mood: {m_sum['dominant']}")
+    if m_sum.get("dominant_feeling"):
+        det.append(f"Feeling: {m_sum['dominant_feeling']}")
+    held: dict[str, float] = {}
+    for c in r["chords"] or []:
+        name = str(c.get("name") or "").strip()
+        if name and name.upper() != "N":
+            held[name] = held.get(name, 0.0) + max(0.0, float(c.get("end") or 0) - float(c.get("at") or 0))
+    if held:
+        top = [n for n, _ in sorted(held.items(), key=lambda kv: kv[1], reverse=True)[:6]]
+        det.append(f"Most-used chords: {', '.join(top)}")
+    harmony = r["harmony"] or {}
+    if harmony.get("style"):
+        det.append(f"Harmony style: {harmony['style']}")
+    if not det:
+        return ""
+    return f"Musical analysis for current track '{artist} - {title}': " + " · ".join(det)
 
 
 def _dj_chat_system_prompt(
@@ -1847,6 +1878,54 @@ def _dj_chat_system_prompt(
     )
 
 
+def _repair_uploader_now_playing(now_artist: str, now_title: str) -> tuple[str, str]:
+    """Best guess at the real artist/title when the player reported an uploader handle.
+
+    Only for pairs that are NOT library tracks (the caller checks): YouTube
+    often reports the channel as artist and "Artist - Title" as the title.
+    """
+    from . import localcache
+    with localcache.connect() as conn:
+        c = conn.cursor()
+        # First, check if there's an exact track match for this title
+        c.execute("SELECT artist, title FROM tracks WHERE title = %s AND artist != %s LIMIT 1", (now_title, now_artist))
+        row = c.fetchone()
+        if not row:
+            # 1. Direct SQL check if the uploader is just a username and the real artist is embedded in the title string
+            c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND artist != %s LIMIT 1", (now_title, now_artist))
+            row = c.fetchone()
+        if not row:
+            # 1.5. Direct SQL check if the title string actually contains BOTH the artist and the title
+            c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
+            row = c.fetchone()
+        if not row:
+            try:
+                from .osclient import client
+                os_c = client()
+                res = os_c.search(
+                    index="karaoke-clap",
+                    body={
+                        "query": {
+                            "match": {
+                                "title": now_title
+                            }
+                        },
+                        "size": 1
+                    }
+                )
+                if res["hits"]["hits"]:
+                    hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
+                    if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
+                        row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
+            except Exception:
+                pass
+
+        if row and dict(row)["artist"].lower() != now_artist.lower():
+            now_artist = dict(row)["artist"]
+            now_title = dict(row)["title"]
+    return now_artist, now_title
+
+
 @app.post("/api/dj/chat")
 async def dj_chat_endpoint(body: ChatRequest):
     """Server-Sent Events streaming chat with local Ollama model."""
@@ -1863,43 +1942,15 @@ async def dj_chat_endpoint(body: ChatRequest):
     if now_artist and now_title:
         from . import localcache
         with localcache.connect() as conn:
-            c = conn.cursor()
-            # First, check if there's an exact track match for this title
-            c.execute("SELECT artist, title FROM tracks WHERE title = %s AND artist != %s LIMIT 1", (now_title, now_artist))
-            row = c.fetchone()
-            if not row:
-                # 1. Direct SQL check if the uploader is just a username and the real artist is embedded in the title string
-                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND artist != %s LIMIT 1", (now_title, now_artist))
-                row = c.fetchone()
-            if not row:
-                # 1.5. Direct SQL check if the title string actually contains BOTH the artist and the title
-                c.execute("SELECT artist, title FROM tracks WHERE %s LIKE '%%' || artist || '%%' AND %s LIKE '%%' || title || '%%' AND artist != %s LIMIT 1", (now_title, now_title, now_artist))
-                row = c.fetchone()
-            if not row:
-                try:
-                    from .osclient import client
-                    os_c = client()
-                    res = os_c.search(
-                        index="karaoke-clap",
-                        body={
-                            "query": {
-                                "match": {
-                                    "title": now_title
-                                }
-                            },
-                            "size": 1
-                        }
-                    )
-                    if res["hits"]["hits"]:
-                        hit_artist = res["hits"]["hits"][0]["_source"].get("artist", "")
-                        if hit_artist and hit_artist.lower() in now_title.lower() and hit_artist.lower() != now_artist.lower():
-                            row = {"artist": hit_artist, "title": res["hits"]["hits"][0]["_source"].get("title")}
-                except Exception:
-                    pass
-
-            if row and dict(row)["artist"].lower() != now_artist.lower():
-                now_artist = dict(row)["artist"]
-                now_title = dict(row)["title"]
+            # The uploader repair exists for YouTube channel handles ("diaboliq82")
+            # reported as the artist. A pair that is already a library track is
+            # right as given and must not be rewritten: the title-contains-artist
+            # match turned "The Slits - Typical Girls" into the band "Girls", so
+            # the DJ answered every question about the wrong song.
+            known = (localcache.find_track_id(now_artist, now_title, conn)
+                     or localcache.find_track_id_relaxed(now_artist, now_title, conn))
+        if known is None:
+            now_artist, now_title = _repair_uploader_now_playing(now_artist, now_title)
 
     artist_context = ""
     if now_artist:

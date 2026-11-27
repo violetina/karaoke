@@ -228,6 +228,9 @@ mcp: ## Launch the Karaoke AI DJ MCP Server (SSE on :8888 for Obot / Claude)
 dj: ## Open the interactive Karaoke AI DJ Chat booth in terminal
 	$(PYTHON) -m karaoke.dj_chat
 
+bench-dj: ## Benchmark the dashboard AI DJ per Ollama model: speed, facts vs DB, CPU/GPU load (MODELS="a b", TRACK=74)
+	$(PYTHON) scripts/bench_dj_models.py $(foreach m,$(MODELS),--model $(m)) $(if $(TRACK),--track-id $(TRACK))
+
 dashboard: ## Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
 	$(PYTHON) -m karaoke.dashboard_api
 
