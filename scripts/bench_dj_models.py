@@ -140,9 +140,13 @@ def key_mentioned(answer: str, key: str) -> bool:
 def bpm_mentioned(answer: str, bpm: Optional[float], tol: float = 3.0) -> bool:
     if bpm is None:
         return False
-    for m in re.finditer(r"(\d{2,3}(?:\.\d+)?)\s*(?:bpm|beats)", answer, re.IGNORECASE):
-        if abs(float(m.group(1)) - bpm) <= tol:
-            return True
+    text = re.sub(r"[*_`]", "", answer)       # markdown bold around numbers
+    pats = (r"(\d{2,3}(?:\.\d+)?)\s*(?:bpm|beats)",                      # "162 BPM"
+            r"(?:bpm|tempo)(?:\s*(?:of|is|at|:|=|~|around|about|roughly))*\s*~?(\d{2,3}(?:\.\d+)?)")  # "BPM of 162"
+    for pat in pats:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            if abs(float(m.group(1)) - bpm) <= tol:
+                return True
     return False
 
 
@@ -304,6 +308,7 @@ class Result:
     model: str
     qid: str
     question: str
+    track_id: Optional[int] = None
     answer: str = ""
     ttft_s: Optional[float] = None
     total_s: float = 0.0
@@ -409,7 +414,7 @@ def run(models: list[str], track_ids: list[int], timeout: float, out_dir: Path, 
                 for qid, q in QUESTIONS:
                     question = q.format(artist=truth.artist)
                     r = ask(client, model, question, truth, timeout)
-                    r.qid = qid
+                    r.qid, r.track_id = qid, truth.track_id
                     if not r.error:
                         r.score, r.note = score(qid, r.answer, truth, conn)
                     else:
@@ -466,6 +471,30 @@ def report(models: list[str], truths: list[Truth], loads: dict[str, Any],
     return "\n".join(lines)
 
 
+def rescore(path: Path) -> Path:
+    """Re-score a saved JSON run with the current scoring rules; rewrite its JSON + Markdown."""
+    from karaoke import localcache
+
+    data = json.loads(path.read_text())
+    truths = [Truth(**t) for t in data["truths"]]
+    results = [Result(**r) for r in data["results"]]
+    by_id = {t.track_id: t for t in truths}
+    with localcache.connect() as conn:
+        for r in results:
+            if r.error:
+                continue
+            truth = by_id.get(r.track_id) or truths[0]
+            r.score, r.note = score(r.qid, r.answer, truth, conn)
+    models = list(dict.fromkeys(r.model for r in results))
+    label = path.stem.split("-", 3)[-1] if path.stem.count("-") >= 3 else ""
+    data["results"] = [asdict(r) for r in results]
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    md = path.with_suffix(".md")
+    md.write_text(report(models, truths, data.get("loads", {}), results, label))
+    print(f"Re-scored: {md}")
+    return md
+
+
 def installed_models() -> list[str]:
     r = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=5).json()
     return sorted(m["name"] for m in r.get("models", []))
@@ -479,7 +508,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--timeout", type=float, default=180.0, help="per-answer timeout in seconds")
     ap.add_argument("--out", type=Path, default=Path.home() / ".local/share/karaoke/bench")
     ap.add_argument("--label", default="", help="suffix for the report name, e.g. 'before-fix'")
+    ap.add_argument("--rescore", type=Path, metavar="JSON",
+                    help="re-score a saved run's answers with the current rules (no model calls) and rewrite its .md")
     args = ap.parse_args(argv)
+    if args.rescore:
+        rescore(args.rescore)
+        return 0
     models = [m for m in (args.model or installed_models()) if m not in set(args.skip)]
     run(models, args.track_id or [DEFAULT_TRACK_ID], args.timeout, args.out, args.label)
     return 0
