@@ -2822,6 +2822,96 @@ def clear_saved_playlist_tracks(
             c.close()
 
 
+def remove_saved_playlist_track(
+    playlist_id: str,
+    *,
+    position: Optional[int] = None,
+    track_id: Optional[int] = None,
+    conn: Optional[Connection] = None,
+) -> int:
+    """Remove track(s) by 1-based position or track_id, renumber positions, and return removed count."""
+    if not playlist_id or (position is None and track_id is None):
+        return 0
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_saved_searches_and_playlists_schema(c)
+        if position is not None:
+            cur = c.execute(
+                "DELETE FROM saved_playlist_tracks WHERE playlist_id = %s AND position = %s",
+                (playlist_id, int(position)),
+            )
+        elif track_id is not None:
+            cur = c.execute(
+                "DELETE FROM saved_playlist_tracks WHERE playlist_id = %s AND track_id = %s",
+                (playlist_id, int(track_id)),
+            )
+        else:
+            return 0
+        removed = int(cur.rowcount or 0)
+        rows = c.execute(
+            "SELECT id FROM saved_playlist_tracks WHERE playlist_id = %s ORDER BY position ASC, id ASC",
+            (playlist_id,),
+        ).fetchall()
+        for idx, row in enumerate(rows, start=1):
+            row_id = row[0] if isinstance(row, (tuple, list)) else row["id"]  # type: ignore[index]
+            c.execute(
+                "UPDATE saved_playlist_tracks SET position = %s WHERE id = %s",
+                (idx, row_id),
+            )
+        c.execute(
+            "UPDATE saved_playlists SET track_count = %s, updated_at = %s WHERE playlist_id = %s",
+            (len(rows), time.time(), playlist_id),
+        )
+        c.commit()
+        return removed
+    finally:
+        if own:
+            c.close()
+
+
+def move_saved_playlist_track(
+    playlist_id: str,
+    from_position: int,
+    to_position: int,
+    conn: Optional[Connection] = None,
+) -> bool:
+    """Move a track from 1-based from_position to to_position and renumber positions."""
+    if not playlist_id:
+        return False
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_saved_searches_and_playlists_schema(c)
+        rows = list(
+            c.execute(
+                "SELECT id FROM saved_playlist_tracks WHERE playlist_id = %s ORDER BY position ASC, id ASC",
+                (playlist_id,),
+            ).fetchall()
+        )
+        n = len(rows)
+        if not (1 <= from_position <= n and 1 <= to_position <= n):
+            return False
+        if from_position != to_position:
+            item = rows.pop(from_position - 1)
+            rows.insert(to_position - 1, item)
+            for idx, row in enumerate(rows, start=1):
+                row_id = row[0] if isinstance(row, (tuple, list)) else row["id"]  # type: ignore[index]
+                c.execute(
+                    "UPDATE saved_playlist_tracks SET position = %s WHERE id = %s",
+                    (idx, row_id),
+                )
+            c.execute(
+                "UPDATE saved_playlists SET updated_at = %s WHERE playlist_id = %s",
+                (time.time(), playlist_id),
+            )
+            c.commit()
+        return True
+    finally:
+        if own:
+            c.close()
+
+
 def delete_saved_playlist(
     playlist_id: str,
     conn: Optional[Connection] = None,

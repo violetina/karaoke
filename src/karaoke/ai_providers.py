@@ -86,10 +86,10 @@ def _config_file_path() -> Optional[Path]:
     override = os.environ.get("KARAOKE_AI_PROVIDERS_FILE")
     if override:
         return Path(override).expanduser()
-    # project root is three levels above this file (src/karaoke/ai_providers.py)
+    # project root is two parent steps above src/karaoke/ (src/karaoke/ai_providers.py)
     parents = Path(__file__).resolve().parents
-    if len(parents) > 3:
-        candidate = parents[3] / "config" / "ai_providers.json"
+    if len(parents) > 2:
+        candidate = parents[2] / "config" / "ai_providers.json"
         if candidate.is_file():
             return candidate
     return None

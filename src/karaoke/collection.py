@@ -181,6 +181,108 @@ def enqueue_next(track_id: int, conn) -> dict[str, Any]:
             "artist": row["artist"], "title": row["title"]}
 
 
+def enqueue_tracks(
+    track_ids: list[int],
+    conn,
+    position: str = "end",
+    queue_name: str = "Karaoke: Dashboard Queue",
+) -> dict[str, Any]:
+    """Insert or append multiple tracks into the active karaoke queue.
+
+    Uses ``active_queue_state`` (the single source of truth for the dashboard's
+    Up Next panel and queue follower), creating a fresh queue when none exists.
+    """
+    clean_ids = [int(tid) for tid in track_ids if tid is not None]
+    built = rows_for(clean_ids, conn)
+    if not built:
+        return {"ok": False, "status": "error", "message": "No matching tracks found in library"}
+
+    pos = "next" if (position or "").strip().lower() == "next" else "end"
+    active = localcache.load_active_queue(conn=conn)
+    if not active or not active.get("rows"):
+        localcache.save_active_queue(
+            COLLECTION_QUEUE_ID, queue_name, built, current_index=0, conn=conn
+        )
+        for idx, row in enumerate(built):
+            localcache.record_queue_event(
+                "enqueued",
+                track_id=row["track_id"],
+                artist=row["artist"],
+                title=row["title"],
+                queue_index=idx,
+                metadata={"source": "ai-dj-queue"},
+                conn=conn,
+            )
+        return {
+            "ok": True,
+            "status": "queued",
+            "created": True,
+            "added_count": len(built),
+            "track_count": len(built),
+            "queue_name": queue_name,
+            "tracks": [
+                {"track_id": r["track_id"], "artist": r["artist"], "title": r["title"], "position": i + 1}
+                for i, r in enumerate(built)
+            ],
+        }
+
+    rows = list(active["rows"])
+    cur_idx = int(active.get("current_index", 0) or 0)
+    upcoming_ids = {int(r["track_id"]) for r in rows[cur_idx:] if r.get("track_id") is not None}
+    to_add = [r for r in built if int(r["track_id"]) not in upcoming_ids]
+    if not to_add:
+        return {
+            "ok": True,
+            "status": "queued",
+            "created": False,
+            "added_count": 0,
+            "duplicate": True,
+            "track_count": len(rows),
+            "queue_name": active.get("name", ""),
+            "tracks": [],
+        }
+
+    if pos == "next":
+        insert_at = min(len(rows), max(0, cur_idx) + 1)
+        for offset, row in enumerate(to_add):
+            rows.insert(insert_at + offset, row)
+        start_pos = insert_at
+    else:
+        start_pos = len(rows)
+        rows.extend(to_add)
+
+    q_id = active.get("playlist_id") or COLLECTION_QUEUE_ID
+    q_name = active.get("name") or queue_name
+    localcache.save_active_queue(q_id, q_name, rows, current_index=cur_idx, conn=conn)
+    for offset, row in enumerate(to_add):
+        localcache.record_queue_event(
+            "enqueued",
+            track_id=row["track_id"],
+            artist=row["artist"],
+            title=row["title"],
+            queue_index=start_pos + offset,
+            metadata={"source": "ai-dj-queue"},
+            conn=conn,
+        )
+    return {
+        "ok": True,
+        "status": "queued",
+        "created": False,
+        "added_count": len(to_add),
+        "track_count": len(rows),
+        "queue_name": q_name,
+        "tracks": [
+            {
+                "track_id": r["track_id"],
+                "artist": r["artist"],
+                "title": r["title"],
+                "position": start_pos + offset + 1,
+            }
+            for offset, r in enumerate(to_add)
+        ],
+    }
+
+
 def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
                      add: int = AUTOPILOT_ADD) -> dict[str, Any]:
     """Append fitting tracks when autopilot is on and the queue is near its end.

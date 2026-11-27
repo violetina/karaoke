@@ -462,7 +462,9 @@ def get_stage_state() -> dict[str, Any]:
         try:
             with localcache.connect() as conn:
                 g = localcache.genre_for(track_id, conn)
-                if g:
+                if isinstance(g, dict):
+                    genre = str(g.get("genre") or "")
+                elif g:
                     genre = str(g)
         except Exception:
             pass
@@ -1384,15 +1386,73 @@ def render_mood_html() -> str:
     }
 
     #mood-canvas {
-      width: 76vmin;
-      height: 76vmin;
-      max-width: 640px;
-      max-height: 640px;
+      width: min(86vw, 1180px);
+      height: auto;
+      aspect-ratio: 16 / 9;
+      max-height: 76vh;
+      border-radius: 12px;
+      background: #070910;
+      display: block;
+    }
+    #mood-canvas.mode-mosaic {
+      width: min(76vmin, 640px);
+      height: min(76vmin, 640px);
+      aspect-ratio: 1 / 1;
       image-rendering: pixelated;
       image-rendering: crisp-edges;
-      border-radius: 12px;
-      background: #000;
-      display: block;
+    }
+
+    #mode-btn {
+      cursor: pointer;
+      transition: all 0.2s ease;
+      color: #fff;
+      pointer-events: auto;
+      user-select: none;
+    }
+    #mode-btn:hover {
+      border-color: var(--accent);
+      background: rgba(0, 242, 254, 0.15);
+      transform: translateY(-1px);
+    }
+
+    /* In-canvas floating mode switch pill (visible in both /mood and /mood/embedded) */
+    #canvas-mode-switch {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 12;
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      background: rgba(6, 8, 15, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      backdrop-filter: blur(8px);
+      pointer-events: auto;
+      user-select: none;
+    }
+    .cmode-pill {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.65);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 4px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 0.16s ease;
+    }
+    .cmode-pill:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.10);
+    }
+    .cmode-pill.active {
+      color: #06080d;
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(0, 242, 254, 0.45);
     }
 
     /* Chord under the playhead, laid over the image. HTML rather than drawn
@@ -1562,11 +1622,19 @@ def render_mood_html() -> str:
         <div class="vu-bar"></div>
       </div>
     </div>
+    <div id="mode-btn" class="hud-pill" onclick="toggleVisualMode()">
+      <span id="mode-label">MODE: RINGS [M]</span>
+    </div>
   </div>
 
   <div id="stage-container">
     <div id="canvas-wrap">
-      <canvas id="mood-canvas" width="64" height="64"></canvas>
+      <canvas id="mood-canvas" width="1280" height="720"></canvas>
+      <div id="canvas-mode-switch" role="group" aria-label="Visualizer mode">
+        <button type="button" class="cmode-pill" data-mode="mix" onclick="setVisualMode('mix')" title="Blend pixel mosaic + generative rings [M]">MIX</button>
+        <button type="button" class="cmode-pill" data-mode="rings" onclick="setVisualMode('rings')" title="Generative mood rings &amp; chord wave [M]">RINGS</button>
+        <button type="button" class="cmode-pill" data-mode="mosaic" onclick="setVisualMode('mosaic')" title="Classic 64x64 pixel animation [M]">PIXELS</button>
+      </div>
       <div id="chord-overlay" aria-live="off">
         <div id="chord-name"></div>
         <div id="chord-roman"></div>
@@ -1744,6 +1812,7 @@ def render_mood_html() -> str:
     let currentState = null;
     let lastEventTime = performance.now();
     let currentMood = 'neutral';
+    let currentFeeling = 'neutral';
     let currentArtUrl = '';
     let currentLoadSeed = Date.now();
     let lastBeatCount = 0;
@@ -1759,6 +1828,591 @@ def render_mood_html() -> str:
     coverBuffer.width = GRID_SIZE; coverBuffer.height = GRID_SIZE;
     const coverCtx = coverBuffer.getContext('2d');
     let coverLoaded = false;
+
+    // --- Visual Mode Switch (MIX: Pixels+Rings, RINGS: Generative, MOSAIC: Classic 64x64 Pixels) ---
+    const IS_EMBEDDED = window.location.pathname.includes('embedded');
+    const VALID_MODES = ['mix', 'rings', 'mosaic'];
+    const urlMode = new URLSearchParams(window.location.search).get('mode');
+    let savedMode = null;
+    try { savedMode = localStorage.getItem('karaoke_mood_visual_mode'); } catch (e) {}
+    let visualMode = VALID_MODES.includes(urlMode)
+      ? urlMode
+      : (VALID_MODES.includes(savedMode) ? savedMode : 'mix');
+    const modeLabel = document.getElementById('mode-label');
+
+    // Offscreen 64x64 mosaic buffer so MIX mode can composite crisp pixel art with rings
+    const mosaicBuffer = document.createElement('canvas');
+    mosaicBuffer.width = 64;
+    mosaicBuffer.height = 64;
+    const mosaicCtx = mosaicBuffer.getContext('2d');
+
+    function syncCanvasGeometry() {
+      if (!moodCanvas) return;
+      if (visualMode === 'mosaic') {
+        if (moodCanvas.width !== 64 || moodCanvas.height !== 64) {
+          moodCanvas.width = 64;
+          moodCanvas.height = 64;
+        }
+        moodCanvas.style.imageRendering = 'pixelated';
+        moodCanvas.classList.add('mode-mosaic');
+        return;
+      }
+      moodCanvas.style.imageRendering = 'auto';
+      moodCanvas.classList.remove('mode-mosaic');
+      // Match internal buffer aspect ratio to the displayed CSS box so circles are never squashed
+      let targetW = IS_EMBEDDED ? 720 : 1280;
+      let targetH = 720;
+      const rect = moodCanvas.getBoundingClientRect();
+      if (rect && rect.width > 40 && rect.height > 40) {
+        const aspect = rect.width / rect.height;
+        targetH = 720;
+        targetW = Math.max(360, Math.min(1920, Math.round(720 * aspect)));
+      }
+      if (Math.abs(moodCanvas.width - targetW) > 4 || Math.abs(moodCanvas.height - targetH) > 4) {
+        moodCanvas.width = targetW;
+        moodCanvas.height = targetH;
+      }
+    }
+
+    function applyVisualModeUI() {
+      const labels = { mix: 'MODE: MIX [M]', rings: 'MODE: RINGS [M]', mosaic: 'MODE: PIXELS [M]' };
+      if (modeLabel) {
+        modeLabel.textContent = labels[visualMode] || 'MODE: MIX [M]';
+      }
+      document.querySelectorAll('.cmode-pill').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-mode') === visualMode);
+      });
+      syncCanvasGeometry();
+    }
+
+    window.addEventListener('resize', () => {
+      if (visualMode !== 'mosaic') syncCanvasGeometry();
+    });
+
+    function setVisualMode(mode) {
+      if (!VALID_MODES.includes(mode)) return;
+      visualMode = mode;
+      try { localStorage.setItem('karaoke_mood_visual_mode', visualMode); } catch (e) {}
+      applyVisualModeUI();
+    }
+
+    function toggleVisualMode() {
+      const idx = VALID_MODES.indexOf(visualMode);
+      setVisualMode(VALID_MODES[(idx + 1) % VALID_MODES.length]);
+    }
+
+    window.addEventListener('storage', (e) => {
+      if (e.key === 'karaoke_mood_visual_mode' && VALID_MODES.includes(e.newValue)) {
+        visualMode = e.newValue;
+        applyVisualModeUI();
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'm' || e.key === 'M') {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+        toggleVisualMode();
+      }
+    });
+
+    // --- Generative Mood-Still Color & Harmonic Math ---
+    const NOTE_SEMITONES = {
+      'c': 0, 'c#': 1, 'db': 1,
+      'd': 2, 'd#': 3, 'eb': 3,
+      'e': 4, 'fb': 4, 'e#': 5,
+      'f': 5, 'f#': 6, 'gb': 6,
+      'g': 7, 'g#': 8, 'ab': 8,
+      'a': 9, 'a#': 10, 'bb': 10,
+      'b': 11, 'cb': 11, 'b#': 0
+    };
+
+    function parsePitchClass(text) {
+      if (!text) return null;
+      const m = String(text).match(new RegExp('^\\s*([A-Ga-g])([#b♯♭]?)'));
+      if (!m) return null;
+      const note = m[1].toLowerCase();
+      const acc = (m[2] || '').replace('♯', '#').replace('♭', 'b');
+      const key = note + acc;
+      return (key in NOTE_SEMITONES) ? NOTE_SEMITONES[key] : (note in NOTE_SEMITONES ? NOTE_SEMITONES[note] : null);
+    }
+
+    function keyHueFromStr(keyStr) {
+      if (!keyStr) return 0.68; // G# minor / 1A default
+      const pc = parsePitchClass(keyStr);
+      if (pc === null) return 0.68;
+      return ((pc % 12) + 12) % 12 / 12.0;
+    }
+
+    function isMinorKey(keyStr) {
+      if (!keyStr) return true;
+      const s = String(keyStr).toLowerCase();
+      if (s.includes('minor')) return true;
+      if (s.includes('major')) return false;
+      return new RegExp('^\\s*[a-g][#b]?m\\b').test(s);
+    }
+
+    function moodHueShift(mood) {
+      if (!mood) return 0.0;
+      const shifts = {
+        'tense': 0.06, 'energetic': 0.09, 'angry': 0.15, 'aggressive': 0.14,
+        'sad': -0.06, 'melancholy': -0.04, 'mournful': -0.05,
+        'calm': 0.01, 'peaceful': 0.02, 'dreamy': 0.04, 'tender': 0.03,
+        'happy': 0.08, 'upbeat': 0.07, 'playful': 0.06, 'energized': 0.09
+      };
+      return shifts[String(mood).toLowerCase().trim()] || 0.0;
+    }
+
+    function chordHueOffset(roman) {
+      if (!roman) return 0.0;
+      const base = String(roman).replace(/[b#m°769]/gi, '').trim().toUpperCase();
+      const shifts = { 'I': 0.0, 'II': -0.02, 'III': -0.01, 'IV': 0.04, 'V': 0.06, 'VI': -0.02, 'VII': 0.08 };
+      return shifts[base] || 0.0;
+    }
+
+    function chordFrequency(name) {
+      if (!name) return 261.63;
+      let pc = parsePitchClass(name);
+      if (pc === null) pc = 0;
+      return 440.0 * Math.pow(2.0, (pc - 9.0) / 12.0);
+    }
+
+    function progressionShape(chordName) {
+      if (!chordName) return { mode: 'stable', rays: 0.0, ringMod: 0.0, wave: 'sine' };
+      const n = String(chordName).trim().toLowerCase();
+      if (n.includes('°') || n.includes('dim')) {
+        return { mode: 'jagged', rays: 0.14, ringMod: 0.14, wave: 'sawtooth' };
+      }
+      if (n.includes('7') || n.includes('9') || n.includes('11') || n.includes('13')) {
+        if (n.includes('m') && !n.includes('maj')) {
+          return { mode: 'sway', rays: 0.04, ringMod: 0.05, wave: 'sine' };
+        }
+        return { mode: 'rich', rays: 0.08, ringMod: 0.06, wave: 'sawtooth' };
+      }
+      if (n.includes('m') && !n.includes('maj')) {
+        return { mode: 'sway', rays: 0.03, ringMod: 0.05, wave: 'sine' };
+      }
+      return { mode: 'stable', rays: 0.0, ringMod: 0.0, wave: 'flat' };
+    }
+
+    function hsvToRgb(h, s, v) {
+      h = ((h % 1.0) + 1.0) % 1.0;
+      s = Math.min(1.0, Math.max(0.0, s));
+      v = Math.min(1.0, Math.max(0.0, v));
+      if (s === 0) {
+        const c = Math.round(v * 255);
+        return [c, c, c];
+      }
+      const f = (h * 6.0) - Math.floor(h * 6.0);
+      const i = Math.floor(h * 6.0) % 6;
+      const p = v * (1.0 - s);
+      const q = v * (1.0 - s * f);
+      const t = v * (1.0 - s * (1.0 - f));
+      const map = [
+        [v, t, p], [q, v, p], [p, v, t],
+        [p, q, v], [t, p, v], [v, p, q]
+      ][i];
+      return [Math.round(map[0] * 255), Math.round(map[1] * 255), Math.round(map[2] * 255)];
+    }
+
+    function rgbaStr(rgb, a) {
+      return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${Math.min(1, Math.max(0, a)).toFixed(3)})`;
+    }
+
+    // Deterministic 36 ray angles (seeded)
+    const RAY_ANGLES = (() => {
+      const out = [];
+      let s = 1337;
+      for (let i = 0; i < 36; i++) {
+        s = (s * 16807) % 2147483647;
+        out.push(((s - 1) / 2147483646) * Math.PI * 2);
+      }
+      return out;
+    })();
+
+    // Smoothed animation state (interpolated at 60 FPS so chord/mood shifts glide)
+    let smoothHue = 0.68;
+    let smoothEnergy = 0.55;
+    let smoothFreq = 261.63;
+    let smoothRingMod = 0.0;
+    let smoothRayDensity = 0.0;
+
+    function lerpAngleHue(curr, target, t) {
+      let diff = ((target - curr + 0.5) % 1.0 + 1.0) % 1.0 - 0.5;
+      return ((curr + diff * t) % 1.0 + 1.0) % 1.0;
+    }
+
+    function activeHighlightedWord(state, posS) {
+      if (!state || !Array.isArray(state.lines)) return '';
+      const idx = state.active_line_index;
+      if (typeof idx !== 'number' || idx < 0 || idx >= state.lines.length) return '';
+      const line = state.lines[idx];
+      if (!line || !line.text) return '';
+      const stripRe = new RegExp('^[|·•\\-–—,:;.!?()\\[\\]"\']+|[|·•\\-–—,:;.!?()\\[\\]"\']+$', 'g');
+      const cleanWord = (w) => String(w || '').replace(stripRe, '');
+      const words = String(line.text).trim().split(new RegExp('\\s+')).map(cleanWord).filter(w => w.length >= 2);
+      if (!words.length) return '';
+      const times = Array.isArray(line.words) ? line.words : [];
+      if (times.length === words.length) {
+        let wIdx = 0;
+        for (let i = 0; i < times.length; i++) {
+          if (posS >= times[i]) wIdx = i;
+        }
+        return words[wIdx] || '';
+      }
+      const t0 = typeof line.time === 'number' ? line.time : posS;
+      const t1 = typeof line.end === 'number' && line.end > t0 ? line.end : (t0 + 3.5);
+      const frac = Math.min(0.999, Math.max(0.0, (posS - t0) / Math.max(0.2, t1 - t0)));
+      return words[Math.floor(frac * words.length)] || '';
+    }
+
+    function normalizeGenreStr(g) {
+      if (!g) return '';
+      if (typeof g === 'object') return String(g.genre || '');
+      const s = String(g).trim();
+      if (s.startsWith('{') && s.includes("'genre'")) {
+        const m = s.match(new RegExp("'genre'\\s*:\\s*'([^']+)'"));
+        return m ? m[1] : '';
+      }
+      return s;
+    }
+
+    function renderGenerativeRingsFrame(ctx, W, H, posS, beatProgress, beatPulse, soundPower) {
+      const st = currentState || {};
+      const isEmbedded = H === W || window.location.pathname.includes('embedded');
+      const rawEnergy = (st.energy !== null && st.energy !== undefined) ? Number(st.energy) : 0.55;
+      const bpm = Number(st.bpm) || 120.0;
+      const keyStr = st.key || 'G# minor';
+      const minor = isMinorKey(keyStr);
+      const moodStr = st.mood_feeling || st.mood || currentMood || 'neutral';
+      const chordNameStr = st.chord || '';
+      const chordRomanStr = st.chord_roman || '';
+      const shape = progressionShape(chordNameStr);
+
+      const targetHue = (keyHueFromStr(keyStr) + moodHueShift(moodStr) + chordHueOffset(chordRomanStr) + 1.0) % 1.0;
+      const targetFreq = chordFrequency(chordNameStr || chordRomanStr || keyStr);
+
+      // Smooth 60 FPS state interpolation (~250ms time constant)
+      smoothHue = lerpAngleHue(smoothHue, targetHue, 0.08);
+      smoothEnergy = smoothEnergy + (rawEnergy - smoothEnergy) * 0.08;
+      smoothFreq = smoothFreq + (targetFreq - smoothFreq) * 0.10;
+      smoothRingMod = smoothRingMod + (shape.ringMod - smoothRingMod) * 0.10;
+      smoothRayDensity = smoothRayDensity + (shape.rays - smoothRayDensity) * 0.10;
+
+      const energy = Math.min(1.0, Math.max(0.15, smoothEnergy + (micActive ? roomVibeLevel * 0.25 : 0)));
+      let fieldSat = Math.min(0.95, Math.max(0.22, 0.42 + 0.36 * energy));
+      let fieldVal = Math.min(0.65, Math.max(0.14, 0.18 + 0.20 * energy));
+      if (minor) {
+        fieldSat *= 0.88;
+        fieldVal *= 0.84;
+      }
+
+      const cx = W * 0.5;
+      const cy = isEmbedded ? H * 0.5 : H * 0.44;
+      const minDim = Math.min(W, H);
+      const maxR = Math.max(W, H) * 0.72;
+
+      // 1) Key-tinted radial background field
+      const colCore = hsvToRgb(smoothHue, Math.min(0.90, fieldSat * 1.15), Math.min(0.42, fieldVal * 1.25));
+      const colMid = hsvToRgb(smoothHue + 0.03, fieldSat, fieldVal * 0.78);
+      const colDeep = hsvToRgb(smoothHue - 0.04, fieldSat * 0.85, Math.max(0.06, fieldVal * 0.36));
+
+      const bgCore = [
+        Math.round(28 * 0.55 + colCore[0] * 0.45),
+        Math.round(22 * 0.55 + colCore[1] * 0.45),
+        Math.round(62 * 0.55 + colCore[2] * 0.45)
+      ];
+      const bgMid = [
+        Math.round(16 * 0.55 + colMid[0] * 0.45),
+        Math.round(18 * 0.55 + colMid[1] * 0.45),
+        Math.round(38 * 0.55 + colMid[2] * 0.45)
+      ];
+      const bgDeep = [
+        Math.round(7 * 0.65 + colDeep[0] * 0.35),
+        Math.round(9 * 0.65 + colDeep[1] * 0.35),
+        Math.round(16 * 0.65 + colDeep[2] * 0.35)
+      ];
+
+      const bgGrad = ctx.createRadialGradient(cx, cy, 4, cx, cy, maxR);
+      bgGrad.addColorStop(0.0, rgbaStr(bgCore, 1.0));
+      bgGrad.addColorStop(0.52, rgbaStr(bgMid, 1.0));
+      bgGrad.addColorStop(1.0, rgbaStr(bgDeep, 1.0));
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // 1b) In MIX mode, composite the 64x64 sound-reactive pixel mosaic inside the ring field
+      if (visualMode === 'mix' && (feelingLoaded || coverLoaded)) {
+        ctx.save();
+        const mosRadius = minDim * (isEmbedded ? 0.47 : 0.43);
+        ctx.beginPath();
+        ctx.arc(cx, cy, mosRadius, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.imageSmoothingEnabled = false;
+        ctx.globalAlpha = Math.min(0.76, 0.46 + soundPower * 0.28);
+        const mosSize = mosRadius * 2.0;
+        ctx.drawImage(mosaicBuffer, cx - mosRadius, cy - mosRadius, mosSize, mosSize);
+        // Soft radial vignette at the mosaic perimeter so pixel tiles blend into the dark field
+        const edgeGrad = ctx.createRadialGradient(cx, cy, mosRadius * 0.48, cx, cy, mosRadius);
+        edgeGrad.addColorStop(0.0, 'rgba(7, 9, 16, 0.0)');
+        edgeGrad.addColorStop(0.75, 'rgba(7, 9, 16, 0.22)');
+        edgeGrad.addColorStop(1.0, rgbaStr(bgMid, 0.88));
+        ctx.globalAlpha = 1.0;
+        ctx.fillStyle = edgeGrad;
+        ctx.fillRect(cx - mosRadius, cy - mosRadius, mosSize, mosSize);
+        ctx.restore();
+      }
+
+      // Continuous beat phase & surge
+      const ringFreq = (0.6 + (bpm / 120.0)) + smoothRingMod * 0.8;
+      const phase = (posS * (bpm / 60.0) * 0.32) % 1000.0;
+      const phaseR = phase * ringFreq / 1.6;
+      const surge = Math.min(1.0, 0.52 + 0.48 * Math.max(energy * 0.75, beatPulse * 0.85 + (micActive ? micPeakImpulse * 0.5 : 0)));
+
+      // 2) Radiating starburst rays
+      const colRay = hsvToRgb(smoothHue + 0.04, Math.min(0.85, fieldSat * 0.95), Math.min(0.78, 0.38 + 0.34 * energy));
+      const rayLenBase = minDim * (0.44 + 0.10 * surge + smoothRayDensity * 0.25);
+      const rayAlphaBase = 0.045 + 0.045 * energy + smoothRayDensity * 0.08;
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (let i = 0; i < RAY_ANGLES.length; i++) {
+        const a = RAY_ANGLES[i] + Math.sin(posS * 0.18 + i) * 0.025;
+        const breathe = 0.82 + 0.18 * Math.sin(phaseR * 1.4 + i * 0.7);
+        const rLen = rayLenBase * breathe;
+        const x2 = cx + Math.cos(a) * rLen;
+        const y2 = cy + Math.sin(a) * rLen;
+        const rGrad = ctx.createLinearGradient(cx, cy, x2, y2);
+        rGrad.addColorStop(0.0, rgbaStr(colRay, rayAlphaBase * 1.4));
+        rGrad.addColorStop(0.6, rgbaStr(colRay, rayAlphaBase * 0.6));
+        rGrad.addColorStop(1.0, rgbaStr(colRay, 0.0));
+        ctx.strokeStyle = rGrad;
+        ctx.lineWidth = (minDim / 1080) * (10 + (i % 3) * 4);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 3) Off-center orbiting crimson/terracotta tension flare
+      const scaleFactor = minDim / 1080.0;
+      const flareOrbitX = cx + (115.0 * scaleFactor) * Math.cos(phaseR * 0.85);
+      const flareOrbitY = cy + (95.0 * scaleFactor) * Math.sin(phaseR * 0.95);
+      const flareSpotR = (235.0 * scaleFactor) * (0.9 + 0.2 * surge);
+      const colFlare = [255, 92, 84];
+      const flareSpotGrad = ctx.createRadialGradient(flareOrbitX, flareOrbitY, 2, flareOrbitX, flareOrbitY, flareSpotR);
+      flareSpotGrad.addColorStop(0.0, rgbaStr(colFlare, 0.36 + 0.22 * energy));
+      flareSpotGrad.addColorStop(0.45, rgbaStr(colFlare, 0.16 + 0.12 * energy));
+      flareSpotGrad.addColorStop(1.0, rgbaStr(colFlare, 0.0));
+      ctx.fillStyle = flareSpotGrad;
+      ctx.beginPath();
+      ctx.arc(flareOrbitX, flareOrbitY, flareSpotR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 4) 9 Concentric circular rings + beat-flare halos
+      const colRing = hsvToRgb(smoothHue + 0.07, Math.min(0.92, fieldSat * 1.15), Math.min(0.84, 0.48 + 0.34 * energy));
+      const colPulse = hsvToRgb(smoothHue - 0.08, Math.min(0.88, 0.55 + 0.30 * energy), Math.min(0.94, 0.62 + 0.28 * energy));
+      const RING_CNT = 9;
+      const stepScale = (minDim * 0.050) * (1.0 + 0.25 * smoothRingMod);
+
+      for (let i = RING_CNT - 1; i >= 0; i--) {
+        const baseR = (i + 1) * stepScale;
+        const arg = phaseR * Math.PI * 1.35 - i * (0.85 + smoothRingMod);
+        let osc = 0.74 + 0.26 * Math.sin(arg);
+        if (shape.wave === 'sawtooth') {
+          const t = ((arg % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (2 * Math.PI);
+          osc = 0.72 + 0.28 * (0.65 * t + 0.35 * Math.sin(arg));
+        } else if (shape.wave === 'triangle') {
+          const t = ((arg % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (2 * Math.PI);
+          const tri = 1.0 - 4.0 * Math.abs(t - 0.5);
+          osc = 0.72 + 0.28 * (tri * 0.5 + 0.5);
+        } else if (shape.wave === 'flat') {
+          osc = 0.78 + 0.12 * Math.sin(arg * 0.7 + i * 0.9);
+        }
+
+        const r = Math.max(4, baseR * osc * (1.0 + beatPulse * 0.04));
+        const bw = (9.0 + (i % 4) * 3.0) * scaleFactor;
+        const weight = ((RING_CNT + 1 - i) / RING_CNT) * (0.55 + 0.35 * surge);
+        const flareW = 0.48 * (0.6 + 0.4 * surge) * (0.5 + 0.5 * Math.cos(i * 2.3 + phaseR * 2.6));
+
+        // Wide warm beat-flare halo
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = rgbaStr(colFlare, Math.min(0.55, flareW * (0.35 + 0.25 * energy)));
+        ctx.lineWidth = bw * 4.2;
+        ctx.stroke();
+
+        // Main key-coloured ring band
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = rgbaStr(colRing, Math.min(0.75, weight * (0.48 + 0.30 * energy)));
+        ctx.lineWidth = bw * 1.9;
+        ctx.stroke();
+
+        // Crisp inner pulse highlight
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = rgbaStr(colPulse, Math.min(0.65, weight * flareW * 0.75));
+        ctx.lineWidth = Math.max(1.5, bw * 0.75);
+        ctx.stroke();
+      }
+
+      // 5) Central glowing orb & white-hot core disc
+      const coreR = (142.0 * scaleFactor) * (0.52 + 0.48 * surge);
+      const glowR = coreR * 3.3;
+      const colGlow = [235, 170, 210];
+      const colCoreHot = [255, 238, 210];
+
+      const glowGrad = ctx.createRadialGradient(cx, cy, 1, cx, cy, glowR);
+      glowGrad.addColorStop(0.0, rgbaStr(colGlow, 0.42 + 0.18 * energy));
+      glowGrad.addColorStop(0.45, rgbaStr(colGlow, 0.16 + 0.10 * energy));
+      glowGrad.addColorStop(1.0, rgbaStr(colGlow, 0.0));
+      ctx.fillStyle = glowGrad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
+      ctx.fill();
+
+      const coreGrad = ctx.createRadialGradient(cx, cy, 1, cx, cy, coreR);
+      coreGrad.addColorStop(0.0, rgbaStr([255, 248, 232], 0.92));
+      coreGrad.addColorStop(0.42, rgbaStr(colCoreHot, 0.65 + 0.20 * energy));
+      coreGrad.addColorStop(1.0, rgbaStr(colCoreHot, 0.0));
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 6) Harmonic chord waveform ribbon across the frame
+      if (chordNameStr || chordRomanStr || st.status === 'Playing') {
+        const waveHue = ((smoothFreq / 440.0) + chordHueOffset(chordRomanStr) + 1.0) % 1.0;
+        const waveRgb = hsvToRgb(waveHue, 0.88, 0.95);
+        const playheadX = W * (0.5 + 0.36 * Math.sin(posS * 0.55));
+        const cycles = 3.5 + (smoothFreq / 110.0) * 1.8;
+        const amp = H * (0.042 + 0.024 * surge);
+
+        ctx.save();
+        // Outer neon halo ribbon
+        ctx.beginPath();
+        const stepX = Math.max(3, Math.floor(W / 280));
+        for (let x = 0; x <= W; x += stepX) {
+          const ph = (x / W) * cycles * Math.PI * 2.0 - posS * 3.0;
+          let osc = Math.sin(ph) + 0.25 * Math.sin(ph * 2.0 + 0.6);
+          if (shape.wave === 'sawtooth') {
+            // Smooth 3-harmonic Fourier sawtooth so high-tension chords look edgy without vertical glitches
+            osc = 0.65 * Math.sin(ph) - 0.30 * Math.sin(2.0 * ph) + 0.16 * Math.sin(3.0 * ph);
+          } else if (shape.wave === 'triangle') {
+            const t = ((ph % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (2 * Math.PI);
+            osc = 1.0 - 4.0 * Math.abs(t - 0.5);
+          }
+          const dPlay = (x - playheadX) / (W * 0.42);
+          const env = 0.48 + 0.52 * Math.exp(-(dPlay * dPlay));
+          const y = cy + amp * osc * env;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = rgbaStr(waveRgb, 0.26);
+        ctx.lineWidth = 10 * scaleFactor;
+        ctx.stroke();
+
+        // Inner bright ribbon core
+        ctx.strokeStyle = rgbaStr(waveRgb, 0.82);
+        ctx.lineWidth = 2.6 * scaleFactor;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 7) Soft lower vignette + in-canvas title card on full /mood page
+      if (!isEmbedded) {
+        const vigGrad = ctx.createLinearGradient(0, H * 0.56, 0, H);
+        vigGrad.addColorStop(0.0, 'rgba(7, 9, 16, 0.0)');
+        vigGrad.addColorStop(1.0, 'rgba(7, 9, 16, 0.55)');
+        ctx.fillStyle = vigGrad;
+        ctx.fillRect(0, H * 0.56, W, H * 0.44);
+
+        const titleText = String(st.title || 'KARAOKE STANDBY').toUpperCase();
+        const artistText = String(st.artist || '');
+        const hiWord = activeHighlightedWord(st, posS).toUpperCase();
+        const cleanGenre = normalizeGenreStr(st.genre);
+        const metaParts = [];
+        if (artistText) metaParts.push(artistText);
+        if (st.bpm) metaParts.push(`${Math.round(st.bpm)} BPM`);
+        if (st.key) metaParts.push(String(st.key));
+        if (cleanGenre) metaParts.push(cleanGenre.toLowerCase());
+        if (st.energy !== null && st.energy !== undefined) metaParts.push(`energy ${Math.round(st.energy * 100)}%`);
+        if (chordNameStr) metaParts.push(chordRomanStr && chordRomanStr !== chordNameStr ? `${chordNameStr} (${chordRomanStr})` : chordNameStr);
+        const metaText = metaParts.join('  ·  ');
+
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        let titleSize = Math.round(52 * scaleFactor);
+        ctx.font = `800 ${titleSize}px 'Outfit', sans-serif`;
+        const maxTextW = W * 0.78;
+        while (titleSize > 26 && ctx.measureText(titleText).width > maxTextW) {
+          titleSize -= 4;
+          ctx.font = `800 ${titleSize}px 'Outfit', sans-serif`;
+        }
+        const tw = ctx.measureText(titleText).width;
+
+        const wordSize = Math.round(25 * scaleFactor);
+        let metaSize = Math.round(18 * scaleFactor);
+        ctx.font = `600 ${metaSize}px 'JetBrains Mono', monospace`;
+        while (metaText && metaSize > 12 && ctx.measureText(metaText).width > maxTextW) {
+          metaSize -= 2;
+          ctx.font = `600 ${metaSize}px 'JetBrains Mono', monospace`;
+        }
+        const mw = metaText ? ctx.measureText(metaText).width : 0;
+
+        const panelPadX = 48 * scaleFactor;
+        const hasSubRow = Boolean(hiWord || metaText);
+        const panelH = (hiWord && metaText ? 150 : (hasSubRow ? 116 : 82)) * scaleFactor;
+        const panelW = Math.min(W - 60, Math.max(W * 0.44, Math.max(tw, mw) + panelPadX * 2));
+        const panelX = (W - panelW) * 0.5;
+        const panelY = H - panelH - 22 * scaleFactor;
+
+        // Translucent rounded panel
+        ctx.fillStyle = 'rgba(6, 7, 15, 0.64)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(panelX, panelY, panelW, panelH, 16 * scaleFactor);
+        } else {
+          ctx.rect(panelX, panelY, panelW, panelH);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Title line (vertically centered if no sub-rows)
+        let curY = hasSubRow
+          ? (panelY + (hiWord && metaText ? 36 : 42) * scaleFactor)
+          : (panelY + panelH * 0.5);
+        ctx.font = `800 ${titleSize}px 'Outfit', sans-serif`;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+        ctx.fillText(titleText, cx + 2, curY + 3);
+        ctx.fillStyle = 'rgb(255, 238, 210)';
+        ctx.fillText(titleText, cx, curY);
+
+        // Active lyric word (if any)
+        if (hiWord) {
+          curY = panelY + (metaText ? 82 : 80) * scaleFactor;
+          ctx.font = `700 ${wordSize}px 'Outfit', sans-serif`;
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillText(hiWord, cx + 2, curY + 2);
+          ctx.fillStyle = 'rgb(218, 192, 242)';
+          ctx.fillText(hiWord, cx, curY);
+        }
+
+        // Metadata row
+        if (metaText) {
+          curY = panelY + panelH - 26 * scaleFactor;
+          ctx.font = `500 ${metaSize}px 'JetBrains Mono', monospace`;
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillText(metaText, cx + 2, curY + 2);
+          ctx.fillStyle = 'rgb(202, 192, 236)';
+          ctx.fillText(metaText, cx, curY);
+        }
+        ctx.restore();
+      }
+    }
 
     // Stable random seed & pseudo-random permutation table for album cover pixels
     let pixelPermutation = new Int32Array(GRID_SIZE * GRID_SIZE);
@@ -1794,7 +2448,6 @@ def render_mood_html() -> str:
     // Load feeling image (background)
     function loadFeelingImage(mood) {
       const img = new Image();
-      img.crossOrigin = 'Anonymous';
       img.onload = () => {
         feelingCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
         feelingCtx.drawImage(img, 0, 0, GRID_SIZE, GRID_SIZE);
@@ -1807,7 +2460,6 @@ def render_mood_html() -> str:
     // Load album cover (foreground pixels)
     function loadCoverImage(mood, artUrl) {
       const img = new Image();
-      img.crossOrigin = 'Anonymous';
       img.onload = () => {
         coverCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
         // Draw into 64x64 buffer with pixelated quality
@@ -1855,13 +2507,16 @@ def render_mood_html() -> str:
         }
 
         const mood = (data.mood || 'neutral').toLowerCase();
+        const feeling = (data.mood_feeling || mood).toLowerCase();
         const artUrl = data.art_url || '';
         const title = data.title || '';
         const artist = data.artist || '';
 
         // A borderline stretch is shown as both moods rather than a guess.
-        // The feeling ("FRUSTRATED", "LONGING") when the timeline has one; the
-        // quadrant mood still picks the images and colours.
+        // The feeling ("FRUSTRATED", "LONGING") when the timeline has one;
+        // loadFeelingImage uses the specific feeling (which has its own pixel
+        // art in static/images/moods/<feeling>/), while loadCoverImage uses
+        // the feeling/mood target in moodart.MOOD_TARGETS.
         const word = (data.mood_feeling || mood).toUpperCase();
         const moodText = (data.mood_feeling || !data.mood_alt ? word : `${word} ↔ ${data.mood_alt.toUpperCase()}`)
           + (data.mood_contrast ? ` · ${data.mood_contrast}` : '');
@@ -1882,6 +2537,10 @@ def render_mood_html() -> str:
           currentMood = mood;
           needReload = true;
         }
+        if (feeling !== currentFeeling) {
+          currentFeeling = feeling;
+          needReload = true;
+        }
         if (artUrl !== currentArtUrl) {
           currentArtUrl = artUrl;
           needReload = true;
@@ -1894,13 +2553,90 @@ def render_mood_html() -> str:
         }
 
         if (needReload || !feelingLoaded || !coverLoaded) {
-          loadFeelingImage(currentMood);
-          loadCoverImage(currentMood, currentArtUrl);
+          loadFeelingImage(currentFeeling);
+          loadCoverImage(currentFeeling, currentArtUrl);
         }
       } catch (e) {
         console.error('SSE parse error:', e);
       }
     };
+
+    function updateMosaicBuffer(beatPulse, soundPower) {
+      if (!feelingLoaded && !coverLoaded) return false;
+
+      const feelingImgData = feelingLoaded
+        ? feelingCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE)
+        : feelingCtx.createImageData(GRID_SIZE, GRID_SIZE);
+
+      const coverImgData = coverLoaded
+        ? coverCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE)
+        : coverCtx.createImageData(GRID_SIZE, GRID_SIZE);
+
+      const outImgData = mosaicCtx.createImageData(GRID_SIZE, GRID_SIZE);
+      const outData = outImgData.data;
+      const fData = feelingImgData.data;
+      const cData = coverImgData.data;
+
+      const cx = GRID_SIZE / 2;
+      const cy = GRID_SIZE / 2;
+
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          const pixelIndex = y * GRID_SIZE + x;
+          const byteIndex = pixelIndex * 4;
+
+          const fR = fData[byteIndex];
+          const fG = fData[byteIndex + 1];
+          const fB = fData[byteIndex + 2];
+          const fA = fData[byteIndex + 3];
+
+          const permIndex = pixelPermutation[pixelIndex];
+          const jitterX = pixelJitter[pixelIndex * 2] * (0.3 + soundPower * 0.7);
+          const jitterY = pixelJitter[pixelIndex * 2 + 1] * (0.3 + soundPower * 0.7);
+
+          const dx = x - cx;
+          const dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const radialPush = micPeakImpulse * 5.0 * (dist / (GRID_SIZE * 0.5));
+          const angle = Math.atan2(dy, dx);
+
+          let sampleX = Math.floor((permIndex % GRID_SIZE) + jitterX + Math.cos(angle) * radialPush);
+          let sampleY = Math.floor(Math.floor(permIndex / GRID_SIZE) + jitterY + Math.sin(angle) * radialPush);
+
+          sampleX = (sampleX % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
+          sampleY = (sampleY % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
+
+          const coverSampleIndex = (sampleY * GRID_SIZE + sampleX) * 4;
+          const cR = cData[coverSampleIndex];
+          const cG = cData[coverSampleIndex + 1];
+          const cB = cData[coverSampleIndex + 2];
+
+          const threshold = pixelThresholds[pixelIndex];
+          const showCover = soundPower > (threshold * 0.85);
+          const flash = beatPulse * 0.35 + micPeakImpulse * 0.4;
+
+          if (showCover) {
+            const coverAlpha = Math.min(1.0, 0.45 + soundPower * 0.55);
+            const r = cR * coverAlpha + fR * (1 - coverAlpha);
+            const g = cG * coverAlpha + fG * (1 - coverAlpha);
+            const b = cB * coverAlpha + fB * (1 - coverAlpha);
+
+            outData[byteIndex] = Math.min(255, r + (255 - r) * flash);
+            outData[byteIndex + 1] = Math.min(255, g + (255 - g) * flash);
+            outData[byteIndex + 2] = Math.min(255, b + (255 - b) * flash);
+            outData[byteIndex + 3] = 255;
+          } else {
+            outData[byteIndex] = Math.min(255, fR + (255 - fR) * (flash * 0.7));
+            outData[byteIndex + 1] = Math.min(255, fG + (255 - fG) * (flash * 0.7));
+            outData[byteIndex + 2] = Math.min(255, fB + (255 - fB) * (flash * 0.7));
+            outData[byteIndex + 3] = fA || 255;
+          }
+        }
+      }
+
+      mosaicCtx.putImageData(outImgData, 0, 0);
+      return true;
+    }
 
     // Listen to live captions stream for real-time speech sentiment & voice intonation
     const captionSource = new EventSource('/api/captions/stream');
@@ -1945,25 +2681,26 @@ def render_mood_html() -> str:
 
       valVibe.textContent = Math.round(roomVibeLevel * 100) + '%';
 
-      if (!currentState || currentState.status !== 'Playing') return;
+      const st = currentState || { status: 'Playing', position_s: 0, bpm: 120, energy: 0.5, mood: currentMood };
+      const isPlaying = !currentState || currentState.status === 'Playing' || Boolean(currentState.is_playing);
 
-      let currentPos = currentState.position_s || 0;
-      if (currentState.is_playing) {
+      let currentPos = Number(st.position_s || 0);
+      if (isPlaying) {
         const elapsed = (performance.now() - lastEventTime) / 1000;
         currentPos += elapsed;
       }
 
-      const bpm = currentState.bpm || 120.0;
+      const bpm = Number(st.bpm) || 120.0;
       const beatPeriod = 60.0 / Math.max(bpm, 1.0);
       const beatProgress = (currentPos / beatPeriod) % 1.0;
-      
+
       // Music beat pulse: sharp spike on downbeat that decays smoothly
-      const beatPulse = Math.max(0.0, 1.0 - beatProgress * 1.6);
+      const beatPulse = isPlaying ? Math.max(0.0, 1.0 - beatProgress * 1.6) : 0.0;
 
       // Sound influence: Combined metric from Room Mic + Music Beat + Song Energy
-      const songEnergy = currentState.energy !== null ? currentState.energy : 0.5;
-      const soundPower = Math.min(1.0, 
-        (micActive ? (roomVibeLevel * 1.6 + micPeakImpulse * 0.6) : (songEnergy * 0.4)) 
+      const songEnergy = (st.energy !== null && st.energy !== undefined) ? Number(st.energy) : 0.5;
+      const soundPower = Math.min(1.0,
+        (micActive ? (roomVibeLevel * 1.6 + micPeakImpulse * 0.6) : (songEnergy * 0.4))
         + beatPulse * 0.45
       );
 
@@ -1971,104 +2708,44 @@ def render_mood_html() -> str:
       const glowScale = 1.0 + soundPower * 0.25;
       ambientGlow.style.transform = `scale(${glowScale})`;
 
-      // Get pixel data from feeling (background) and cover (foreground)
-      if (!feelingLoaded && !coverLoaded) return;
-
-      const feelingImgData = feelingLoaded 
-        ? feelingCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE) 
-        : feelingCtx.createImageData(GRID_SIZE, GRID_SIZE);
-
-      const coverImgData = coverLoaded 
-        ? coverCtx.getImageData(0, 0, GRID_SIZE, GRID_SIZE) 
-        : coverCtx.createImageData(GRID_SIZE, GRID_SIZE);
-
-      const outImgData = moodCanvasCtx.createImageData(GRID_SIZE, GRID_SIZE);
-      const outData = outImgData.data;
-      const fData = feelingImgData.data;
-      const cData = coverImgData.data;
-
-      // Center coordinates for radial shockwaves on sound bursts
-      const cx = GRID_SIZE / 2;
-      const cy = GRID_SIZE / 2;
-
-      // Draw composite: Feeling in back, randomized cover pixels on top governed by sound
-      for (let y = 0; y < GRID_SIZE; y++) {
-        for (let x = 0; x < GRID_SIZE; x++) {
-          const pixelIndex = y * GRID_SIZE + x;
-          const byteIndex = pixelIndex * 4;
-
-          // Background Feeling pixel
-          const fR = fData[byteIndex];
-          const fG = fData[byteIndex + 1];
-          const fB = fData[byteIndex + 2];
-          const fA = fData[byteIndex + 3];
-
-          // Randomized/scrambled Cover pixel position
-          // Using shuffled permutation index + sound-dependent spatial jitter
-          const permIndex = pixelPermutation[pixelIndex];
-          const jitterX = pixelJitter[pixelIndex * 2] * (0.3 + soundPower * 0.7);
-          const jitterY = pixelJitter[pixelIndex * 2 + 1] * (0.3 + soundPower * 0.7);
-
-          // Radial displacement on loud claps / mic transients
-          const dx = x - cx;
-          const dy = y - cy;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          const radialPush = micPeakImpulse * 5.0 * (dist / (GRID_SIZE * 0.5));
-          const angle = Math.atan2(dy, dx);
-
-          let sampleX = Math.floor((permIndex % GRID_SIZE) + jitterX + Math.cos(angle) * radialPush);
-          let sampleY = Math.floor(Math.floor(permIndex / GRID_SIZE) + jitterY + Math.sin(angle) * radialPush);
-
-          // Clamp sample coordinates within bounds
-          sampleX = (sampleX % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
-          sampleY = (sampleY % GRID_SIZE + GRID_SIZE) % GRID_SIZE;
-
-          const coverSampleIndex = (sampleY * GRID_SIZE + sampleX) * 4;
-          const cR = cData[coverSampleIndex];
-          const cG = cData[coverSampleIndex + 1];
-          const cB = cData[coverSampleIndex + 2];
-
-          // Sound-dependent coverage threshold
-          // Each pixel has a unique threshold. As sound increases, more cover pixels appear.
-          const threshold = pixelThresholds[pixelIndex];
-          
-          // Low sound: feeling shines through; High sound: randomized cover mosaic takes over
-          const showCover = soundPower > (threshold * 0.85);
-
-          // Beat brightness & color flash
-          const flash = beatPulse * 0.35 + micPeakImpulse * 0.4;
-
-          if (showCover) {
-            // Cover pixel is active over the feeling
-            // Blend opacity between cover and feeling based on sound power
-            const coverAlpha = Math.min(1.0, 0.45 + soundPower * 0.55);
-            
-            const r = cR * coverAlpha + fR * (1 - coverAlpha);
-            const g = cG * coverAlpha + fG * (1 - coverAlpha);
-            const b = cB * coverAlpha + fB * (1 - coverAlpha);
-
-            outData[byteIndex] = Math.min(255, r + (255 - r) * flash);
-            outData[byteIndex + 1] = Math.min(255, g + (255 - g) * flash);
-            outData[byteIndex + 2] = Math.min(255, b + (255 - b) * flash);
-            outData[byteIndex + 3] = 255;
-          } else {
-            // Feeling image in the background
-            outData[byteIndex] = Math.min(255, fR + (255 - fR) * (flash * 0.7));
-            outData[byteIndex + 1] = Math.min(255, fG + (255 - fG) * (flash * 0.7));
-            outData[byteIndex + 2] = Math.min(255, fB + (255 - fB) * (flash * 0.7));
-            outData[byteIndex + 3] = fA || 255;
-          }
-        }
+      if (visualMode === 'mosaic' || visualMode === 'mix') {
+        updateMosaicBuffer(beatPulse, soundPower);
       }
 
-      moodCanvasCtx.putImageData(outImgData, 0, 0);
+      if (visualMode === 'rings' || visualMode === 'mix') {
+        renderGenerativeRingsFrame(moodCanvasCtx, moodCanvas.width, moodCanvas.height, currentPos, beatProgress, beatPulse, soundPower);
+        return;
+      }
+
+      if (feelingLoaded || coverLoaded) {
+        moodCanvasCtx.clearRect(0, 0, moodCanvas.width, moodCanvas.height);
+        moodCanvasCtx.drawImage(mosaicBuffer, 0, 0);
+      }
     }
+
+    // Apply initial visual mode (sets canvas dimensions & active pill)
+    applyVisualModeUI();
 
     // Start render loop
     requestAnimationFrame(renderLoop);
-    // Initial load
-    loadFeelingImage('neutral');
-    loadCoverImage('neutral', '');
+    // Initial load: fetch current stage snapshot immediately so first frame has track data
+    fetch('/api/stage/state')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && !currentState) {
+          currentState = data;
+          lastEventTime = performance.now();
+          renderChord(data);
+          currentMood = (data.mood || 'neutral').toLowerCase();
+          currentFeeling = (data.mood_feeling || currentMood).toLowerCase();
+          currentArtUrl = data.art_url || '';
+          loadFeelingImage(currentFeeling);
+          loadCoverImage(currentFeeling, currentArtUrl);
+        }
+      })
+      .catch(() => {});
+    loadFeelingImage(currentFeeling);
+    loadCoverImage(currentFeeling, '');
   </script>
 </body>
 </html>"""

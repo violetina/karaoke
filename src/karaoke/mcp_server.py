@@ -43,6 +43,7 @@ dj_mcp = MCPServer(
 def search_songs(
     query: str = "",
     genre: str = "",
+    mood: str = "",
     key: str = "",
     min_bpm: float = 0.0,
     max_bpm: float = 300.0,
@@ -50,13 +51,15 @@ def search_songs(
     limit: int = 10,
     offset: int = 0,
 ) -> str:
-    """Search tracks in the karaoke library by title, artist, genre, key (e.g. 'Am', '8A', 'C'), or BPM range.
+    """Search tracks in the karaoke library by title, artist, genre, mood, key (e.g. 'Am', '8A', 'C'), or BPM range.
 
     Args:
         query: Artist, title, or album substring match.
         genre: Genre filter, matched like the TUI's H filter: the artist's broad genre
             (blues, jazz, rock, metal, punk, folk, country, electronic, hip hop, soul,
             reggae, classical, pop, ambient, latin, world) or a specific one (e.g. 'funk').
+        mood: Dominant mood/feeling filter (e.g. 'happy', 'energetic', 'dreamy',
+            'romantic', 'calm', 'sad', 'angry').
         key: Musical key (e.g. 'A minor', 'Am') or Camelot wheel code (e.g. '8A', '8B').
         min_bpm: Minimum tempo in beats per minute.
         max_bpm: Maximum tempo in beats per minute.
@@ -74,8 +77,11 @@ def search_songs(
             chord_timeline.ensure_schema(conn)
         except Exception:
             pass
+        has_moods = localcache.table_exists(conn, "track_moods")
+        mood_select = ", tm.summary->>'dominant_feeling' AS mood_feeling" if has_moods else ", '' AS mood_feeling"
+        mood_join = "LEFT JOIN track_moods tm ON tm.track_id = t.track_id" if has_moods else ""
         cur = conn.cursor()
-        sql = """
+        sql = f"""
             SELECT t.track_id, t.artist, t.title, t.album, t.duration, t.play_count,
                    a.detected_key, a.bpm, a.energy, a.brightness, g.genre, s.url, s.kind,
                    tc.harmony,
@@ -83,10 +89,12 @@ def search_songs(
                        SELECT 1 FROM lyrics l
                        WHERE l.track_id = t.track_id AND l.synced_lyrics != ''
                    ) AS has_synced
+                   {mood_select}
             FROM tracks t
             LEFT JOIN track_analysis a ON a.track_id = t.track_id
             LEFT JOIN track_genre g ON g.track_id = t.track_id
             LEFT JOIN track_chords tc ON tc.track_id = t.track_id
+            {mood_join}
             LEFT JOIN sources s ON s.source_id = (
                 SELECT s2.source_id FROM sources s2
                 WHERE s2.track_id = t.track_id
@@ -128,6 +136,10 @@ def search_songs(
             else:
                 where_clauses.append("lower(trim(COALESCE(g.genre, ''))) = lower(trim(%s))")
                 params.append(genre.strip())
+
+        if mood.strip() and has_moods:
+            where_clauses.append("lower(trim(COALESCE(tm.summary->>'dominant_feeling', ''))) = lower(trim(%s))")
+            params.append(mood.strip())
 
         if min_bpm > 0:
             where_clauses.append("a.bpm >= %s")
@@ -186,6 +198,7 @@ def search_songs(
                 "bpm": round(r["bpm"], 1) if r["bpm"] else None,
                 "energy": round(r["energy"], 2) if r["energy"] is not None else None,
                 "genre": r["genre"] or "",
+                "mood": dict(r).get("mood_feeling") or "",
                 "has_synced_lyrics": bool(r["has_synced"]),
                 "play_count": r["play_count"] or 0,
                 "url": r["url"] or "",
@@ -1225,6 +1238,248 @@ def clear_dj_playlist(playlist_id: str = "dj-list") -> str:
         "playlist_id": yt_pid,
         "message": f"Cleared all tracks from playlist '{yt_pid}'.",
     }, indent=2)
+
+
+def _http_json(base_url: str, method: str, path: str, body: Optional[dict[str, Any]] = None, timeout: float = 10.0) -> dict[str, Any]:
+    import httpx
+    url = f"{base_url.rstrip('/')}{path}"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.request(method, url, json=body)
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            return {"ok": False, "status_code": resp.status_code, "error": data.get("detail") or data.get("error") or resp.text[:300]}
+        if isinstance(data, dict):
+            data.setdefault("ok", True)
+            return data
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _ctrl_url() -> str:
+    import os
+    return os.environ.get("KARAOKE_CTRL_API_URL", "http://127.0.0.1:8765")
+
+
+def _dash_url() -> str:
+    import os
+    return os.environ.get("KARAOKE_DASHBOARD_API_URL", "http://127.0.0.1:8900")
+
+
+def _resolve_dj_playlist_id(conn, playlist_id: str) -> str:
+    if playlist_id in ("dj-list", "Karaoke: DJ List"):
+        try:
+            from . import ytmusic_playlist
+            yt_pid, _ = ytmusic_playlist.resolve_or_create_dj_playlist(conn=conn)
+            return yt_pid
+        except Exception:
+            return "dj-list"
+    pl = localcache.find_saved_playlist_by_id(playlist_id, conn=conn)
+    return pl["playlist_id"] if pl and pl.get("playlist_id") else playlist_id
+
+
+@dj_mcp.tool()
+def player_control(action: str, player: str = "", offset_s: float = 0.0) -> str:
+    """Control playback on the active Karaoke/music player.
+
+    Args:
+        action: One of 'play_pause', 'pause', 'next', 'previous', 'seek', or 'status'.
+        player: Optional MPRIS player name filter (default targets active player).
+        offset_s: Relative seek offset in seconds (only used when action='seek', e.g. 15 or -15).
+    """
+    act = (action or "").strip().lower()
+    if act == "status":
+        return json.dumps(_http_json(_ctrl_url(), "GET", "/api/players/current"), indent=2)
+    routes = {
+        "play_pause": "/api/players/play-pause",
+        "pause": "/api/players/pause",
+        "next": "/api/players/next",
+        "previous": "/api/players/previous",
+    }
+    if act in routes:
+        return json.dumps(_http_json(_ctrl_url(), "POST", routes[act], {"player": player or None}), indent=2)
+    if act == "seek":
+        return json.dumps(_http_json(_ctrl_url(), "POST", "/api/players/seek", {"offset_s": float(offset_s), "player": player or None}), indent=2)
+    return json.dumps({"ok": False, "error": f"Unknown action {action!r}. Use play_pause, pause, next, previous, seek, or status."}, indent=2)
+
+
+@dj_mcp.tool()
+def get_live_queue() -> str:
+    """Inspect the active Karaoke Up Next queue (the dashboard & queue follower's live queue)."""
+    with localcache.connect() as conn:
+        active = localcache.load_active_queue(conn=conn)
+    if not active or not active.get("rows"):
+        return json.dumps({
+            "ok": True,
+            "queue_name": "",
+            "current_index": 0,
+            "track_count": 0,
+            "autopilot": False,
+            "upcoming_tracks": [],
+        }, indent=2)
+    rows = active["rows"]
+    cur_idx = int(active.get("current_index", 0) or 0)
+    upcoming = [
+        {
+            "position": i + 1,
+            "track_id": r.get("track_id"),
+            "artist": r.get("artist") or "",
+            "title": r.get("title") or "",
+            "bpm": r.get("bpm"),
+            "key": r.get("key") or "",
+        }
+        for i, r in enumerate(rows[cur_idx:], start=cur_idx)
+    ]
+    return json.dumps({
+        "ok": True,
+        "queue_name": active.get("name") or "",
+        "current_index": cur_idx,
+        "track_count": len(rows),
+        "autopilot": bool(active.get("autopilot")),
+        "upcoming_tracks": upcoming,
+    }, indent=2)
+
+
+@dj_mcp.tool()
+def queue_next_in_player(
+    track_id: Optional[int] = None,
+    track_ids: Optional[list[int]] = None,
+    video_id: str = "",
+    position: str = "next",
+) -> str:
+    """Queue one or more songs into the live Karaoke Up Next queue (shown on the dashboard and played by Follow Queue).
+
+    Args:
+        track_id: Single library track_id to queue.
+        track_ids: List of library track_ids to queue in order (faster than calling once per song).
+        video_id: Direct YouTube video_id (optional if track_id/track_ids are provided).
+        position: 'next' (insert immediately after the current track) or 'end' (append to the end of the queue).
+    """
+    from . import collection
+
+    ids: list[int] = []
+    if track_ids:
+        ids.extend(int(t) for t in track_ids if t is not None)
+    if track_id is not None and int(track_id) not in ids:
+        ids.append(int(track_id))
+
+    vid = (video_id or "").strip()
+    pos = "end" if (position or "").strip().lower() == "end" else "next"
+
+    with localcache.connect() as conn:
+        if not ids and vid:
+            found = localcache.find_track_by_url(f"https://www.youtube.com/watch?v={vid}", conn=conn)
+            if found:
+                ids.append(int(found[0]))
+        if not ids:
+            return json.dumps({"ok": False, "error": "Provide track_id, track_ids, or a cataloged video_id."}, indent=2)
+        res = collection.enqueue_tracks(ids, conn, position=pos)
+    return json.dumps(res, indent=2)
+
+
+@dj_mcp.tool()
+def remove_from_dj_playlist(
+    playlist_id: str = "dj-list",
+    position: Optional[int] = None,
+    track_id: Optional[int] = None,
+) -> str:
+    """Remove a song from a DJ or saved playlist by 1-based position or track_id.
+
+    Args:
+        playlist_id: Saved playlist ID or slug (default 'dj-list').
+        position: 1-based position in the playlist to remove.
+        track_id: Track ID to remove (used if position is omitted).
+    """
+    if position is None and track_id is None:
+        return json.dumps({"ok": False, "error": "Provide either position (1-based) or track_id."}, indent=2)
+    with localcache.connect() as conn:
+        yt_pid = _resolve_dj_playlist_id(conn, playlist_id)
+        removed = localcache.remove_saved_playlist_track(
+            yt_pid, position=position, track_id=track_id, conn=conn
+        )
+        tracks = localcache.get_saved_playlist_tracks(yt_pid, conn=conn)
+    return json.dumps({
+        "ok": removed > 0,
+        "playlist_id": yt_pid,
+        "removed": removed,
+        "track_count": len(tracks),
+    }, indent=2)
+
+
+@dj_mcp.tool()
+def reorder_dj_playlist(from_position: int, to_position: int, playlist_id: str = "dj-list") -> str:
+    """Move a song from one 1-based position to another inside a DJ or saved playlist.
+
+    Args:
+        from_position: Current 1-based position of the song.
+        to_position: Target 1-based position in the playlist.
+        playlist_id: Saved playlist ID or slug (default 'dj-list').
+    """
+    with localcache.connect() as conn:
+        yt_pid = _resolve_dj_playlist_id(conn, playlist_id)
+        moved = localcache.move_saved_playlist_track(
+            yt_pid, int(from_position), int(to_position), conn=conn
+        )
+        tracks = localcache.get_saved_playlist_tracks(yt_pid, conn=conn)
+    return json.dumps({
+        "ok": moved,
+        "playlist_id": yt_pid,
+        "from_position": from_position,
+        "to_position": to_position,
+        "track_count": len(tracks),
+    }, indent=2)
+
+
+@dj_mcp.tool()
+def toggle_mic_recording(action: str = "status", source: str = "mic", keep_audio: bool = False) -> str:
+    """Control or inspect live microphone / audio recording in the Karaoke backstage.
+
+    Args:
+        action: 'status', 'start', 'stop', or 'toggle'.
+        source: Capture source when starting (default 'mic').
+        keep_audio: Whether to keep the captured audio file after stopping.
+    """
+    act = (action or "status").strip().lower()
+    if act == "status":
+        return json.dumps(_http_json(_ctrl_url(), "GET", "/api/record/status"), indent=2)
+    if act == "toggle":
+        st = _http_json(_ctrl_url(), "GET", "/api/record/status")
+        sessions = st.get("sessions") or []
+        act = "stop" if sessions else "start"
+    if act == "start":
+        return json.dumps(_http_json(_ctrl_url(), "POST", "/api/record/start", {"source": source, "keep_audio": keep_audio}), indent=2)
+    if act == "stop":
+        return json.dumps(_http_json(_ctrl_url(), "POST", "/api/record/stop", {}), indent=2)
+    return json.dumps({"ok": False, "error": f"Unknown action {action!r}. Use status, start, stop, or toggle."}, indent=2)
+
+
+@dj_mcp.tool()
+def toggle_ui_switch(switch: str, enabled: Optional[bool] = None) -> str:
+    """Toggle or set Karaoke UI / backstage switches.
+
+    Args:
+        switch: One of 'kiosk' (Chrome kiosk window), 'radio' (songrec radio mode), or 'audio_video' (Audio/Song vs Video mode).
+        enabled: Optional explicit boolean (True=on/video, False=off/audio). Omit to toggle.
+    """
+    sw = (switch or "").strip().lower()
+    if sw == "kiosk":
+        if enabled is not None:
+            import subprocess
+            chk = subprocess.run(["systemctl", "--user", "is-active", "karaoke-kiosk.service"], capture_output=True, text=True, timeout=2)
+            is_active = chk.stdout.strip() == "active"
+            if is_active == bool(enabled):
+                return json.dumps({"ok": True, "switch": "kiosk", "active": is_active, "changed": False}, indent=2)
+        return json.dumps(_http_json(_dash_url(), "POST", "/api/players/kiosk/toggle"), indent=2)
+    if sw == "radio":
+        if enabled is None:
+            cur = _http_json(_dash_url(), "GET", "/api/radio")
+            enabled = not bool(cur.get("enabled"))
+        return json.dumps(_http_json(_dash_url(), "POST", "/api/radio", {"enabled": bool(enabled)}), indent=2)
+    if sw in ("audio_video", "av", "video"):
+        mode = None if enabled is None else ("video" if enabled else "audio")
+        return toggle_audio_video(mode=mode)
+    return json.dumps({"ok": False, "error": f"Unknown switch {switch!r}. Use kiosk, radio, or audio_video."}, indent=2)
 
 
 _PROTECTED_DJ_NAMES = frozenset({"dj-list", "karaoke: dj list", "karaoke ai dj list"})

@@ -1059,3 +1059,67 @@ def test_suggest_next_tracks_flow_fallback_returns_note(playable_track, monkeypa
     assert "note" in res
     assert "scan_track" in res["note"]
 
+
+def test_search_songs_filters_by_mood():
+    """search_songs(mood=...) filters by track_moods.summary->>'dominant_feeling'."""
+    with localcache.connect() as db_conn:
+        t_happy = localcache.add_track_source(
+            "Happy Artist", "Sunny Song", kind="youtube_music", url="https://music.youtube.com/watch?v=11111111111", conn=db_conn
+        )
+        t_sad = localcache.add_track_source(
+            "Sad Artist", "Rainy Song", kind="youtube_music", url="https://music.youtube.com/watch?v=22222222222", conn=db_conn
+        )
+        db_conn.execute(
+            "INSERT INTO track_genre (track_id, genre, labelled_at) VALUES (%s, %s, %s) ON CONFLICT (track_id) DO UPDATE SET genre = EXCLUDED.genre",
+            (t_happy, "pop", time.time()),
+        )
+        db_conn.execute(
+            "INSERT INTO track_genre (track_id, genre, labelled_at) VALUES (%s, %s, %s) ON CONFLICT (track_id) DO UPDATE SET genre = EXCLUDED.genre",
+            (t_sad, "pop", time.time()),
+        )
+        db_conn.execute(
+            "INSERT INTO track_moods (track_id, mood_version, segments, summary, updated_at) VALUES (%s, %s, '[]'::jsonb, %s::jsonb, %s)",
+            (t_happy, 1, json.dumps({"dominant_feeling": "happy"}), time.time()),
+        )
+        db_conn.execute(
+            "INSERT INTO track_moods (track_id, mood_version, segments, summary, updated_at) VALUES (%s, %s, '[]'::jsonb, %s::jsonb, %s)",
+            (t_sad, 1, json.dumps({"dominant_feeling": "sad"}), time.time()),
+        )
+        db_conn.commit()
+
+    res = json.loads(mcp_server.search_songs(genre="pop", mood="happy"))
+    assert res["count"] == 1
+    assert res["tracks"][0]["track_id"] == t_happy
+    assert res["tracks"][0]["mood"] == "happy"
+
+
+def test_queue_next_in_player_updates_active_queue_and_get_live_queue():
+    """queue_next_in_player writes to active_queue_state so get_live_queue and Up Next see it."""
+    with localcache.connect() as db_conn:
+        t1 = localcache.add_track_source(
+            "Pop One", "First Hit", kind="youtube_music", url="https://music.youtube.com/watch?v=aaaaaaaaaaa", conn=db_conn
+        )
+        t2 = localcache.add_track_source(
+            "Pop Two", "Second Hit", kind="youtube_music", url="https://music.youtube.com/watch?v=bbbbbbbbbbb", conn=db_conn
+        )
+        t3 = localcache.add_track_source(
+            "Pop Three", "Third Hit", kind="youtube_music", url="https://music.youtube.com/watch?v=ccccccccccc", conn=db_conn
+        )
+        db_conn.commit()
+
+    q_res = json.loads(mcp_server.queue_next_in_player(track_ids=[t1, t2], position="end"))
+    assert q_res["ok"] is True
+    assert q_res["created"] is True
+    assert q_res["added_count"] == 2
+    assert q_res["track_count"] == 2
+
+    q_next = json.loads(mcp_server.queue_next_in_player(track_id=t3, position="next"))
+    assert q_next["ok"] is True
+    assert q_next["added_count"] == 1
+    assert q_next["track_count"] == 3
+
+    live = json.loads(mcp_server.get_live_queue())
+    assert live["ok"] is True
+    assert live["track_count"] == 3
+    assert [t["track_id"] for t in live["upcoming_tracks"]] == [t1, t3, t2]
+

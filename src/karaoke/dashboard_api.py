@@ -1675,7 +1675,14 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
     return "\n".join(facts)
 
 
-def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str = "", query_facts: str = "") -> str:
+def _dj_chat_system_prompt(
+    now_artist: str,
+    now_title: str,
+    artist_context: str = "",
+    query_facts: str = "",
+    *,
+    tool_capable: bool = False,
+) -> str:
     """Build the AI DJ system prompt.
 
     The booth must never recommend the song already on stage. A small local
@@ -1719,16 +1726,35 @@ def _dj_chat_system_prompt(now_artist: str, now_title: str, artist_context: str 
         f"Use these verified facts directly in your answer if relevant."
     ) if query_facts else ""
 
+    action_instructions = (
+        "You have live Karaoke MCP tools (`search_songs`, `suggest_next_tracks`, `get_now_playing`, "
+        "`play_track`, `play_playlist`, `player_control`, `get_live_queue`, `queue_next_in_player`, "
+        "`add_to_dj_playlist`, `get_dj_playlist`, `remove_from_dj_playlist`, `reorder_dj_playlist`, "
+        "`clear_dj_playlist`, `toggle_audio_video`, `toggle_mic_recording`, `toggle_ui_switch`). "
+        "When the user asks you to play, pause, skip, seek, choose/queue a song, edit the queue/playlist, "
+        "or toggle a UI switch (such as mic recording, kiosk, radio, or audio/video mode), CALL the "
+        "appropriate tool(s) first and report the real result concisely. "
+        "To play or queue a song by mood/prompt, first find real track_id(s) via `search_songs` "
+        "(you can pass `genre=` and `mood=` such as 'happy', 'energetic', 'dreamy', 'romantic', 'calm', 'sad') "
+        "or `suggest_next_tracks`, then call `play_track(track_id=...)` or "
+        "`queue_next_in_player(track_ids=[...], position='end')` for the live Up Next queue. "
+        "Only use `add_to_dj_playlist(...)` when the user specifically asks to save to a playlist like `dj-list`. "
+        "Never claim you played, queued, or toggled anything unless a tool succeeded. "
+    ) if tool_capable else (
+        "Answer questions about vibe, history, or recommendations without taking playback actions. "
+        "Never claim you played or queued anything; you can only suggest. "
+        "If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
+        "To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. "
+    )
+
     return (
         f"You are the energetic, charismatic AI DJ and MC for Karaoke Night. "
         f"{playback_status} "
         f"You have deep knowledge of music history, bands, side-projects, BPM, and Camelot keys. "
         f"Keep answers punchy, entertaining, and brief (2-3 sentences). "
         f"If the user asks about an artist, highlight their story or side-projects. Be completely factual. Do NOT invent side projects or band connections (e.g. Depeche Mode has no connection to The Cure). "
-        f"Answer questions about vibe, history, or recommendations without taking playback actions. "
-        f"Never claim you played or queued anything; you can only suggest. "
-        f"If the user asks you to play or queue a track, you MUST search the library via your semantic knowledge. "
-        f"To suggest a track, you must output `[QUEUE: Artist Name - Track Title]` with a real song in our library. {track_hint} {playlist_hint} "
+        f"{action_instructions}"
+        f"{track_hint} {playlist_hint} "
         f"CRITICAL FORMAT RULE: The QUEUE bracket must ONLY contain ONE artist and ONE track title: `[QUEUE: Artist - Title]`. Never prefix it with the currently playing artist or uploader name! "
         f"Do NOT make up song titles based on the user's prompt. "
         f"Do NOT invent tracks just because you know the artist. Only use exact artist and track titles you know to exist in reality. "
@@ -1868,7 +1894,10 @@ async def dj_chat_endpoint(body: ChatRequest):
                 yield event
             return
 
-        system_prompt = _dj_chat_system_prompt(now_artist, now_title, artist_context, query_facts=query_facts)
+        system_prompt = _dj_chat_system_prompt(
+            now_artist, now_title, artist_context, query_facts=query_facts,
+            tool_capable=(chosen_provider == "hermes"),
+        )
         full_text = ""
         try:
             from . import ai_providers
@@ -1996,7 +2025,10 @@ async def _ingest_then_answer_stream(
         return
 
     yield {"event": "token", "data": json.dumps({"token": " Got it! Here's the vibe:\n\n"})}
-    system_prompt = _dj_chat_system_prompt(artist, title, artist_context, query_facts=facts)
+    system_prompt = _dj_chat_system_prompt(
+        artist, title, artist_context, query_facts=facts,
+        tool_capable=(provider_id == "hermes"),
+    )
     try:
         from . import ai_providers
         full_text = ""
