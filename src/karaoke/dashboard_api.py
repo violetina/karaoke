@@ -1640,6 +1640,7 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
     # only prepends unrelated bands (they match *something* for any query),
     # which buries the real numbers and misleads a small model.
     analysis_only = wants_analysis and not wants_artist
+    has_recs = False
 
     # 0. Current track's own analysis FIRST -- it is the ground truth for
     #    key/BPM/chord/mood questions, so a small model reads it before noise.
@@ -1659,6 +1660,7 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             data_sugg = json.loads(raw_sugg)
             suggs = data_sugg.get("suggestions", [])
             if suggs:
+                has_recs = True
                 # Hand the small model ready-to-copy QUEUE lines. These already
                 # exclude the current track, so a model that just copies the
                 # first one can never suggest the song already playing.
@@ -1672,7 +1674,12 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             pass
 
     # 1. Search OpenSearch artist cache for any mentioned artists
-    if os_c is not None and not analysis_only:
+    # Same for a suggest question with real recommendations: the fuzzy
+    # searches match the question's own words ("after" -> "Cigarettes After
+    # Sex", "song" -> "Feel This Song") and a small model mixes those names
+    # into its pick, inventing tracks like "Earth to Eve - The Christmas Song".
+    skip_fuzzy = analysis_only or (has_recs and not wants_artist)
+    if os_c is not None and not skip_fuzzy:
         try:
             res = os_c.search(
                 index="karaoke-artist-cache",
@@ -1707,7 +1714,7 @@ def _retrieve_query_facts(query: str, now_artist: str = "", now_title: str = "")
             pass
 
     # 2. Search OpenSearch library tracks (lyrics / titles / sound) matching the query
-    if os_c is not None and not analysis_only:
+    if os_c is not None and not skip_fuzzy:
         try:
             res = os_c.search(
                 index="tracks",
@@ -2006,20 +2013,25 @@ async def dj_chat_endpoint(body: ChatRequest):
                 a_name = a.get("name", "")
                 aliases = a.get("aliases", [])
 
-                if now_artist.lower() != a_name.lower():
-                    if now_artist.lower() in [alias.lower() for alias in aliases]:
-                        now_artist = a_name
-                    elif not aliases and a_name:
-                        now_artist = a_name
+                def _same(x: str, y: str) -> bool:
+                    return re.sub(r"[^a-z0-9]+", "", (x or "").lower()) == re.sub(r"[^a-z0-9]+", "", (y or "").lower())
 
-                lines = []
-                if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
-                if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
-                if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
-                if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
-                artist_context = "\n".join(lines)
-            else:
-                now_artist = ""
+                # The phrase search is fuzzy: "Britney Spears & Iggy Azalea" or
+                # "Aphex Twin (aka ...)" can hit a different act. Only adopt the
+                # cache doc when it really is the playing artist (name or alias);
+                # otherwise keep the artist as reported and add no bio.
+                if _same(now_artist, a_name) or any(_same(now_artist, al) for al in aliases):
+                    now_artist = a_name or now_artist
+                    lines = []
+                    if a.get("genres"): lines.append(f"Genres: {', '.join(a['genres'])}")
+                    if a.get("member_of_names"): lines.append(f"Member of: {', '.join(a['member_of_names'])}")
+                    if a.get("member_names"): lines.append(f"Members: {', '.join(a['member_names'])}")
+                    if a.get("description"): lines.append(f"Bio: {a['description'][:500]}")
+                    artist_context = "\n".join(lines)
+            # No artist-cache entry is NOT "nothing is playing": the song is still
+            # on stage and its key/BPM/mood/chords come from the library. Blanking
+            # now_artist here told the model no song was playing, so it refused
+            # every fact question for duos, "feat."/"aka" credits and small acts.
         except Exception:
             pass
 
