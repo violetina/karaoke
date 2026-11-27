@@ -143,3 +143,58 @@ def test_prompt_leads_with_facts_and_caps_queue(monkeypatch):
     # the random sample-track distractor is dropped once real recs are present
     recs = "RECOMMENDED NEXT SONGS (…):\n  1. [QUEUE: Bowie - Heroes]  (fits)"
     assert "valid songs in the library right now" not in dashboard_api._dj_chat_system_prompt("A", "B", query_facts=recs)
+
+
+class _OneHitOS:
+    """Artist-cache stub that returns one fixed doc for any query."""
+
+    def __init__(self, doc=None):
+        self.doc = doc
+
+    def search(self, index, body):
+        hits = [{"_source": self.doc}] if (self.doc and index == "karaoke-artist-cache") else []
+        return {"hits": {"hits": hits}}
+
+
+def test_artist_missing_from_cache_still_counts_as_playing(monkeypatch):
+    """A duo/feat. credit with no artist-cache doc must not become 'nothing playing'."""
+    seen = _capture_prompt(monkeypatch)
+    monkeypatch.setattr("karaoke.osclient.client", lambda: _OneHitOS(None))
+    _chat("Britney Spears & Iggy Azalea", "Pretty Girls")
+    assert (seen["artist"], seen["title"]) == ("Britney Spears & Iggy Azalea", "Pretty Girls")
+
+
+def test_fuzzy_artist_cache_hit_does_not_rename_playing_artist(monkeypatch):
+    seen = _capture_prompt(monkeypatch)
+    monkeypatch.setattr("karaoke.osclient.client",
+                        lambda: _OneHitOS({"name": "Britney Spears", "aliases": [], "member_names": []}))
+    _chat("Britney Spears & Iggy Azalea", "Pretty Girls")
+    assert seen["artist"] == "Britney Spears & Iggy Azalea"
+
+
+def test_artist_cache_alias_still_canonicalises(monkeypatch):
+    seen = _capture_prompt(monkeypatch)
+    monkeypatch.setattr("karaoke.osclient.client",
+                        lambda: _OneHitOS({"name": "The Slits", "aliases": ["Slits"], "member_names": ["Ari Up"]}))
+    _chat("Slits", "Typical Girls")
+    assert seen["artist"] == "The Slits"
+
+
+def test_suggest_with_recs_skips_fuzzy_name_matches(monkeypatch):
+    import json as _json
+    calls = []
+
+    class FakeOS:
+        def search(self, index, body):
+            calls.append(index)
+            return {"hits": {"hits": [{"_source": {"name": "Earth to Eve", "artist": "Earth to Eve",
+                                                   "title": "Toy Soldier", "track_id": 9}}]}}
+
+    monkeypatch.setattr("karaoke.osclient.client", lambda: FakeOS())
+    monkeypatch.setattr("karaoke.mcp_server.suggest_next_tracks",
+                        lambda artist, title, limit=3: _json.dumps({"suggestions": [
+                            {"artist": "Bowie", "title": "Heroes", "reason": "fits"}]}))
+    facts = dashboard_api._retrieve_query_facts("Suggest the next song to play after this one.",
+                                                "The Slits", "Typical Girls")
+    assert "[QUEUE: Bowie - Heroes]" in facts
+    assert "Earth to Eve" not in facts and calls == []
