@@ -1465,6 +1465,9 @@ class KaraokeTui(App):
         # 2s: fast enough to catch the end before the site starts
         # its own next track, slow enough not to spam CDP.
         self.set_interval(2.0, self._watch_queue)
+        # The live queue is shared with the dashboard, AI DJ and graph: pick
+        # up their edits (queue next, remove, clear) without a restart.
+        self.set_interval(2.0, self._poll_live_queue)
         self.apply_size_classes(self.size.width, self.size.height)
         # A row still marked 'recording' with nothing running is a crash, not a
         # live capture. Close it out so the listing does not lie and its audio
@@ -2960,6 +2963,25 @@ class KaraokeTui(App):
             "url": str(song.get("url") or ""),
             "kind": str(song.get("kind") or ""),
         }
+        if row["track_id"] is not None:
+            # Into the one live queue (shared with the dashboard and AI DJ).
+            try:
+                from . import live_queue
+                with localcache.connect() as conn:
+                    res = live_queue.enqueue([int(row["track_id"])], conn,
+                                             position="end", source="tui")
+                if res.get("ok"):
+                    self._play_once = True
+                    self._reload_live_queue()
+                    if res.get("duplicate"):
+                        self.notify(f"{row['artist']} - {row['title']} is already queued")
+                    else:
+                        self.notify(f"Enqueued {row['artist']} - {row['title']} "
+                                    f"(queue: {res.get('track_count')})")
+                        self._sync_enqueued_to_ytmusic([row])
+                    return
+            except Exception as exc:
+                log.debug("live queue enqueue failed, falling back to local: %s", exc)
         if not self._queue:
             self._play_once = True
             self._set_queue([row])
@@ -2984,10 +3006,32 @@ class KaraokeTui(App):
         random.shuffle(upcoming)
         self._queue = self._queue[:self._queue_at + 1] + upcoming
         self._render_queue()
+        self._persist_queue()
         self.notify(f"Shuffled {len(upcoming)} upcoming queue items")
 
     def action_clear_queue(self) -> None:
-        """`C`: Clear the current queue."""
+        """`C`: Clear everything after the playing song (live queue + this view).
+
+        Same as the dashboard's Clear: the song that is playing keeps playing.
+        With nothing playing from the queue this view is emptied too.
+        """
+        if self._queue and self._queue_at >= 0:
+            try:
+                from . import live_queue
+                with localcache.connect() as conn:
+                    res = live_queue.clear_upcoming(conn, source="tui")
+                self._reload_live_queue()
+                self.notify(f"Cleared {res.get('removed', 0)} upcoming song(s)")
+                return
+            except Exception as exc:
+                log.debug("live queue clear failed, clearing locally: %s", exc)
+        try:
+            from . import live_queue
+            with localcache.connect() as conn:
+                live_queue.clear_upcoming(conn, source="tui")
+            self._live_queue_seen = localcache.active_queue_updated_at()
+        except Exception as exc:
+            log.debug("live queue clear failed: %s", exc)
         self._queue = []
         self._queue_at = -1
         self._ytmusic_queue_follow = False
@@ -3001,6 +3045,52 @@ class KaraokeTui(App):
         except Exception:
             pass
         self.notify("Queue cleared")
+
+    def _persist_queue(self) -> None:
+        """Write this view's queue to the live queue (it may be an unsaved search list)."""
+        try:
+            localcache.save_active_queue(
+                getattr(self, "_active_playlist_id", ""),
+                getattr(self, "_active_playlist_name", ""),
+                self._queue,
+                current_index=max(0, self._queue_at),
+            )
+            self._live_queue_seen = localcache.active_queue_updated_at()
+        except Exception as exc:
+            log.debug("persist queue failed: %s", exc)
+
+    def _reload_live_queue(self) -> None:
+        """Show the live queue (rows + playing position) as stored in the DB."""
+        saved = localcache.load_active_queue()
+        self._live_queue_seen = float((saved or {}).get("updated_at") or 0.0)
+        rows = (saved or {}).get("rows") or []
+        self._queue = rows
+        self._unfiltered_queue = list(rows)
+        self._queue_at = int((saved or {}).get("current_index", 0) or 0) if rows else -1
+        if getattr(self, "_ytmusic_queue_follow", False):
+            self._ytmusic_video_to_queue_index = self._queue_video_map()
+        try:
+            self.query_one("#queue", DataTable).set_class(bool(rows), "-on")
+        except Exception:
+            pass
+        self._render_queue()
+
+    def _poll_live_queue(self) -> None:
+        """Reload when another surface (dashboard, AI DJ, graph, follower) edited the queue."""
+        try:
+            stamp = localcache.active_queue_updated_at()
+        except Exception:
+            return
+        seen = getattr(self, "_live_queue_seen", None)
+        if seen is None:
+            # First tick: remember, do not clobber what the TUI restored/searched.
+            self._live_queue_seen = stamp
+            return
+        if stamp > seen:
+            try:
+                self._reload_live_queue()
+            except Exception as exc:
+                log.debug("live queue reload failed: %s", exc)
 
     def action_suggest_queue(self) -> None:
         """`G`: keep the vibe going — append tracks that fit the whole queue.

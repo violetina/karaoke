@@ -483,6 +483,11 @@ This reference is generated from Python docstrings with `mkdocstrings`.
 
 ::: karaoke.mood_still
 
+
+## Live Queue
+
+::: karaoke.live_queue
+
 ## `GET /api/workers/status`
 
 Celery worker, queue and Flower dashboard status. Allows monitoring the

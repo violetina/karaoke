@@ -25,7 +25,7 @@ from .logger import log
 #: the API slows and fails on longer playlists.
 MAX_QUEUE = 50
 
-COLLECTION_QUEUE_ID = "graph-collection"
+COLLECTION_QUEUE_ID = "graph-collection"  # == live_queue.LIVE_QUEUE_ID
 
 #: Autopilot ("keep going"): when fewer than this many tracks remain after the
 #: current one, append this many more that fit the queue.
@@ -131,54 +131,45 @@ def play(name: str, track_ids: list[int], conn) -> dict[str, Any]:
 
 
 def enqueue_next(track_id: int, conn) -> dict[str, Any]:
-    """Insert a track into the active karaoke queue so it plays next.
+    """Insert a track into the live karaoke queue so it plays next.
 
-    This is what the dashboard graph's right-click "Queue next" uses: it adds
-    the song to the LOCAL queue (the one the stage's Up Next and the queue
-    follower track), inserting it right after the current position rather than
-    pushing it into YouTube Music's own transient player queue. A fresh queue
-    is created when none is loaded.
+    The dashboard graph's right-click "Queue next" and the AI DJ booth chip
+    use this. Delegates to :func:`karaoke.live_queue.enqueue`: the song lands
+    right after the current row (or moves up if it was already upcoming); a
+    fresh queue is created when none is loaded.
     """
-    built = rows_for([int(track_id)], conn)
-    if not built:
+    from . import live_queue
+
+    res = live_queue.enqueue([int(track_id)], conn, position="next",
+                             source="graph-queue-next")
+    if not res.get("ok"):
         return {"status": "error", "message": "Track not found in library"}
-    row = built[0]
+    first = (res.get("tracks") or [None])[0]
+    out = {"status": "queued", "queue_name": res.get("queue_name", ""),
+           "created": bool(res.get("created")), "duplicate": bool(res.get("duplicate"))}
+    if first:
+        out.update(position=first["position"], artist=first["artist"], title=first["title"])
+    else:
+        row = rows_for([int(track_id)], conn)
+        if row:
+            out.update(artist=row[0]["artist"], title=row[0]["title"])
+    return out
 
-    active = localcache.load_active_queue(conn=conn)
-    if not active or not active.get("rows"):
-        name = "Karaoke: Dashboard Queue"
-        localcache.save_active_queue(COLLECTION_QUEUE_ID, name, [row],
-                                     current_index=0, conn=conn)
-        localcache.record_queue_event("enqueued", track_id=row["track_id"],
-                                      artist=row["artist"], title=row["title"],
-                                      queue_index=0,
-                                      metadata={"source": "graph-queue-next"},
-                                      conn=conn)
-        return {"status": "queued", "position": 1, "created": True,
-                "queue_name": name, "artist": row["artist"], "title": row["title"]}
 
-    rows = list(active["rows"])
-    cur_idx = int(active.get("current_index", 0) or 0)
-    insert_at = min(len(rows), max(0, cur_idx) + 1)
+def enqueue_tracks(
+    track_ids: list[int],
+    conn,
+    position: str = "end",
+    queue_name: str = "Karaoke: Dashboard Queue",
+) -> dict[str, Any]:
+    """Insert or append several tracks into the live karaoke queue (AI DJ tools).
 
-    # Don't double-add when the song is already the very next row.
-    if insert_at < len(rows) \
-            and rows[insert_at].get("track_id") == row["track_id"]:
-        return {"status": "queued", "position": insert_at,
-                "queue_name": active.get("name", ""), "duplicate": True,
-                "artist": row["artist"], "title": row["title"]}
+    Thin wrapper over :func:`karaoke.live_queue.enqueue`.
+    """
+    from . import live_queue
 
-    rows.insert(insert_at, row)
-    localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
-                                 active.get("name") or "Karaoke: Dashboard Queue",
-                                 rows, current_index=cur_idx, conn=conn)
-    localcache.record_queue_event("enqueued", track_id=row["track_id"],
-                                  artist=row["artist"], title=row["title"],
-                                  queue_index=insert_at,
-                                  metadata={"source": "graph-queue-next"}, conn=conn)
-    return {"status": "queued", "position": insert_at + 1,
-            "queue_name": active.get("name", ""),
-            "artist": row["artist"], "title": row["title"]}
+    return live_queue.enqueue(track_ids, conn, position=position,
+                              source="ai-dj-queue", queue_name=queue_name)
 
 
 def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
@@ -223,15 +214,14 @@ def autopilot_refill(conn, *, threshold: int = AUTOPILOT_THRESHOLD,
     if not new_rows:
         return {"refilled": 0, "reason": "no_playable"}
 
-    merged = list(rows) + new_rows
-    localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
-                                 active.get("name") or "Karaoke: Dashboard Queue",
-                                 merged, current_index=cur_idx, conn=conn)
-    localcache.record_queue_event("autopilot_refill", queue_index=len(merged),
-                                  metadata={"added": len(new_rows), "source": "autopilot"},
+    from . import live_queue
+    added = live_queue.append_rows(new_rows, conn, source="autopilot")
+    total = len(rows) + added
+    localcache.record_queue_event("autopilot_refill", queue_index=total,
+                                  metadata={"added": added, "source": "autopilot"},
                                   conn=conn)
-    log.info("autopilot: appended %d tracks (queue now %d)", len(new_rows), len(merged))
-    return {"refilled": len(new_rows), "total": len(merged)}
+    log.info("autopilot: appended %d tracks (queue now %d)", added, total)
+    return {"refilled": added, "total": total}
 
 
 def advance_active_queue(conn, delta: int = 1) -> Optional[dict[str, Any]]:
@@ -243,16 +233,13 @@ def advance_active_queue(conn, delta: int = 1) -> Optional[dict[str, Any]]:
     through YouTube Music's own autoplay. Returns the new index and row, or
     None when there is no active queue.
     """
-    active = localcache.load_active_queue(conn=conn)
-    if not active or not active.get("rows"):
-        return None
-    rows = active["rows"]
-    cur = int(active.get("current_index", 0) or 0)
-    new_idx = max(0, min(len(rows) - 1, cur + delta))
-    if new_idx != cur:
-        localcache.save_active_queue(active.get("playlist_id") or COLLECTION_QUEUE_ID,
-                                     active.get("name") or "Karaoke: Dashboard Queue",
-                                     rows, current_index=new_idx, conn=conn)
-    return {"index": new_idx, "row": rows[new_idx], "moved": new_idx != cur}
+    def apply(state: dict[str, Any]) -> Optional[dict[str, Any]]:
+        rows = state["rows"]
+        if not rows:
+            return None
+        cur = int(state["current_index"] or 0)
+        new_idx = max(0, min(len(rows) - 1, cur + delta))
+        state["current_index"] = new_idx
+        return {"index": new_idx, "row": rows[new_idx], "moved": new_idx != cur}
 
-
+    return localcache.mutate_active_queue(apply, conn=conn)
