@@ -63,4 +63,24 @@ def test_report_renders(tmp_path):
                      score=1.0, note="ok", load={"gpu_avg": 50.0, "cpu_avg": 10.0,
                                                  "gpu_mem_mb_max": 2048.0, "ram_mb_max": 8192.0})
     md = bench.report(["m"], [TRUTH], {"m": {"load_s": 1.2, "where": "100% GPU"}}, [r])
-    assert "| m | 1.2s (100% GPU) | 1.0/1 | 1.0s | 2.0s | 50% | 10% | 2.0 GiB | 8.0 GiB | 0 |" in md
+    assert "| m | 1.2s (100% GPU) | **100%** (1.0/1) | 1.0s | 2.0s | 50% | 10% | 2.0 GiB | 8.0 GiB | 0 |" in md
+
+
+def test_score_is_na_when_library_has_no_ground_truth():
+    t = bench.Truth(1, "Solo", "Song", key="C major", bpm=None)
+    assert bench.score("artist", "anything", t)[0] is None
+    assert bench.score("chords", "C G", t)[0] is None
+    assert bench.score("mood", "happy", t)[0] is None
+    # key present but no BPM: only the key counts
+    assert bench.score("key_bpm", "It is in C major.", t)[0] == 1.0
+
+
+def test_facts_total_ignores_na():
+    rs = [bench.Result(model="m", qid=q, question="q", score=sc)
+          for q, sc in (("a", 1.0), ("b", None), ("c", 0.5))]
+    assert bench._facts(rs) == (1.5, 2)
+
+
+def test_single_member_artist_can_score_full():
+    t = bench.Truth(1, "Solo Act", "Song", members=["Jane Doe"])
+    assert bench.score("artist", "Solo Act is Jane Doe's project.", t)[0] == 1.0
