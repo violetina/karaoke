@@ -84,3 +84,18 @@ def test_facts_total_ignores_na():
 def test_single_member_artist_can_score_full():
     t = bench.Truth(1, "Solo Act", "Song", members=["Jane Doe"])
     assert bench.score("artist", "Solo Act is Jane Doe's project.", t)[0] == 1.0
+
+
+def test_bpm_terse_and_wordy_forms():
+    assert bench.bpm_mentioned("G# minor, 96.", 96.0)
+    assert bench.bpm_mentioned("E minor (Camelot 9A) · 96", 96.0)
+    assert bench.bpm_mentioned("The BPM is a steady 162, perfect for pogo.", 161.7)
+    # a long reply with a year must not pass on a bare number
+    long = "This classic from 1996 " + "really " * 30 + "has a great groove."
+    assert not bench.bpm_mentioned(long, 96.0)
+
+
+def test_spread_picks_evenly():
+    assert bench.spread(list(range(10)), 3) == [0, 3, 6]
+    assert bench.spread([1, 2], 5) == [1, 2]
+    assert bench.spread([1, 2, 3], 0) == [1, 2, 3]

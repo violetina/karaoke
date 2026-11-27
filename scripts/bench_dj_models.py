@@ -155,12 +155,19 @@ def bpm_mentioned(answer: str, bpm: Optional[float], tol: float = 3.0) -> bool:
     if bpm is None:
         return False
     text = re.sub(r"[*_`]", "", answer)       # markdown bold around numbers
-    pats = (r"(\d{2,3}(?:\.\d+)?)\s*(?:bpm|beats)",                      # "162 BPM"
-            r"(?:bpm|tempo)(?:\s*(?:of|is|at|:|=|~|around|about|roughly))*\s*~?(\d{2,3}(?:\.\d+)?)")  # "BPM of 162"
+    pats = (r"(\d{2,3}(?:\.\d+)?)\s*(?:bpm|beats)",                          # "162 BPM"
+            r"(?:bpm|tempo)\W+(?:[a-z]+\W+){0,3}?~?(\d{2,3}(?:\.\d+)?)")    # "BPM is a steady 162"
     for pat in pats:
         for m in re.finditer(pat, text, re.IGNORECASE):
             if abs(float(m.group(1)) - bpm) <= tol:
                 return True
+    # Terse answers ("G# minor, 96.") give the tempo as a bare number. Accept it
+    # only when the answer is short and has at most two standalone numbers, so a
+    # year or a track count in a longer reply can't pass for the tempo.
+    if len(text) <= 120:
+        nums = [float(n) for n in re.findall(r"(?<![\w.#])(\d{2,3}(?:\.\d+)?)(?![\w])", text)]
+        if len(nums) <= 2 and any(abs(n - bpm) <= tol for n in nums):
+            return True
     return False
 
 
@@ -241,6 +248,14 @@ def score(qid: str, answer: str, truth: Truth, conn=None) -> tuple[Optional[floa
             return 0.0, f"'{q}' is the song already playing"
         return 1.0, f"'{q}' → track {tid}"
     return 0.0, "unknown question"
+
+
+def spread(items: list, n: int) -> list:
+    """``n`` items evenly spaced over ``items`` (all of them when n <= 0 or n >= len)."""
+    if n <= 0 or n >= len(items):
+        return list(items)
+    step = len(items) / n
+    return [items[int(i * step)] for i in range(n)]
 
 
 def pick_smart_playlist_tracks(name_filter: str = "") -> list[tuple[int, str]]:
@@ -630,6 +645,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--smart-playlists", nargs="?", const="", metavar="REGEX",
                     help="one fully analysed track per smart playlist (optionally only playlists whose "
                          "name matches REGEX, e.g. '^Genre')")
+    ap.add_argument("--max-tracks", type=int, default=0, metavar="N",
+                    help="with --smart-playlists: keep N tracks spread evenly over the playlists (quick screen)")
     ap.add_argument("--timeout", type=float, default=180.0, help="per-answer timeout in seconds")
     ap.add_argument("--out", type=Path, default=Path.home() / ".local/share/karaoke/bench")
     ap.add_argument("--label", default="", help="suffix for the report name, e.g. 'before-fix'")
@@ -641,7 +658,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     models = [m for m in (args.model or installed_models()) if m not in set(args.skip)]
     if args.smart_playlists is not None:
-        tracks = pick_smart_playlist_tracks(args.smart_playlists)
+        tracks = spread(pick_smart_playlist_tracks(args.smart_playlists), args.max_tracks)
         for tid, name in tracks:
             print(f"  {name}: track {tid}")
     else:
