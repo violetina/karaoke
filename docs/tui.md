@@ -43,9 +43,9 @@ go stale. The ones worth knowing:
 | `v` | Lyric Vibe on current playing song (mood arc, sentiment bars, vocal delivery tips) |
 | `H` | library overlay; picking a song closes it |
 | `-` `/` `+` | adjust mood energy slider floor (real-time filtering) |
-| `a` | enqueue highlighted track to end of active queue |
+| `a` | enqueue highlighted track to the end of the live queue (shared with the dashboard and AI DJ; skipped if already upcoming) |
 | `U` | shuffle upcoming queue items |
-| `C` | clear active queue |
+| `C` | clear everything after the playing song (it keeps playing) |
 | `F` | focus mode — hides everything but the lyrics |
 | `R` | mic/radio mode (songrec) |
 | `A` | full processing for the playing track, as radio mode does: adds it to the library if missing, fetches audio for chords, CLAP and mood, upgrades word timings |
@@ -120,7 +120,7 @@ songs already in `dj-list` are excluded.
 - **Interactive Mood Slider (`-` / `+` / `m`)**: Sidebar slider `energy ≥ 30% [███░░░░░░░] -/+` dynamically sets the energy floor and filters both the library list and search results in real time.
 - **Sort Selector**: Sort tracks by `Artist / Title (A-Z)`, `🌱 Priority: Least Played`, `⭐ Most Played`, `Energy (high→low)`, `Energy (low→high)`, `BPM (fast→slow)`, `BPM (slow→fast)`, or `Key`. Play counts are stored per track (`tracks.play_count`, incremented on every play/discover event) so "least played" surfaces undiscovered tracks first.
 - **Genre & Feeling Column**: Displays CLAP zero-shot genre label + acoustic feeling glyph (`Genre/Feel` e.g. `hip hop 🌙`, `rock 🔥`, `pop ⚡`). Feeling is derived from energy (arousal) and brightness (valence proxy): 🔥/☀/⚡/🌗/♡/🌙.
-- **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear queue (`C`), Follow Karaoke Queue (`o`; locked on while a local queue is active).
+- **Playlist & Queue Controls**: Enqueue track (`a`), Shuffle upcoming (`U`), Clear upcoming (`C`), Follow Karaoke Queue (`o`; locked on while a local queue is active). The TUI's queue is the [one live queue](flows.md#one-live-queue-dashboard-graph-ai-dj-tui): edits made from the dashboard, the AI DJ or radio Keep Going show up within ~2s.
 - **Keep the vibe going** (`G`): appends tracks that fit the *whole* current queue. Seeds on every queued track by audio similarity (CLAP embedding, with a per-seed spectral fallback), pools the neighbours, and adds the ones closest to the set — a track that fits several queued songs outranks one that only resembles a single outlier. Already-queued tracks are skipped and each artist is capped. Needs the OpenSearch audio/CLAP indexes; if no seed has a vector it reports that instead of adding anything.
 
 ## Operations & Admin Dashboard (`make admin`)

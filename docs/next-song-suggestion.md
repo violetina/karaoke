@@ -134,3 +134,13 @@ the dashboard as the "🔁 Keep going" button in both the Queue panel (acting on
 whatever's currently playing) and the Playlists panel (so starting a playlist
 from that list doesn't require switching panels to turn it on first) — both
 buttons read and write the same shared autopilot flag on the active queue.
+
+### Radio-seeded refill
+
+The same flag also drives a second trigger that does not need a follower or a
+non-empty queue: when radio mode hears a new song and the queue is empty (or
+was started by radio), `collection.radio_keep_going_refill` seeds on that one
+song with `queue_suggest.suggest_for_track` and adds 5 matches, up to 25, then
+rotates out the oldest 5. While radio owns the queue, `autopilot_refill`
+returns `radio_managed` instead of also appending. Details:
+[Radio mode → Keep Going](modes/radio.md#keep-going-from-the-radio-collectionradio_keep_going_refill).

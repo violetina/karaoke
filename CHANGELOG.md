@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### One live queue + radio Keep Going
+
+- **One queue for everything.** The dashboard Up Next panel, the dashboard
+  graph's "Queue next", the AI DJ (booth chip and MCP tools), the :8888 graph
+  collector and the TUI all edit the same `active_queue_state` row through
+  `karaoke.live_queue`, a locked read-modify-write, so concurrent writers no
+  longer drop each other's songs.
+- **Dashboard Up Next:** 🗑 Clear (everything after the playing song), 🔀
+  shuffle, per-song ✕ remove and ⤒ play next, "Show all N". New BFF endpoints
+  `GET /api/queue` and `POST /api/queue/{add,clear,remove,move,shuffle}`.
+- **AI DJ:** new MCP tool `edit_live_queue`; `get_live_queue` rows carry
+  `index` / `is_current`.
+- **Graph collector:** new "➕ Add to queue" appends instead of replacing.
+- **Radio Keep Going:** with Keep going on and an empty queue, each newly heard
+  radio song adds 5 matching tracks, up to 25, then the oldest 5 rotate out.
+  No duplicates; a song not analysed yet is retried for up to 10 minutes while
+  radio still hears it.
+- **Follower fixes:** queueing a song no longer restarts the playing track;
+  advancing no longer drops songs queued in the meantime.
+- `active_queue_state.updated_at` widened from `REAL` to `DOUBLE PRECISION`.
+
 ## 1.11.0 — Docs cleanup: archive shipped plans, version-stamped wiki, make-target deprecation sweep
 
 ### Docs reorg

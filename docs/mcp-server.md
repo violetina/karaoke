@@ -67,6 +67,9 @@ text/event-stream"`, or just hit `/health`.
 | `add_to_dj_playlist` | Add one or more tracks to `dj-list` or any custom playlist slug (e.g. `funny-happy`), syncing with YouTube Music | `track_id`, `track_ids` (batch), `artist`, `title`, `playlist_id`, `playlist_name` |
 | `get_dj_playlist` | Retrieve tracks, positions, and metadata from a DJ or saved playlist | `playlist_id` (default `dj-list`) |
 | `list_playlists` | List all saved playlists (DJ lists, custom playlists, smart playlists, YouTube Music playlists) | `source_kind`, `limit` |
+| `get_live_queue` | Read the live Up Next queue (the one the dashboard, graph, TUI and radio Keep Going share), with `position`, `index`, `is_current` and `track_id` per row | — |
+| `queue_next_in_player` | Add tracks to the live queue, after the current song or at the end; a song already upcoming moves up instead of being duplicated | `track_ids`, `position` (`next`, `end`) |
+| `edit_live_queue` | Remove, reorder, shuffle or clear the live queue (`clear` keeps the playing song) | `action` (`remove`, `play_next`, `move`, `clear`, `shuffle`), `index`, `track_id`, `to_index` |
 | `clear_dj_playlist` | Empty all tracks from a DJ playlist locally and on YouTube Music | `playlist_id` (default `dj-list`) |
 | `search_by_chords` | Search tracks by v2 chord progressions (Roman numerals like `'ii V I'` or chord names like `'Am F C G'`), functional harmony style (`jazz-functional`, `blues`, `andalusian`, `triadic`, `mixed`), and cadences | `progression`, `chords_used`, `style`, `cadence`, `form`, `min_blues_score`, `key`, `only_synced_lyrics` |
 | `get_track_chords` | Inspect a track's v2 chord timeline, functional harmony summary, cadences, and top recurring chord/Roman progressions | `track_id`, `artist`, `title`, `max_chords` |

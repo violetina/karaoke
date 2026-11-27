@@ -426,6 +426,7 @@ flowchart LR
     M[AI DJ MCP tools<br/>queue_next_in_player · edit_live_queue] --> Q
     C[:8888 graph collector<br/>➕ Add to queue] -->|/api/collection/enqueue| Q
     T[TUI a / C / U] --> Q
+    R[Radio / mic detection<br/>Keep going: 5 per new song] -->|radio_keep_going_refill| Q
     Q --> F[queue follower] --> K[kiosk player]
     Q -->|updated_at poll| T
 ```
@@ -437,3 +438,8 @@ flowchart LR
   advances by updating `current_index` alone.
 - The AI DJ's `dj-list` is a saved playlist, not a queue; the graph collector's
   **▶ Play queue** still replaces the live queue on purpose.
+- With Keep going on and an empty queue, radio mode fills it from what it
+  hears: 5 matches per new song, up to 25, then the oldest 5 rotate out
+  ([Radio mode → Keep Going](modes/radio.md#keep-going-from-the-radio-collectionradio_keep_going_refill)).
+- Endpoints: `GET /api/queue`, `POST /api/queue/{add,clear,remove,move,shuffle}`
+  on the dashboard BFF (:8900); `POST /api/collection/enqueue` on :8888.
