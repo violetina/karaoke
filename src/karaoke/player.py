@@ -768,6 +768,22 @@ def _song_length(ref, ly) -> Optional[float]:
     return seconds if seconds and seconds < 1500 else None
 
 
+#: How long radio keep-going waits for a newly heard song's vectors (it is
+#: queued for full processing on first hearing) before giving up on it.
+RADIO_KEEP_GOING_WAIT_S = 600.0
+
+
+def _radio_still_hears(artist: str, title: str) -> bool:
+    """True while the radio listener's current song is still this one."""
+    from . import live_state
+
+    cur = live_state.current()
+    if not cur:
+        return False
+    norm = lambda s: str(s or "").strip().casefold()  # noqa: E731
+    return norm(cur.get("artist")) == norm(artist) and norm(cur.get("title")) == norm(title)
+
+
 def _ensure_in_library(artist: str, title: str) -> None:
     """Best-effort: add a radio song to the library and queue its processing."""
     from . import localcache
@@ -783,8 +799,9 @@ def _ensure_in_library(artist: str, title: str) -> None:
     try:
         from . import collection
 
-        wait_s = 60.0 if locals().get("outcome") in ("queued-full", "queued") else 0.0
-        collection.radio_keep_going_refill(artist, title, wait_for_ready_s=wait_s)
+        collection.radio_keep_going_refill(
+            artist, title, wait_for_ready_s=RADIO_KEEP_GOING_WAIT_S,
+            poll_interval_s=15.0, still_current=lambda: _radio_still_hears(artist, title))
     except Exception:
         log.debug("radio: keep-going refill failed for %s - %s", artist, title, exc_info=True)
 

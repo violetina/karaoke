@@ -2203,7 +2203,14 @@ class KaraokeTui(App):
                         log.info("mic: %s - %s", ref.artist, ref.title)
                         try:
                             from . import collection
-                            collection.radio_keep_going_refill(ref.artist, ref.title)
+                            threading.Thread(
+                                target=collection.radio_keep_going_refill,
+                                args=(ref.artist, ref.title),
+                                kwargs={"wait_for_ready_s": 600.0, "poll_interval_s": 15.0,
+                                        "still_current": lambda a=ref.artist, t=ref.title: (
+                                            self._mic_ref is not None
+                                            and self._mic_ref.artist == a and self._mic_ref.title == t)},
+                                daemon=True, name="radio-keep-going").start()
                         except Exception:
                             log.debug("mic: radio keep-going refill failed", exc_info=True)
                     wait = plan.after_match(self.mic_elapsed(), length)
