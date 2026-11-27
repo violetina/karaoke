@@ -2199,6 +2199,115 @@ def summarize(
 
 # -- active queue & rollback persistence --------------------------------------
 
+def clean_queue_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalise queue rows to the persisted shape (one dict per song)."""
+    return [
+        {
+            "track_id": r.get("track_id"),
+            "artist": r.get("artist") or "",
+            "title": r.get("title") or "",
+            "url": r.get("url") or "",
+            "kind": r.get("kind") or "",
+            "genre": r.get("genre"),
+            "energy": r.get("energy"),
+            "bpm": r.get("bpm"),
+            "key": r.get("key"),
+        }
+        for r in rows
+    ]
+
+
+def mutate_active_queue(fn, conn: Optional[Connection] = None) -> Any:
+    """Apply ``fn(state)`` to the live queue atomically and return its result.
+
+    ``state`` is ``{"playlist_id", "name", "current_index", "rows"}`` (an empty
+    queue when none is stored). ``fn`` edits it in place; the row is locked
+    with ``SELECT ... FOR UPDATE`` for the read-modify-write, so the dashboard,
+    the AI DJ, the TUI and the queue follower cannot overwrite each other's
+    edits. Nothing is written when ``fn`` leaves the state unchanged.
+    """
+    import json
+    import time
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_queue_schema(c)
+        # The pool runs in autocommit, so the row lock only holds inside an
+        # explicit transaction block (a savepoint if the caller has one open).
+        with c.transaction():
+            row = c.execute(
+                "SELECT playlist_id, name, current_index, items_json "
+                "FROM active_queue_state WHERE id = 1 FOR UPDATE"
+            ).fetchone()
+            try:
+                items = json.loads(row["items_json"]) if row else []
+            except Exception:
+                items = []
+            state = {
+                "playlist_id": str(row["playlist_id"] or "") if row else "",
+                "name": str(row["name"] or "") if row else "",
+                "current_index": int(row["current_index"] or 0) if row else 0,
+                "rows": clean_queue_rows(items if isinstance(items, list) else []),
+            }
+            before = json.dumps(state, sort_keys=True, default=str)
+            result = fn(state)
+            state["rows"] = clean_queue_rows(state.get("rows") or [])
+            if json.dumps(state, sort_keys=True, default=str) != before:
+                c.execute(
+                    """
+                    INSERT INTO active_queue_state (id, playlist_id, name, current_index, updated_at, items_json)
+                    VALUES (1, %s, %s, %s, %s, %s)
+                    ON CONFLICT(id) DO UPDATE SET
+                        playlist_id = excluded.playlist_id,
+                        name = excluded.name,
+                        current_index = excluded.current_index,
+                        updated_at = excluded.updated_at,
+                        items_json = excluded.items_json
+                    """,
+                    (state["playlist_id"], state["name"], int(state["current_index"]),
+                     time.time(), json.dumps(state["rows"])),
+                )
+        return result
+    finally:
+        if own:
+            c.close()
+
+
+def set_active_queue_index(index: int, conn: Optional[Connection] = None) -> None:
+    """Move only ``current_index`` of the live queue, leaving its rows alone.
+
+    The follower used to re-save the whole row list it had loaded a second
+    earlier just to advance the index, silently dropping any song queued in
+    between. This touches the index column only.
+    """
+    import time
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_queue_schema(c)
+        c.execute(
+            "UPDATE active_queue_state SET current_index = %s, updated_at = %s WHERE id = 1",
+            (int(index), time.time()),
+        )
+        c.commit()
+    finally:
+        if own:
+            c.close()
+
+
+def active_queue_updated_at(conn: Optional[Connection] = None) -> float:
+    """Return the live queue's ``updated_at`` (0.0 when none) -- a cheap change probe."""
+    own = conn is None
+    c = conn or connect()
+    try:
+        ensure_queue_schema(c)
+        row = c.execute("SELECT updated_at FROM active_queue_state WHERE id = 1").fetchone()
+        return float(row["updated_at"] or 0.0) if row else 0.0
+    finally:
+        if own:
+            c.close()
+
+
 def save_active_queue(
     playlist_id: str,
     name: str,
@@ -2213,20 +2322,7 @@ def save_active_queue(
     c = conn or connect()
     try:
         ensure_queue_schema(c)
-        clean_rows = [
-            {
-                "track_id": r.get("track_id"),
-                "artist": r.get("artist") or "",
-                "title": r.get("title") or "",
-                "url": r.get("url") or "",
-                "kind": r.get("kind") or "",
-                "genre": r.get("genre"),
-                "energy": r.get("energy"),
-                "bpm": r.get("bpm"),
-                "key": r.get("key"),
-            }
-            for r in rows
-        ]
+        clean_rows = clean_queue_rows(rows)
         c.execute(
             """
             INSERT INTO active_queue_state (id, playlist_id, name, current_index, updated_at, items_json)

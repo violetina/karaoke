@@ -410,3 +410,30 @@ flowchart TD
     F --> G[Move DataTable Cursor to Active Row]
 ```
 
+
+## One Live Queue (dashboard, graph, AI DJ, TUI)
+
+There is exactly one playback queue: the single `active_queue_state` row,
+edited only through `karaoke.live_queue` (a locked read-modify-write via
+`localcache.mutate_active_queue`, so concurrent writers cannot drop each
+other's songs). `karaoke-queue-follow.service` plays it.
+
+```mermaid
+flowchart LR
+    D[Dashboard Up Next<br/>clear · remove · play next · shuffle] -->|/api/queue/*| Q[(active_queue_state)]
+    G[Dashboard graph<br/>right-click Queue next] -->|/api/song/queue| Q
+    B[AI DJ booth chip] -->|/api/song/queue| Q
+    M[AI DJ MCP tools<br/>queue_next_in_player · edit_live_queue] --> Q
+    C[:8888 graph collector<br/>➕ Add to queue] -->|/api/collection/enqueue| Q
+    T[TUI a / C / U] --> Q
+    Q --> F[queue follower] --> K[kiosk player]
+    Q -->|updated_at poll| T
+```
+
+- **Clear** drops everything after the current song; the playing song keeps playing.
+- **Queue next** on a song that is already upcoming moves it up instead of duplicating it.
+- The follower re-navigates only when the *song* at `current_index` changes, so
+  queueing or removing other rows never restarts the playing track, and it
+  advances by updating `current_index` alone.
+- The AI DJ's `dj-list` is a saved playlist, not a queue; the graph collector's
+  **▶ Play queue** still replaces the live queue on purpose.

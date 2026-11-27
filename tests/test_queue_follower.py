@@ -4,14 +4,20 @@ from unittest.mock import patch
 from karaoke import queue_follower as qf
 
 
-def test_queue_signature_changes_with_identity_and_length():
+def test_queue_signature_ignores_length_but_not_identity():
+    # Queueing/removing songs (length change) must NOT read as a new queue --
+    # that used to restart the song already playing.
     a = {"playlist_id": "p1", "name": "Hip Hop", "rows": [{}, {}]}
     b = {"playlist_id": "p1", "name": "Hip Hop", "rows": [{}, {}, {}]}
     c = {"playlist_id": "p2", "name": "Hip Hop", "rows": [{}, {}]}
     assert qf._queue_signature(None) is None
-    assert qf._queue_signature(a) == qf._queue_signature(dict(a))
-    assert qf._queue_signature(a) != qf._queue_signature(b)   # length differs
+    assert qf._queue_signature(a) == qf._queue_signature(b)
     assert qf._queue_signature(a) != qf._queue_signature(c)   # playlist differs
+
+
+def test_row_key_identifies_the_song_not_the_index():
+    assert qf._row_key({"track_id": 5, "url": "u"}) == qf._row_key({"track_id": 5, "url": "u", "bpm": 1})
+    assert qf._row_key({"track_id": 5, "url": "u"}) != qf._row_key({"track_id": 6, "url": "u"})
 
 
 def test_play_row_skips_when_no_source_url():
@@ -31,13 +37,13 @@ def test_play_row_opens_known_source():
         assert kwargs["title"] == "Flash"
 
 
-def test_save_index_persists_current_index():
+def test_save_index_only_moves_the_index():
     q = {"playlist_id": "p1", "name": "Hip Hop", "rows": [{"a": 1}], "current_index": 0}
-    with patch.object(qf.localcache, "save_active_queue") as save:
+    with patch.object(qf.localcache, "set_active_queue_index") as set_idx, \
+         patch.object(qf.localcache, "save_active_queue") as save:
         qf._save_index(q, 3)
-        save.assert_called_once()
-        _, kwargs = save.call_args
-        assert kwargs["current_index"] == 3
+    set_idx.assert_called_once_with(3)
+    save.assert_not_called()   # never re-save a possibly stale row list
 
 
 def test_autopilot_tick_forces_ytmusic_autoplay_off_when_enabled():

@@ -26,10 +26,20 @@ AUTOPILOT_CHECK_S = 15.0  # how often to check whether to refill (keep going)
 
 
 def _queue_signature(q: Optional[dict[str, Any]]) -> Optional[tuple]:
-    """Identity of the loaded queue, so a replacement restarts following."""
+    """Identity of the loaded queue, so a replacement restarts following.
+
+    Deliberately NOT the row count: songs queued or removed by the dashboard,
+    the AI DJ or the TUI change the length, and treating that as a new queue
+    used to re-navigate to (restart) the song already playing.
+    """
     if not q:
         return None
-    return (q.get("playlist_id") or "", q.get("name") or "", len(q.get("rows") or []))
+    return (q.get("playlist_id") or "", q.get("name") or "")
+
+
+def _row_key(row: dict[str, Any]) -> tuple:
+    """Which song a row is, so the follower notices when its row changes under it."""
+    return (row.get("track_id"), str(row.get("url") or ""))
 
 
 def _play_row(row: dict[str, Any]) -> bool:
@@ -50,10 +60,9 @@ def _play_row(row: dict[str, Any]) -> bool:
 
 
 def _save_index(q: dict[str, Any], idx: int) -> None:
-    localcache.save_active_queue(
-        q.get("playlist_id") or "", q.get("name") or "",
-        q.get("rows") or [], current_index=idx,
-    )
+    # Index only: re-saving the rows loaded a moment ago would drop any song
+    # queued in between.
+    localcache.set_active_queue_index(idx)
 
 
 def _record_advance(row: dict[str, Any], idx: int) -> None:
@@ -100,7 +109,7 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
     """
     log.info("queue-follow: starting")
     sig: Optional[tuple] = None
-    launched_idx: Optional[int] = None   # row index we last navigated to
+    launched: Optional[tuple] = None     # row key (track_id, url) we last navigated to
     nav_at = 0.0
     idle_since = 0.0
     last_autopilot = 0.0
@@ -121,7 +130,7 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
         rows = (q or {}).get("rows") or []
         if not q or not rows:
             sig = None
-            launched_idx = None
+            launched = None
             time.sleep(poll_interval)
             continue
 
@@ -130,7 +139,7 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
         new_sig = _queue_signature(q)
         if new_sig != sig:
             sig = new_sig
-            launched_idx = None
+            launched = None
             idle_since = 0.0
             log.info("queue-follow: following '%s' (%d rows)", q.get("name"), len(rows))
 
@@ -141,21 +150,25 @@ def run(poll_interval: float = POLL_INTERVAL_S) -> int:  # pragma: no cover - li
             continue
 
         row = rows[cur_idx]
+        target = _row_key(row)
 
-        # The target row changed (track ended and advanced it, or a manual
-        # Next/Previous moved current_index): navigate to it now.
-        if cur_idx != launched_idx:
+        # The song at current_index changed (track ended and advanced it, a
+        # manual Next/Previous moved current_index, or the current row itself
+        # was removed/replaced): navigate to it now. Keyed on the song, not the
+        # index, so queueing/removing other rows -- even history rows, which
+        # shift the index -- never restarts the song that is playing.
+        if target != launched:
             if _play_row(row):
                 _record_advance(row, cur_idx)
                 log.info("queue-follow: playing [%d] %s - %s", cur_idx,
                          row.get("artist"), row.get("title"))
-                launched_idx = cur_idx
+                launched = target
                 nav_at = time.monotonic()
                 idle_since = 0.0
             else:
                 # No source: skip past it.
                 _save_index(q, cur_idx + 1)
-                launched_idx = cur_idx  # don't retry this row
+                launched = target  # don't retry this row
             time.sleep(poll_interval)
             continue
 

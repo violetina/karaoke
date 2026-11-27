@@ -1174,7 +1174,8 @@ GRAPH_HTML = """<!DOCTYPE html>
         <div class="collector-actions">
           <input id="collector-name" placeholder="Playlist name (optional)" maxlength="80">
           <button onclick="saveCollection()">💾 Save playlist</button>
-          <button onclick="playCollection()">▶ Play queue</button>
+          <button onclick="playCollection()" title="Replace the live queue with these songs and start playing">▶ Play queue</button>
+          <button onclick="enqueueCollection()" title="Append these songs to the live Up Next queue (dashboard, AI DJ and TUI share it)">➕ Add to queue</button>
           <button class="btn-secondary" onclick="clearCollection()">Clear</button>
         </div>
         <div class="collector-status" id="collector-status"></div>
@@ -1603,6 +1604,17 @@ GRAPH_HTML = """<!DOCTYPE html>
           setCollectorStatus(res.message || 'Could not start the queue');
         }
       } catch (e) { setCollectorStatus('Play failed: ' + e.message); }
+    }
+
+    async function enqueueCollection() {
+      setCollectorStatus('Adding to the live queue…');
+      try {
+        const res = await collectionCall('/api/collection/enqueue');
+        if (!res) return;
+        if (res.status !== 'queued') { setCollectorStatus(res.message || 'Could not add to the queue'); return; }
+        const dup = res.track_count !== undefined && !res.added_count ? ' (already queued)' : '';
+        setCollectorStatus(`Added ${res.added_count || 0} songs to Up Next${dup} — queue now ${res.track_count}`);
+      } catch (e) { setCollectorStatus('Add failed: ' + e.message); }
     }
 
     function clearCollection() {
@@ -2143,6 +2155,26 @@ async def api_collection_save(request: Request) -> JSONResponse:
         with localcache.connect() as conn:
             return collection.save(name, ids, conn)
     return JSONResponse({"status": "saved", **await anyio.to_thread.run_sync(work)})
+
+
+async def api_collection_enqueue(request: Request) -> JSONResponse:
+    """Append the collector's songs to the live queue without interrupting playback."""
+    import anyio
+
+    from . import live_queue
+
+    _name, ids = await _collection_request(request)
+    if not ids:
+        return JSONResponse({"status": "error", "message": "nothing collected"}, status_code=400)
+
+    def work():
+        with localcache.connect() as conn:
+            return live_queue.enqueue(ids, conn, position="end", source="graph-collector")
+    try:
+        return JSONResponse(await anyio.to_thread.run_sync(work))
+    except Exception as exc:
+        log.warning("api_collection_enqueue failed: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 async def api_collection_play(request: Request) -> JSONResponse:

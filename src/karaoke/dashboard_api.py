@@ -524,6 +524,82 @@ async def set_queue_autopilot(body: AutopilotPayload):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# -- the one live queue (live_queue.py) ---------------------------------------
+# Up Next panel, graph "Queue next", AI DJ and TUI all edit the same queue.
+
+class QueueItemPayload(BaseModel):
+    index: int
+    track_id: int | None = None   # guards against the queue shifting under the click
+
+
+class QueueMovePayload(QueueItemPayload):
+    to_index: int | None = None   # omitted => move right after the current song
+
+
+class QueueClearPayload(BaseModel):
+    from_index: int | None = None  # the stage's upcoming_start; None => after current_index
+
+
+class QueueAddPayload(BaseModel):
+    track_ids: list[int]
+    position: str = "end"          # "next" | "end"
+
+
+def _live_queue_call(fn_name: str, *args, **kwargs):
+    from . import live_queue, localcache
+    with localcache.connect() as conn:
+        return getattr(live_queue, fn_name)(*args, conn=conn, **kwargs)
+
+
+@app.get("/api/queue")
+async def get_live_queue():
+    """The whole live queue (history + upcoming) with absolute row indices."""
+    from . import live_queue
+    return await asyncio.to_thread(live_queue.snapshot)
+
+
+@app.post("/api/queue/add")
+async def add_to_live_queue(body: QueueAddPayload):
+    """Append (or insert next) library tracks -- same path the AI DJ tools use."""
+    return await asyncio.to_thread(_live_queue_call, "enqueue", body.track_ids,
+                                   position=body.position, source="dashboard")
+
+
+@app.post("/api/queue/clear")
+async def clear_live_queue(body: QueueClearPayload | None = None):
+    """Clear everything after the current song; the playing song keeps playing."""
+    from_index = body.from_index if body else None
+    return await asyncio.to_thread(_live_queue_call, "clear_upcoming",
+                                   from_index=from_index, source="dashboard")
+
+
+@app.post("/api/queue/remove")
+async def remove_from_live_queue(body: QueueItemPayload):
+    res = await asyncio.to_thread(_live_queue_call, "remove", body.index,
+                                  track_id=body.track_id, source="dashboard")
+    if not res.get("ok"):
+        raise HTTPException(status_code=409, detail=res.get("message"))
+    return res
+
+
+@app.post("/api/queue/move")
+async def move_in_live_queue(body: QueueMovePayload):
+    if body.to_index is None:
+        res = await asyncio.to_thread(_live_queue_call, "play_next", body.index,
+                                      track_id=body.track_id, source="dashboard")
+    else:
+        res = await asyncio.to_thread(_live_queue_call, "move", body.index, body.to_index,
+                                      track_id=body.track_id, source="dashboard")
+    if not res.get("ok"):
+        raise HTTPException(status_code=409, detail=res.get("message"))
+    return res
+
+
+@app.post("/api/queue/shuffle")
+async def shuffle_live_queue():
+    return await asyncio.to_thread(_live_queue_call, "shuffle_upcoming", source="dashboard")
+
+
 
 @app.post("/api/follow")
 async def set_follow_mode(body: FollowModePayload):
@@ -1728,7 +1804,7 @@ def _dj_chat_system_prompt(
 
     action_instructions = (
         "You have live Karaoke MCP tools (`search_songs`, `suggest_next_tracks`, `get_now_playing`, "
-        "`play_track`, `play_playlist`, `player_control`, `get_live_queue`, `queue_next_in_player`, "
+        "`play_track`, `play_playlist`, `player_control`, `get_live_queue`, `queue_next_in_player`, `edit_live_queue`, "
         "`add_to_dj_playlist`, `get_dj_playlist`, `remove_from_dj_playlist`, `reorder_dj_playlist`, "
         "`clear_dj_playlist`, `toggle_audio_video`, `toggle_mic_recording`, `toggle_ui_switch`). "
         "When the user asks you to play, pause, skip, seek, choose/queue a song, edit the queue/playlist, "
@@ -1737,7 +1813,9 @@ def _dj_chat_system_prompt(
         "To play or queue a song by mood/prompt, first find real track_id(s) via `search_songs` "
         "(you can pass `genre=` and `mood=` such as 'happy', 'energetic', 'dreamy', 'romantic', 'calm', 'sad') "
         "or `suggest_next_tracks`, then call `play_track(track_id=...)` or "
-        "`queue_next_in_player(track_ids=[...], position='end')` for the live Up Next queue. "
+        "`queue_next_in_player(track_ids=[...], position='end')` for the live Up Next queue "
+        "(the single queue the dashboard, graph and TUI share); use `edit_live_queue` to remove, "
+        "reorder, shuffle or clear it. "
         "Only use `add_to_dj_playlist(...)` when the user specifically asks to save to a playlist like `dj-list`. "
         "Never claim you played, queued, or toggled anything unless a tool succeeded. "
     ) if tool_capable else (

@@ -9,8 +9,14 @@ _ROW = {"track_id": 99, "artist": "Queen", "title": "Flash",
         "bpm": None, "key": None, "energy": None}
 
 
+def _mem_queue(state):
+    """Run live-queue mutations against an in-memory state dict."""
+    return patch.object(collection.localcache, "mutate_active_queue",
+                        side_effect=lambda fn, conn=None: fn(state))
+
+
 def test_enqueue_next_inserts_right_after_current_index():
-    existing = {
+    state = {
         "playlist_id": "p1", "name": "Hip Hop", "current_index": 1,
         "rows": [
             {"track_id": 1, "artist": "A", "title": "One"},
@@ -18,41 +24,27 @@ def test_enqueue_next_inserts_right_after_current_index():
             {"track_id": 3, "artist": "C", "title": "Three"},
         ],
     }
-    saved = {}
-
-    def fake_save(pid, name, rows, current_index=0, conn=None):
-        saved["rows"] = rows
-        saved["current_index"] = current_index
-
-    with patch.object(collection, "rows_for", return_value=[_ROW]), \
-         patch.object(collection.localcache, "load_active_queue", return_value=existing), \
-         patch.object(collection.localcache, "save_active_queue", side_effect=fake_save), \
+    with patch.object(collection, "rows_for", return_value=[_ROW]), _mem_queue(state), \
          patch.object(collection.localcache, "record_queue_event"):
         out = collection.enqueue_next(99, conn=object())
 
-    assert out["status"] == "queued"
+    assert out["status"] == "queued" and out["position"] == 3
     # Inserted at index 2 (right after current index 1).
-    assert [r["track_id"] for r in saved["rows"]] == [1, 2, 99, 3]
+    assert [r["track_id"] for r in state["rows"]] == [1, 2, 99, 3]
     # The playing position is preserved.
-    assert saved["current_index"] == 1
+    assert state["current_index"] == 1
 
 
 def test_enqueue_next_creates_queue_when_none_loaded():
-    saved = {}
-
-    def fake_save(pid, name, rows, current_index=0, conn=None):
-        saved["name"] = name
-        saved["rows"] = rows
-
-    with patch.object(collection, "rows_for", return_value=[_ROW]), \
-         patch.object(collection.localcache, "load_active_queue", return_value=None), \
-         patch.object(collection.localcache, "save_active_queue", side_effect=fake_save), \
+    state = {"playlist_id": "", "name": "", "current_index": 0, "rows": []}
+    with patch.object(collection, "rows_for", return_value=[_ROW]), _mem_queue(state), \
          patch.object(collection.localcache, "record_queue_event"):
         out = collection.enqueue_next(99, conn=object())
 
     assert out["status"] == "queued"
     assert out.get("created") is True
-    assert [r["track_id"] for r in saved["rows"]] == [99]
+    assert state["name"] == "Karaoke: Dashboard Queue"
+    assert [r["track_id"] for r in state["rows"]] == [99]
 
 
 def test_enqueue_next_reports_unknown_track():
@@ -91,11 +83,7 @@ def test_autopilot_refill_noop_when_runway_remains():
 
 def test_autopilot_refill_appends_fitting_tracks_near_end():
     rows = [{"track_id": i} for i in range(6)]  # remaining after idx 4 == 1
-    saved = {}
-
-    def fake_save(pid, name, merged, current_index=0, conn=None):
-        saved["rows"] = merged
-        saved["current_index"] = current_index
+    state = _queue([dict(r) for r in rows], 4, True)
 
     new_rows = [
         {"track_id": 101, "artist": "X", "title": "New1", "url": "u1", "kind": "youtube"},
@@ -106,40 +94,35 @@ def test_autopilot_refill_appends_fitting_tracks_near_end():
          patch("karaoke.queue_suggest.suggest_for_queue",
                return_value=[_Pick(101), _Pick(102)]), \
          patch.object(collection, "rows_for", return_value=new_rows), \
-         patch.object(collection.localcache, "save_active_queue", side_effect=fake_save), \
+         _mem_queue(state), \
          patch.object(collection.localcache, "record_queue_event"):
         out = collection.autopilot_refill(object(), threshold=5, add=5)
 
     assert out["refilled"] == 2
-    assert [r["track_id"] for r in saved["rows"]] == [0, 1, 2, 3, 4, 5, 101, 102]
-    assert saved["current_index"] == 4   # playing position preserved
+    assert [r["track_id"] for r in state["rows"]] == [0, 1, 2, 3, 4, 5, 101, 102]
+    assert state["current_index"] == 4   # playing position preserved
 
 
 # --- advance_active_queue (queue-aware Next/Previous) ---------------------
 
 def test_advance_active_queue_moves_index_forward():
     rows = [{"track_id": i, "artist": "A", "title": f"T{i}"} for i in range(5)]
-    saved = {}
-    with patch.object(collection.localcache, "load_active_queue",
-                      return_value=_queue(rows, 2, False)), \
-         patch.object(collection.localcache, "save_active_queue",
-                      side_effect=lambda *a, **k: saved.update(current_index=k["current_index"])):
+    state = _queue(rows, 2, False)
+    with _mem_queue(state):
         res = collection.advance_active_queue(object(), 1)
     assert res["index"] == 3 and res["moved"] is True
-    assert saved["current_index"] == 3
+    assert state["current_index"] == 3
 
 
 def test_advance_active_queue_clamps_at_end():
     rows = [{"track_id": i, "artist": "A", "title": f"T{i}"} for i in range(3)]
-    with patch.object(collection.localcache, "load_active_queue",
-                      return_value=_queue(rows, 2, False)), \
-         patch.object(collection.localcache, "save_active_queue"):
+    state = _queue(rows, 2, False)
+    with _mem_queue(state):
         res = collection.advance_active_queue(object(), 1)
     assert res["index"] == 2 and res["moved"] is False
 
 
 def test_advance_active_queue_none_without_queue():
-    with patch.object(collection.localcache, "load_active_queue", return_value=None):
+    state = {"playlist_id": "", "name": "", "current_index": 0, "rows": []}
+    with _mem_queue(state):
         assert collection.advance_active_queue(object(), 1) is None
-
-

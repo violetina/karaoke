@@ -1323,6 +1323,8 @@ def get_live_queue() -> str:
     upcoming = [
         {
             "position": i + 1,
+            "index": i,
+            "is_current": i == cur_idx,
             "track_id": r.get("track_id"),
             "artist": r.get("artist") or "",
             "title": r.get("title") or "",
@@ -1375,6 +1377,49 @@ def queue_next_in_player(
         if not ids:
             return json.dumps({"ok": False, "error": "Provide track_id, track_ids, or a cataloged video_id."}, indent=2)
         res = collection.enqueue_tracks(ids, conn, position=pos)
+    return json.dumps(res, indent=2)
+
+
+@dj_mcp.tool()
+def edit_live_queue(
+    action: str,
+    index: Optional[int] = None,
+    track_id: Optional[int] = None,
+    to_index: Optional[int] = None,
+) -> str:
+    """Edit the live Karaoke Up Next queue (the same queue the dashboard, graph and TUI use).
+
+    Args:
+        action: 'remove' (drop one song), 'play_next' (move a song right after the current one),
+            'move' (move a song to to_index), 'clear' (drop everything after the current song;
+            the playing song keeps playing), or 'shuffle' (shuffle the upcoming songs).
+        index: 0-based queue row of the song, as returned by get_live_queue's upcoming_tracks
+            ('position' - 1). Needed for remove/play_next/move.
+        track_id: The song's track_id; guards against the queue having shifted. Recommended.
+        to_index: 0-based destination row for 'move'.
+    """
+    from . import live_queue
+
+    act = (action or "").strip().lower().replace("-", "_")
+    with localcache.connect() as conn:
+        if act == "clear":
+            res = live_queue.clear_upcoming(conn, source="ai-dj")
+        elif act == "shuffle":
+            res = live_queue.shuffle_upcoming(conn, source="ai-dj")
+        elif act in ("remove", "play_next", "move"):
+            if index is None and track_id is None:
+                return json.dumps({"ok": False, "error": "Provide index (and ideally track_id)."}, indent=2)
+            idx = int(index) if index is not None else -1
+            if act == "remove":
+                res = live_queue.remove(idx, conn, track_id=track_id, source="ai-dj")
+            elif act == "play_next":
+                res = live_queue.play_next(idx, conn, track_id=track_id, source="ai-dj")
+            else:
+                if to_index is None:
+                    return json.dumps({"ok": False, "error": "'move' needs to_index."}, indent=2)
+                res = live_queue.move(idx, int(to_index), conn, track_id=track_id, source="ai-dj")
+        else:
+            return json.dumps({"ok": False, "error": f"Unknown action {action!r}. Use remove, play_next, move, clear or shuffle."}, indent=2)
     return json.dumps(res, indent=2)
 
 
@@ -2582,6 +2627,7 @@ def create_asgi_app(server: MCPServer = dj_mcp) -> Starlette:
         Route("/api/locate", endpoint=graph_view.api_locate, methods=["POST"]),
         Route("/api/collection/save", endpoint=graph_view.api_collection_save, methods=["POST"]),
         Route("/api/collection/play", endpoint=graph_view.api_collection_play, methods=["POST"]),
+        Route("/api/collection/enqueue", endpoint=graph_view.api_collection_enqueue, methods=["POST"]),
         Route("/api/now_playing", endpoint=lambda r: JSONResponse(json.loads(get_now_playing()))),
         Route("/sse", endpoint=combined),
         Route("/sse/", endpoint=combined),
