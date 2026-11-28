@@ -149,3 +149,22 @@ def test_relaxed_match_returns_nothing_for_an_absent_track(tmp_path):
 
     _, _, ly = _resolve(conn, "Somebody", "A Song Not Here")
     assert ly is None
+
+
+def test_resolve_lyrics_returns_audio_lyrics_in_video_mode(tmp_path):
+    """The TUI adds the stored video offset itself; the shifted video copy would shift twice."""
+    conn = localcache.connect(tmp_path / "k.db")
+    localcache.add_track_and_lyrics(
+        "PJ Harvey", "Man-Size",
+        Lyrics(synced_raw="[00:10.00] hi", source="lrclib", lines=[(10.0, "hi")]),
+        url="https://youtu.be/pjhmansize", kind="youtube", conn=conn,
+    )
+    localcache.put_cached_lyrics(
+        "PJ Harvey", "Man-Size",
+        Lyrics(plain="hi", synced_raw="[00:13.72] hi", source="derived_from_audio"),
+        media_type="video", conn=conn,
+    )
+    det = Detection("scan", "chrome", "PJ Harvey", "Man-Size",
+                    "https://youtu.be/pjhmansize", media_type="video")
+    _, _, lyrics = detect.resolve_lyrics(det, conn)
+    assert lyrics is not None and lyrics.source == "lrclib"

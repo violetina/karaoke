@@ -24,27 +24,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from karaoke import localcache
-from karaoke.caption_sync import sync_audio_video_counterparts
+from karaoke.caption_sync import ensure_av_sync_log, record_av_sync_result, sync_audio_video_counterparts
 from karaoke.logger import log
 
 
 def ensure_log_table(conn: Any) -> None:
     """Ensure the status tracking table exists, with the method/confidence columns."""
+    ensure_av_sync_log(conn)
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS av_sync_log (
-            track_id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL,
-            offset_s DOUBLE PRECISION,
-            checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # method/confidence distinguish a waveform-verified row from an old
-    # caption-only one, so find_candidates can re-evaluate the caption-only
-    # rows under the (more reliable, per the real-pair validation) waveform
-    # method instead of treating every past row as settled.
-    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS method TEXT")
-    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION")
     cur.execute("""
         INSERT INTO av_sync_log (track_id, status, offset_s)
         SELECT track_id, 'synced', offset_s FROM track_sync_offsets
@@ -120,6 +107,7 @@ def process_one_track(
     candidate: dict[str, Any],
     cookies_from_browser: Optional[str] = None,
     enable_whisper_fallback: bool = False,
+    force_waveform: bool = False,
 ) -> dict[str, Any]:
     track_id = candidate["track_id"]
     artist = candidate["artist"]
@@ -149,6 +137,7 @@ def process_one_track(
             client=_get_thread_client(),
             cookies_from_browser=cookies_from_browser,
             enable_whisper_fallback=enable_whisper_fallback,
+            force_waveform=force_waveform,
         )
         status["has_audio"] = res.get("has_audio_lyrics", False)
         status["has_video"] = res.get("has_video_lyrics", False)
@@ -156,62 +145,7 @@ def process_one_track(
         status["method"] = res.get("method")
         status["confidence"] = res.get("confidence")
 
-        cur = conn.cursor()
-        if res.get("offset") is not None:
-            status["status"] = "synced"
-            cur.execute(
-                """
-                INSERT INTO av_sync_log (track_id, status, offset_s, method, confidence, checked_at)
-                VALUES (%s, 'synced', %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (track_id) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    offset_s = EXCLUDED.offset_s,
-                    method = EXCLUDED.method,
-                    confidence = EXCLUDED.confidence,
-                    checked_at = CURRENT_TIMESTAMP
-                """,
-                (track_id, res["offset"], res.get("method"), res.get("confidence")),
-            )
-        elif not status["has_video"]:
-            status["status"] = "no_captions"
-            cur.execute(
-                """
-                INSERT INTO av_sync_log (track_id, status, offset_s, checked_at)
-                VALUES (%s, 'no_captions', NULL, CURRENT_TIMESTAMP)
-                ON CONFLICT (track_id) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    offset_s = NULL,
-                    checked_at = CURRENT_TIMESTAMP
-                """,
-                (track_id,),
-            )
-        elif not status["has_audio"]:
-            status["status"] = "no_audio_lyrics"
-            cur.execute(
-                """
-                INSERT INTO av_sync_log (track_id, status, offset_s, checked_at)
-                VALUES (%s, 'no_audio_lyrics', NULL, CURRENT_TIMESTAMP)
-                ON CONFLICT (track_id) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    offset_s = NULL,
-                    checked_at = CURRENT_TIMESTAMP
-                """,
-                (track_id,),
-            )
-        else:
-            status["status"] = "unaligned"
-            cur.execute(
-                """
-                INSERT INTO av_sync_log (track_id, status, offset_s, checked_at)
-                VALUES (%s, 'unaligned', NULL, CURRENT_TIMESTAMP)
-                ON CONFLICT (track_id) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    offset_s = NULL,
-                    checked_at = CURRENT_TIMESTAMP
-                """,
-                (track_id,),
-            )
-        conn.commit()
+        status["status"] = record_av_sync_result(conn, track_id, res)
     except Exception as exc:
         status["error"] = str(exc)
         log.debug("AV sync error on track %s: %s", track_id, exc)
@@ -225,6 +159,7 @@ def run_batch_sync(
     workers: int = 4,
     cookies_from_browser: Optional[str] = None,
     enable_whisper_fallback: bool = False,
+    force_waveform: bool = False,
 ) -> dict[str, int]:
     print(f"\n{'='*70}")
     print(f"  AUDIO VS VIDEO COUNTERPART SYNCHRONIZATION")
@@ -283,12 +218,13 @@ def run_batch_sync(
     if workers <= 1:
         for item in candidates:
             res = process_one_track(item, cookies_from_browser=cookies_from_browser,
-                                    enable_whisper_fallback=enable_whisper_fallback)
+                                    enable_whisper_fallback=enable_whisper_fallback,
+                                    force_waveform=force_waveform)
             handle_result(res)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(process_one_track, item, cookies_from_browser, enable_whisper_fallback)
+                executor.submit(process_one_track, item, cookies_from_browser, enable_whisper_fallback, force_waveform)
                 for item in candidates
             ]
             for fut in as_completed(futures):
@@ -321,6 +257,9 @@ def main() -> int:
                         help="Opt in to the Whisper last-resort anchor for tracks the waveform and "
                              "caption methods both miss. Off by default: expensive (full-track "
                              "transcription), CPU-bound, and not fully deterministic between runs.")
+    parser.add_argument("--force-waveform", action="store_true",
+                        help="Re-run the waveform method even when a non-zero offset is stored "
+                             "(re-verifies old caption offsets; two downloads per track).")
     args = parser.parse_args()
 
     conn = localcache.connect()
@@ -344,6 +283,7 @@ def main() -> int:
         workers=args.workers,
         cookies_from_browser=args.cookies_from_browser,
         enable_whisper_fallback=args.enable_whisper_fallback,
+        force_waveform=args.force_waveform,
     )
     return 0
 

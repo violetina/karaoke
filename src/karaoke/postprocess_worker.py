@@ -172,10 +172,11 @@ def run_timings_logic(track_id: int, conn, cookies_from_browser: Optional[str]) 
         log.info("postprocess: timings upgrade for track %s -> %s", track_id, res.status)
         if res.status == "upgraded":
             try:
-                from .caption_sync import sync_audio_video_counterparts
+                from .caption_sync import record_av_sync_result, sync_audio_video_counterparts
                 from .ytmusic_client import YTMusicClient
-                sync_audio_video_counterparts(track_id, conn, client=YTMusicClient(),
-                                              cookies_from_browser=cookies_from_browser)
+                av_res = sync_audio_video_counterparts(track_id, conn, client=YTMusicClient(),
+                                                       cookies_from_browser=cookies_from_browser)
+                record_av_sync_result(conn, track_id, av_res)
             except Exception as exc:
                 log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
         if res.status == "no-captions":
@@ -357,9 +358,10 @@ def run_sync_logic(track_id: int, audio_path: Path, conn) -> bool:
              report.get("anchored", "?"), report.get("lines", "?"),
              "" if trustworthy else " — worth a listen")
     try:
-        from .caption_sync import sync_audio_video_counterparts
+        from .caption_sync import record_av_sync_result, sync_audio_video_counterparts
         from .ytmusic_client import YTMusicClient
-        sync_audio_video_counterparts(track_id, conn, client=YTMusicClient())
+        av_res = sync_audio_video_counterparts(track_id, conn, client=YTMusicClient())
+        record_av_sync_result(conn, track_id, av_res)
     except Exception as exc:
         log.debug("postprocess: av sync failed for track %s: %s", track_id, exc)
     return True

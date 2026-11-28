@@ -552,3 +552,84 @@ def test_try_waveform_offset_skips_download_on_duration_mismatch(monkeypatch):
 
     assert download_calls == []
     assert info == {"audio_id": "AID", "video_id": "VID", "skipped_reason": "duration_mismatch"}
+
+
+def test_lyrics_lookup_without_media_type_prefers_audio_over_newer_video_row(tmp_path):
+    """caption_sync's shifted video copy is newer; the default must still be the audio row."""
+    conn = localcache.connect(tmp_path / "test.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tracks (artist, title) VALUES ('ArtistD', 'SongD') RETURNING track_id")
+        track_id = cur.fetchone()["track_id"]
+        localcache.put_cached_lyrics(
+            "ArtistD", "SongD",
+            Lyrics(plain="Line", synced_raw="[00:10.00] Line", source="lrclib"),
+            media_type="audio", conn=conn,
+        )
+        localcache.put_cached_lyrics(
+            "ArtistD", "SongD",
+            Lyrics(plain="Line", synced_raw="[00:13.70] Line", source="derived_from_audio"),
+            media_type="video", conn=conn,
+        )
+        got = localcache.get_lyrics_by_track_id(track_id, conn)
+        assert got is not None and got.source == "lrclib"
+        assert "[00:10.00]" in got.synced_raw
+    finally:
+        conn.close()
+
+
+def test_lyrics_lookup_without_media_type_falls_back_to_a_video_only_row(tmp_path):
+    conn = localcache.connect(tmp_path / "test.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tracks (artist, title) VALUES ('ArtistE', 'SongE') RETURNING track_id")
+        track_id = cur.fetchone()["track_id"]
+        localcache.put_cached_lyrics(
+            "ArtistE", "SongE",
+            Lyrics(plain="Line", synced_raw="[00:15.00] Line", source="youtube_caption"),
+            media_type="video", conn=conn,
+        )
+        got = localcache.get_lyrics_by_track_id(track_id, conn)
+        assert got is not None and got.source == "youtube_caption"
+    finally:
+        conn.close()
+
+
+def test_record_av_sync_result_upserts_status_method_and_confidence(tmp_path):
+    from karaoke.caption_sync import record_av_sync_result
+
+    conn = localcache.connect(tmp_path / "test.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tracks (artist, title) VALUES ('ArtistF', 'SongF') RETURNING track_id")
+        tid = cur.fetchone()["track_id"]
+
+        status = record_av_sync_result(conn, tid, {
+            "offset": 3.72, "method": "waveform", "confidence": 0.91,
+            "has_audio_lyrics": True, "has_video_lyrics": True})
+        assert status == "synced"
+        row = conn.execute("SELECT status, offset_s, method, confidence FROM av_sync_log "
+                           "WHERE track_id = %s", (tid,)).fetchone()
+        assert (row["status"], row["method"]) == ("synced", "waveform")
+        assert abs(row["offset_s"] - 3.72) < 1e-6 and abs(row["confidence"] - 0.91) < 1e-6
+
+        # A later miss keeps the row (upsert), clears the offset, keeps who last succeeded.
+        status = record_av_sync_result(conn, tid, {
+            "offset": None, "method": None, "has_audio_lyrics": True, "has_video_lyrics": False})
+        assert status == "no_captions"
+        row = conn.execute("SELECT status, offset_s, method FROM av_sync_log "
+                           "WHERE track_id = %s", (tid,)).fetchone()
+        assert (row["status"], row["offset_s"], row["method"]) == ("no_captions", None, "waveform")
+    finally:
+        conn.close()
+
+
+def test_av_sync_status_classification():
+    from karaoke.caption_sync import av_sync_status
+
+    assert av_sync_status({"offset": 0.0}) == "synced"
+    assert av_sync_status({"offset": None, "has_video_lyrics": False}) == "no_captions"
+    assert av_sync_status({"offset": None, "has_video_lyrics": True,
+                           "has_audio_lyrics": False}) == "no_audio_lyrics"
+    assert av_sync_status({"offset": None, "has_video_lyrics": True,
+                           "has_audio_lyrics": True}) == "unaligned"
