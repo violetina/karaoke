@@ -28,6 +28,18 @@ PYTHONPATH=src .venv/bin/python -c "from karaoke.tasks import enqueue_postproces
 
 See [Radio mode → Keep Going](modes/radio.md#keep-going-from-the-radio-collectionradio_keep_going_refill).
 
+## Lyrics early/late on the music video
+
+The video often has an intro, so its lyrics use a per-track offset found by comparing the
+two audio streams. Re-check one track, even when an offset is already stored:
+
+```bash
+make batch-sync-av TRACK_ID=<id> FORCE_WAVEFORM=1
+```
+
+A big jump at low confidence is refused and the stored offset kept (`kept_stored` in
+`av_sync_log`). See [Audio vs video lyrics sync](av-sync.md).
+
 ## Update documentation
 ```make
 make docs-write

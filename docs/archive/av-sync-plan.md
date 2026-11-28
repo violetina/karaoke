@@ -3,6 +3,7 @@
 > follow-ups in `fix/av-sync-follow-ups`. Lyrics convention since then: the stage loads
 > the mode-specific lyrics row and applies no offset; the TUI loads the audio lyrics and
 > adds the per-clock offset from `track_sync_offsets`. Never mix the two.
+> Current docs: [Audio vs video lyrics sync](../av-sync.md).
 
 # Plan: audio vs video toggle and waveform-based A/V sync
 

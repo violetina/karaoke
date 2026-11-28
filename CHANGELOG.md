@@ -52,6 +52,25 @@
   advancing no longer drops songs queued in the meantime.
 - `active_queue_state.updated_at` widened from `REAL` to `DOUBLE PRECISION`.
 
+### Audio vs video lyrics sync
+
+- **Fixed: lookups without a mode got the shifted video lyrics** (#162).
+  `get_lyrics_by_track_id(media_type=None)` now returns the audio row; before, it returned
+  the newest row, the shifted video copy for 14 tracks (library view, mood-still timeline,
+  lyric-vibe MCP tool, sentiment, TUI/CLI fetch). The TUI no longer shifts twice in video
+  mode.
+- **Every sync path writes `av_sync_log`** with method and confidence (#162); before, only
+  the batch did, and all 1497 rows had method `NULL`.
+- **`--force-waveform` / `FORCE_WAVEFORM=1`** re-runs the waveform method even when a
+  non-zero offset is stored (#162). The batch script accepts `--track-id` more than once.
+- Batch candidates are listed once per track (#163).
+- **Fixed: stale derived video lyrics** (#164). `derived_from_audio` rows are no longer
+  treated as real captions, so they follow the current offset (7 of 13 were stale, 0 after).
+- **Guard** (#164): a waveform result more than 5 s from a stored non-zero offset at
+  confidence below 0.3 is rejected and logged as `kept_stored`.
+- See [Audio vs video lyrics sync](docs/av-sync.md). On the newest 200 tracks: 75 of 105
+  candidates synced by waveform in 9 minutes, 0 errors.
+
 ## 1.11.0 — Docs cleanup: archive shipped plans, version-stamped wiki, make-target deprecation sweep
 
 ### Docs reorg

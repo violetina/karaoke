@@ -155,6 +155,9 @@ Several tables are managed directly by application modules rather than the legac
 | `album_release` | `release_year.py` | One MusicBrainz release-group lookup per artist + album (`status` `matched`/`no-match`/`live`/`compilation`, `year`, release-group id). An album present here is never looked up again. |
 | `track_year` | `release_year.py` | A track's release `year` and its `source`: `album` (MusicBrainz first-release-date), `recording` (earliest release of the song's own recording), `title` (a bare `(2004)` in the title), `album-name` (a year in the album's name) or `title-remaster` (reissue year, fallback only). Better sources are never overwritten by worse ones. |
 | `recording_year_lookup` | `release_year.py` | Outcome of each per-track recording lookup (`matched`/`no-match`), so none is repeated. |
+| `av_sync_log` | `caption_sync.py` | Last audio vs video sync result per track: `track_id`, `status` (`synced`/`unaligned`/`no_captions`/`no_audio_lyrics`), `offset_s`, `method` (`waveform`/`captions`/`whisper`/`cached`/`kept_stored`), `confidence`, `checked_at`. Written by every sync path. See [Audio vs video lyrics sync](av-sync.md). |
+
+`track_sync_offsets` rows with `mode='video'` hold the music video's lyrics offset against the audio upload.
 
 ## Unified event store
 
