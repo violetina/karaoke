@@ -230,7 +230,12 @@ def resolve_lyrics(
     """
     from . import localcache
 
-    mtype = getattr(det, "media_type", "audio")
+    # Always the audio lyrics: the only caller (tui.py) adds the stored per-clock
+    # offset itself (track_sync_offsets mode='video' when det.media_type == 'video').
+    # The video row is caption_sync's copy already shifted by that same offset, so
+    # loading it here would shift the lyrics twice. stage_view follows the other
+    # convention (mode-specific row, no offset) and does not use this function.
+    mtype = "audio"
 
     if det.url:
         found = localcache.find_track_by_url(det.url, conn)
