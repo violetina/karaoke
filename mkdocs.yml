@@ -116,6 +116,7 @@ nav:
           - Events & Postgres migration plan: archive/events_and_postgres_plan.md
           - Saved playlists Postgres migration plan: archive/saved_playlists_postgres_migration_plan.md
           - scan_track MCP tool plan: archive/scan_track_mcp_tool_plan.md
+          - A/V waveform sync plan: archive/av-sync-plan.md
   - Releases:
       - Overview (read this first): releases/index.md
       - Version 1.4.0: releases/1.4.0.md
