@@ -146,6 +146,10 @@ def audit_documentation(repo_root: Path) -> dict[str, Any]:
     for target in makefile_targets:
         if not re.search(rf"\b{re.escape(target)}\b", targets_doc_content):
             missing_make_targets.append(target)
+    # A target can be listed with outdated help text; compare the whole page so a
+    # changed "## ..." description is drift too, not only a missing target.
+    stale_targets_doc = bool(makefile_targets) and (
+        targets_doc_content != render_makefile_targets_doc(makefile_targets))
 
     drift_detected = bool(
         missing_api_modules
@@ -153,6 +157,7 @@ def audit_documentation(repo_root: Path) -> dict[str, Any]:
         or unlinked_docs
         or broken_nav_links
         or missing_make_targets
+        or stale_targets_doc
     )
 
     return {
@@ -166,6 +171,7 @@ def audit_documentation(repo_root: Path) -> dict[str, Any]:
         "broken_nav_links": broken_nav_links,
         "total_makefile_targets": len(makefile_targets),
         "missing_makefile_targets": missing_make_targets,
+        "stale_makefile_targets_doc": stale_targets_doc,
     }
 
 
@@ -285,13 +291,11 @@ def fix_api_docs(repo_root: Path, missing_modules: list[str]) -> int:
     return len(missing_modules)
 
 
-def fix_makefile_targets_doc(repo_root: Path) -> bool:
-    """Regenerate docs/makefile-targets.md from Makefile targets."""
-    targets = get_makefile_targets(repo_root)
-    if not targets:
-        return False
+def render_makefile_targets_doc(targets: dict[str, str]) -> str:
+    """The docs/makefile-targets.md page for ``targets`` (name -> help text).
 
-    targets_doc = repo_root / "docs" / "makefile-targets.md"
+    Sorted by name in code-point order, so the page is the same in every locale.
+    """
     lines = [
         "# Makefile targets",
         "Generated from make help",
@@ -300,8 +304,17 @@ def fix_makefile_targets_doc(repo_root: Path) -> bool:
     for target in sorted(targets.keys()):
         lines.append(f"{target:<28} {targets[target]}")
     lines.append("```\n")
+    return "\n".join(lines)
 
-    targets_doc.write_text("\n".join(lines), encoding="utf-8")
+
+def fix_makefile_targets_doc(repo_root: Path) -> bool:
+    """Regenerate docs/makefile-targets.md from Makefile targets."""
+    targets = get_makefile_targets(repo_root)
+    if not targets:
+        return False
+
+    targets_doc = repo_root / "docs" / "makefile-targets.md"
+    targets_doc.write_text(render_makefile_targets_doc(targets), encoding="utf-8")
     return True
 
 
@@ -343,6 +356,8 @@ def print_report(results: dict[str, Any], fixed_api: int = 0, fixed_targets: boo
         print(f"[!] Targets missing from docs/makefile-targets.md ({len(results['missing_makefile_targets'])}):")
         for t in results["missing_makefile_targets"]:
             print(f"    - make {t}")
+    elif results.get("stale_makefile_targets_doc"):
+        print("[!] docs/makefile-targets.md help text is out of date with the Makefile")
     else:
         print("[ok] docs/makefile-targets.md is up-to-date with Makefile")
 
@@ -398,7 +413,7 @@ def main() -> int:
     if args.fix:
         if audit["missing_api_modules"]:
             fixed_api = fix_api_docs(repo_root, audit["missing_api_modules"])
-        if audit["missing_makefile_targets"]:
+        if audit["missing_makefile_targets"] or audit["stale_makefile_targets_doc"]:
             fixed_targets = fix_makefile_targets_doc(repo_root)
         # Re-audit after fixes
         audit = audit_documentation(repo_root)

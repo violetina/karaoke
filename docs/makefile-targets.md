@@ -13,7 +13,7 @@ auth-youtube                 Sign in to YouTube / YT Music (Premium) in the play
 batch-enrich-vectors         Batch enrich tracks with chords, CLAP vectors, feeling & AV sync: [LIMIT=N] [WORKERS=N] [SYNC_AV=1] [ONLY_DISK=1]
 batch-sync-av                Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
 bench-dj                     Benchmark the dashboard AI DJ per Ollama model: speed, facts vs DB, CPU/GPU load (MODELS="a b", TRACK=74)
-bench-dj-smart               Benchmark the AI DJ on one analysed song per smart playlist (MODELS="a b", ONLY='^Genre')
+bench-dj-smart               Benchmark the AI DJ on one analysed song per smart playlist (MODELS="a b", ONLY='^Genre', MAX=12 for a quick screen)
 browse                       Launch the interactive song browser TUI
 browse-log                   Follow TUI/open debug logs
 celery-flower                Run the Celery/Flower dashboard on http://127.0.0.1:5555
