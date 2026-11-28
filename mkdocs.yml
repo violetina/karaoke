@@ -77,6 +77,7 @@ nav:
   - Live auto-captions: live-captions.md
   - Karaoke DJ & MCP: mcp-server.md
   - Configuring AI providers: howto-configure-ai-providers.md
+  - Choosing the AI DJ model: dj-model-benchmark.md
   - Next-song suggestion weights: next-song-suggestion.md
   - Smart playlists: smart-playlists.md
   - systemd services: howto-systemd-services.md

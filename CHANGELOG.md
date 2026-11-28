@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 1.12.0 — AI DJ that gets the facts right on small models + one live queue
+
+### AI DJ: grounded answers, fast default model
+
+- **New default model `qwen2.5:3b`** (built-in fallback for `KARAOKE_DJ_MODEL`, was
+  `qwen3:latest` / `qwen3:1.7b` in the TUI). On one song per smart playlist it answers
+  100% of key/BPM, mood, chord, band-member and next-song questions in ~2.6 s, about
+  20× faster than the 8B models. See [Choosing the AI DJ model](docs/dj-model-benchmark.md).
+- **Facts lead the prompt.** The playing song's key, BPM, mood and chords come first as
+  "VERIFIED FACTS"; recommendations are ready-to-copy `[QUEUE: Artist - Title]` lines
+  with the playing song already excluded; at most one QUEUE tag per reply. `qwen3:0.6b`
+  went from 1/5 to 5/5 on the reference song.
+- **Fixed: the DJ thought nothing was playing** for duos, "feat."/"aka" credits and acts
+  missing from the artist cache (the playing artist was blanked); a fuzzy artist-cache
+  hit no longer renames the playing artist.
+- **Fixed: invented suggestions.** Fuzzy OpenSearch searches on the question text
+  ("after", "song") are skipped for analysis and suggestion questions; they injected
+  unrelated artists that small models blended into made-up picks.
+- **Fixed:** the current-track analysis fact read a non-existent column and silently
+  dropped key/BPM/chords; "The Slits - Typical Girls" was rewritten to the band "Girls".
+
+### DJ model benchmark (new)
+
+- `scripts/bench_dj_models.py`, `make bench-dj` / `make bench-dj-smart`: runs each Ollama
+  model through the real `/api/dj/chat` path and scores answers against the library,
+  with time to first word, full-answer time, CPU/GPU load and GPU memory.
+- `--smart-playlists [REGEX]` uses one fully analysed song per smart playlist;
+  `--max-tracks N` (`MAX=12`) for a quick screen; `--rescore` re-scores a saved run.
+- Questions without ground truth score n/a instead of wrong; results are saved after
+  each model.
 
 ### One live queue + radio Keep Going
 

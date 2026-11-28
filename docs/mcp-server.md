@@ -7,7 +7,7 @@ The Karaoke AI DJ MCP Server bridges your 18,000+ local track library, harmonic 
 ```mermaid
 flowchart LR
     subgraph Host["Host Desktop (Linux / ROCm)"]
-        Ollama["Ollama<br/>qwen3:latest / ROCm 890M<br/>:11434"]
+        Ollama["Ollama<br/>qwen2.5:3b / Vulkan 890M<br/>:11434"]
         MCP["karaoke-mcp<br/>SSE + Streamable HTTP<br/>:8888"]
         PG[("PostgreSQL<br/>karaoke DB<br/>18k tracks + Camelot")]
         Player["Desktop Playback<br/>Spotify / Chromium / TUI"]
@@ -142,7 +142,7 @@ make mcp                               # Run manually in foreground
 2. **Configure Model Provider (Ollama)**:
    * Go to **Model Providers** -> **Ollama**.
    * Set **Host** to `http://172.18.0.1:11434`.
-   * Enable model `qwen3:latest` (or `qwen3:1.7b` for ultra-low latency).
+   * Enable model `qwen2.5:3b` (see [Choosing the AI DJ model](dj-model-benchmark.md)).
 3. **Start the tunnel** (required — see the note under Architecture):
    * In Obot, go to **MCP Servers -> Tunnels -> Create MCP Tunnel**.
    * Set **Allowed URLs** to `http://127.0.0.1:8888/*` so the tunnel can reach
@@ -174,9 +174,9 @@ You can chat with the AI DJ directly inside the Karaoke TUI:
   - `/stats` — Crowd anthems, hit counts, and cache statistics
   - `/search <query>` — Search the 18,000+ local track library
   - `/play <track_id>` — Launch track playback on the host player
-  - `/model <name>` — Switch Ollama model (e.g. `qwen3:1.7b`, `qwen3:latest`)
+  - `/model <name>` — Switch Ollama model (e.g. `qwen2.5:3b`, `llama3.2:3b`)
 - Or run standalone in your terminal: `make dj` or `karaoke-dj`.
-- Connects to local **Ollama** (`qwen3:1.7b` / `qwen3:latest`) with instant deterministic fallback to local library tools if the LLM is offline or busy.
+- Connects to local **Ollama** (default `qwen2.5:3b`) with instant deterministic fallback to local library tools if the LLM is offline or busy.
 
 ### Using External MCP Clients (Claude Code / Claude Desktop)
 

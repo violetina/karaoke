@@ -16,9 +16,15 @@ gaps worth knowing about before you rely on it.
 
 Nothing to do here. `karaoke-dashboard.service` talks to a local Ollama
 instance (`OLLAMA_URL`, default `http://127.0.0.1:11434`) and lets you pick
-any model you've pulled locally (`qwen3:latest`, `qwen3:1.7b`, etc.) from the
+any model you've pulled locally (`qwen2.5:3b`, `llama3.2:3b`, etc.) from the
 model dropdown in the AI DJ dock header. This is the only provider that
 works out of the box and the only one with no per-token cost.
+
+The default model comes from `KARAOKE_DJ_MODEL` (fallback `qwen2.5:3b`).
+`qwen2.5:3b` is the recommended choice: in the
+[DJ model benchmark](dj-model-benchmark.md) it answered every fact question
+correctly in about 2.6 s, about 20× faster than the 8B models. That page also
+shows how to set the default persistently and how to test a new model.
 
 ## Adding a cloud provider
 

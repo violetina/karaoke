@@ -35,7 +35,7 @@ MCP_API_URL = os.environ.get("KARAOKE_MCP_API_URL", "http://127.0.0.1:8888")
 LIB_API_URL = os.environ.get("KARAOKE_LIB_API_URL", "http://127.0.0.1:8000")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9200")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen3:latest")
+OLLAMA_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen2.5:3b")
 _CURRENT_DJ_MODEL = OLLAMA_MODEL
 
 USER_AGENT = "KaraokeDashboard/1.0 (contact: admin@karaoke.local)"

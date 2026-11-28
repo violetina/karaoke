@@ -185,7 +185,7 @@ Pressing **`D`** opens the interactive **Karaoke AI DJ Booth** modal. From here,
 - Inspect lyric sentiment, emotional arcs, and singer vocal delivery tips (`/vibe`).
 - Check crowd favorites and library stats (`/stats`).
 - Search the 18,000+ local track database (`/search <query>`) and launch playback (`/play <track_id>`).
-- Chat in natural language backed by local **Ollama** (`qwen3:1.7b` / `qwen3:latest` on AMD ROCm).
+- Chat in natural language backed by local **Ollama** (default `qwen2.5:3b`, Vulkan on the Radeon 890M; see [Choosing the AI DJ model](dj-model-benchmark.md)).
 
 ## Modes
 

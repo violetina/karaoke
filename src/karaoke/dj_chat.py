@@ -32,7 +32,7 @@ if not OLLAMA_HOST.startswith("http"):
 else:
     OLLAMA_BASE_URL = OLLAMA_HOST
 
-DEFAULT_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen3:1.7b")
+DEFAULT_MODEL = os.environ.get("KARAOKE_DJ_MODEL", "qwen2.5:3b")
 
 DJ_SYSTEM_PROMPT = (
     "You are an energetic, charismatic Karaoke DJ and MC. You know every track in "
@@ -193,7 +193,7 @@ class DJChatSession:
                 "• `/stats` — Library summary, crowd favorites & hit counts\n"
                 "• `/search <query>` — Search the 18,000+ local track database\n"
                 "• `/play <track_id>` — Trigger track playback on host player\n"
-                "• `/model <name>` — Switch Ollama model (e.g. `qwen3:latest`, `qwen3:1.7b`)\n"
+                "• `/model <name>` — Switch Ollama model (e.g. `qwen2.5:3b`, `llama3.2:3b`)\n"
                 "• Or just ask in natural language (e.g. *'Find an 8A Camelot pop anthem'*)"
             )
 
