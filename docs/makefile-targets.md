@@ -31,6 +31,8 @@ dashboards-uninstall         Remove OpenSearch Dashboards Helm release and stop 
 db-cleanup                   Run track deduplication (fuzzy title + duration guard), orphan source auto-fill, and cache healing
 db-cleanup-dry-run           Preview duplicate-track merges without writing anything
 deps-make2graph              Fetch and build makefile2graph locally
+desktop-install              Install the "Karaoke Dashboard" app launcher (Chrome --app window for :8900)
+desktop-uninstall            Remove the "Karaoke Dashboard" app launcher
 dj                           Open the interactive Karaoke AI DJ Chat booth in terminal
 docs                         [deprecated since 1.11.0] Build MkDocs site — use `make wiki`
 docs-audit                   Audit documentation for drift (modules, unlinked docs, targets)

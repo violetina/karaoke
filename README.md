@@ -98,6 +98,13 @@ Open <http://127.0.0.1:8900>. The release wheel includes the built frontend, and
 the derived search/artist features; Ollama powers chat. Full analysis requires the
 appropriate Celery workers, RabbitMQ and audio models.
 
+To run it as a desktop app, `make desktop-install` adds a **Karaoke Dashboard**
+launcher (Chrome `--app` window, own profile in `~/.config/karaoke-dashboard-app`,
+starts `karaoke-dashboard.service` if needed). In that window Ctrl+T/N, Ctrl+Shift+N,
+Ctrl+D/H/J/O/S/P/U etc. stay in the app instead of opening browser tabs or windows;
+components can bind them via the `karaoke:shortcut` window event
+(`webapp/src/appShortcuts.js`). Remove with `make desktop-uninstall`.
+
 ### Dashboard behaviour
 
 - **Left-click a graph node:** inspect the artist without interrupting playback.

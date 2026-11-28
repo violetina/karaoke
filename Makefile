@@ -37,7 +37,7 @@ K8S_NAMESPACE ?= karaoke
 .PHONY: help venv install install-confluence docs docs-live docs-write docs-audit docs-sync docs-confluence-prep \
         docs-confluence-publish wiki wiki-build wiki-api deps-make2graph view_makeflow lint format \
         test test-audio mic-test stats clean clean-tools browse tui browse-log \
-        install-audio analyze api ctrl-api mcp dj dashboard dashboard-build mpris ytmusic-sync \
+        install-audio analyze api ctrl-api mcp dj dashboard dashboard-build desktop-install desktop-uninstall mpris ytmusic-sync \
         k8s-build k8s-load k8s-deploy k8s-seed-db k8s-status k8s-logs k8s-undeploy \
         upgrade-timings upgrade-timings-dry-run \
         index-youtube-cache db-cleanup db-cleanup-dry-run flatten-counts vector-index vector-index-dry-run vector-status folder-scan \
@@ -235,6 +235,23 @@ dashboard: ## Launch the Unified Karaoke Stage & AI DJ Webapp (:8900)
 
 dashboard-build: ## Build the Vue 3 dashboard frontend bundle
 	cd src/karaoke/webapp && npm run build
+
+DESKTOP_APPS_DIR ?= $(HOME)/.local/share/applications
+DESKTOP_ICON_DIR ?= $(HOME)/.local/share/icons/hicolor/scalable/apps
+
+desktop-install: ## Install the "Karaoke Dashboard" app launcher (Chrome --app window for :8900)
+	chmod +x $(CURDIR)/scripts/karaoke-dashboard-app.sh
+	mkdir -p $(DESKTOP_APPS_DIR) $(DESKTOP_ICON_DIR)
+	install -m644 deploy/desktop/karaoke-dashboard.svg $(DESKTOP_ICON_DIR)/karaoke-dashboard.svg
+	sed 's|@LAUNCHER@|$(CURDIR)/scripts/karaoke-dashboard-app.sh|' deploy/desktop/karaoke-dashboard.desktop.in \
+		> $(DESKTOP_APPS_DIR)/karaoke-dashboard.desktop
+	-desktop-file-validate $(DESKTOP_APPS_DIR)/karaoke-dashboard.desktop
+	-update-desktop-database -q $(DESKTOP_APPS_DIR)
+	-gtk-update-icon-cache -q -t $(HOME)/.local/share/icons/hicolor
+
+desktop-uninstall: ## Remove the "Karaoke Dashboard" app launcher
+	rm -f $(DESKTOP_APPS_DIR)/karaoke-dashboard.desktop $(DESKTOP_ICON_DIR)/karaoke-dashboard.svg
+	-update-desktop-database -q $(DESKTOP_APPS_DIR)
 
 smart-playlists: ## Rebuild and upload the Genre:/Smart:/Decade: playlists to YouTube Music (DRY=1 previews, LOCAL=1 skips upload, ONLY="...")
 	$(PYTHON) -m karaoke.smart_playlists $(if $(or $(DRY),$(LOCAL),$(filter 0,$(PUSH))),,--push) $(if $(DRY),--dry-run,) $(if $(ONLY),--only "$(ONLY)",)
