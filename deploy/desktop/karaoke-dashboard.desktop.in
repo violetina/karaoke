@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Karaoke Dashboard
+GenericName=Karaoke Stage & AI DJ
+Comment=Karaoke Unified Stage & AI DJ Hub (http://127.0.0.1:8900) as a desktop app
+Exec=@LAUNCHER@
+Icon=karaoke-dashboard
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=karaoke;lyrics;dj;
+StartupNotify=true
+StartupWMClass=karaoke-dashboard
