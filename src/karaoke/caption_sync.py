@@ -34,6 +34,13 @@ _LANG_RE = re.compile(r"^[a-z]{2,3}(?:-(?:orig|[A-Z]{2}|Latn|Hans|Hant))?$")
 # json3 first: it is the only format carrying per-word timing.
 _EXT_PREFERENCE = ("json3", "srv3", "vtt", "ttml", "srt")
 
+# A forced waveform re-check may only overwrite a stored non-zero video offset
+# by more than GUARD_MAX_JUMP_S when it is at least GUARD_MIN_CONFIDENCE sure:
+# weak matches produced big spurious jumps (Joy Division "Shadowplay":
+# stored -1.95 s -> +14.17 s at confidence 0.20).
+GUARD_MAX_JUMP_S = 5.0
+GUARD_MIN_CONFIDENCE = 0.3
+
 
 @dataclass(frozen=True)
 class CaptionTrack:
@@ -560,6 +567,7 @@ def sync_audio_video_counterparts(
     video_url = video_sources[0]["url"] if video_sources else None
 
     waveform_info = None
+    rejected_waveform = None  # weak waveform jump the guard refused to store
     if client:
         already_known = localcache.get_sync_offset(track_id, conn, mode="video")
         if already_known is not None and already_known != 0.0 and not force_waveform:
@@ -575,6 +583,17 @@ def sync_audio_video_counterparts(
             except Exception as exc:
                 from .logger import log
                 log.debug("postprocess: waveform av-sync failed for track %s: %s", track_id, exc)
+        if (waveform_info and waveform_info.get("offset") is not None
+                and already_known is not None and already_known != 0.0
+                and abs(waveform_info["offset"] - already_known) > GUARD_MAX_JUMP_S
+                and (waveform_info.get("confidence") or 0.0) < GUARD_MIN_CONFIDENCE):
+            from .logger import log
+            rejected_waveform = dict(waveform_info, kept_offset=already_known)
+            log.info("av-sync guard: kept stored offset %.2fs for track %s, rejected waveform %.2fs at confidence %.2f",
+                     already_known, track_id, waveform_info["offset"], waveform_info.get("confidence") or 0.0)
+            # Keep video_id (still useful for the source lookup below) but
+            # drop the offset so nothing downstream treats it as fresh.
+            waveform_info = {k: v for k, v in waveform_info.items() if k not in ("offset", "confidence")}
         if waveform_info and waveform_info.get("offset") is not None:
             localcache.set_sync_offset(track_id, waveform_info["offset"], conn, mode="video")
 
@@ -610,13 +629,17 @@ def sync_audio_video_counterparts(
     # explanation for the Data section's "1236 are exactly 0.0, probably
     # 'nothing found' defaults": they may actually be this self-alignment
     # artifact, not a deliberate default.
+    # Our own derived copy (derived_from_audio / ..._whisper_anchor) is not
+    # real video lyrics either: treating it as such left it shifted by an old
+    # offset forever (the derive branch never re-ran) and, with no fresh
+    # offset, "aligned" audio against that copy and re-stored the old offset.
     real_video_lyrics = bool(video_lyrics) and not (
         audio_lyrics and video_lyrics.synced_raw == audio_lyrics.synced_raw
         and video_lyrics.source == audio_lyrics.source
-    )
+    ) and not (video_lyrics.source or "").startswith("derived_from_audio")
     had_fresh_offset = offset is not None  # set above from a successful waveform match
     reused_cached_offset = False
-    if offset is None and audio_lyrics and audio_lyrics.has_synced and real_video_lyrics and video_lyrics.has_synced:
+    if offset is None and rejected_waveform is None and audio_lyrics and audio_lyrics.has_synced and real_video_lyrics and video_lyrics.has_synced:
         offset = align_audio_and_video_lyrics(audio_lyrics.synced_raw, video_lyrics.synced_raw)
         if offset is not None:
             localcache.set_sync_offset(track_id, offset, conn, mode="video")
@@ -669,6 +692,10 @@ def sync_audio_video_counterparts(
         if not had_fresh_offset:
             reused_cached_offset = True
 
+    if rejected_waveform is not None and offset is None:
+        # Real video captions present (so no derive ran): the stored offset stands.
+        offset = rejected_waveform["kept_offset"]
+
     used_whisper = False
     if (offset is None and enable_whisper_fallback and video_url
             and audio_lyrics and audio_lyrics.has_synced and not real_video_lyrics):
@@ -692,8 +719,11 @@ def sync_audio_video_counterparts(
 
     used_waveform = bool(waveform_info and waveform_info.get("offset") is not None
                         and offset == waveform_info["offset"])
+    kept_stored = rejected_waveform is not None and not used_waveform and not used_whisper
     if used_waveform:
         method = "waveform"
+    elif kept_stored:
+        method = "kept_stored"
     elif used_whisper:
         method = "whisper"
     elif reused_cached_offset:
@@ -707,15 +737,22 @@ def sync_audio_video_counterparts(
         method = "captions"
     else:
         method = None
-    return {
+    if kept_stored:
+        confidence = rejected_waveform.get("confidence")
+    else:
+        confidence = waveform_info.get("confidence") if used_waveform and waveform_info else None
+    result = {
         "status": "ok",
         "track_id": track_id,
         "has_audio_lyrics": bool(audio_lyrics and audio_lyrics.has_synced),
         "has_video_lyrics": bool(video_lyrics and video_lyrics.has_synced),
         "offset": offset,
         "method": method,
-        "confidence": waveform_info.get("confidence") if used_waveform and waveform_info else None,
+        "confidence": confidence,
     }
+    if kept_stored:
+        result["rejected_offset"] = rejected_waveform["offset"]
+    return result
 
 
 def ensure_av_sync_log(conn: Any) -> None:
