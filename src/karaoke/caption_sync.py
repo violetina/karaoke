@@ -716,3 +716,65 @@ def sync_audio_video_counterparts(
         "method": method,
         "confidence": waveform_info.get("confidence") if used_waveform and waveform_info else None,
     }
+
+
+def ensure_av_sync_log(conn: Any) -> None:
+    """Create av_sync_log (with method/confidence) if missing. Idempotent."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS av_sync_log (
+            track_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL,
+            offset_s DOUBLE PRECISION,
+            checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS method TEXT")
+    cur.execute("ALTER TABLE av_sync_log ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION")
+
+
+def av_sync_status(res: dict[str, Any]) -> str:
+    """av_sync_log status for one sync_audio_video_counterparts() result."""
+    if res.get("offset") is not None:
+        return "synced"
+    if not res.get("has_video_lyrics"):
+        return "no_captions"
+    if not res.get("has_audio_lyrics"):
+        return "no_audio_lyrics"
+    return "unaligned"
+
+
+def record_av_sync_result(conn: Any, track_id: int, res: dict[str, Any]) -> str:
+    """Upsert one sync result into av_sync_log and commit; return the status.
+
+    Every sync path calls this, not only the batch script, so find_candidates can
+    tell a waveform-verified track from one nobody has checked. A miss clears the
+    offset but keeps method/confidence of the last success (same as the batch did).
+    """
+    ensure_av_sync_log(conn)
+    status = av_sync_status(res)
+    cur = conn.cursor()
+    if status == "synced":
+        cur.execute(
+            """
+            INSERT INTO av_sync_log (track_id, status, offset_s, method, confidence, checked_at)
+            VALUES (%s, 'synced', %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (track_id) DO UPDATE SET
+                status = EXCLUDED.status, offset_s = EXCLUDED.offset_s,
+                method = EXCLUDED.method, confidence = EXCLUDED.confidence,
+                checked_at = CURRENT_TIMESTAMP
+            """,
+            (track_id, res["offset"], res.get("method"), res.get("confidence")),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO av_sync_log (track_id, status, offset_s, checked_at)
+            VALUES (%s, %s, NULL, CURRENT_TIMESTAMP)
+            ON CONFLICT (track_id) DO UPDATE SET
+                status = EXCLUDED.status, offset_s = NULL, checked_at = CURRENT_TIMESTAMP
+            """,
+            (track_id, status),
+        )
+    conn.commit()
+    return status
