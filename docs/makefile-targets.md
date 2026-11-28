@@ -11,7 +11,7 @@ auth-spotify                 Sign in to Spotify in the playback Chrome profile (
 auth-status                  Report Spotify token validity and playback-window state
 auth-youtube                 Sign in to YouTube / YT Music (Premium) in the playback Chrome profile
 batch-enrich-vectors         Batch enrich tracks with chords, CLAP vectors, feeling & AV sync: [LIMIT=N] [WORKERS=N] [SYNC_AV=1] [ONLY_DISK=1]
-batch-sync-av                Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
+batch-sync-av                Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N] [FORCE_WAVEFORM=1]
 bench-dj                     Benchmark the dashboard AI DJ per Ollama model: speed, facts vs DB, CPU/GPU load (MODELS="a b", TRACK=74)
 bench-dj-smart               Benchmark the AI DJ on one analysed song per smart playlist (MODELS="a b", ONLY='^Genre', MAX=12 for a quick screen)
 browse                       Launch the interactive song browser TUI

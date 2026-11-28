@@ -312,11 +312,12 @@ batch-enrich-vectors: ## Batch enrich tracks with chords, CLAP vectors, feeling 
 	  $(if $(SYNC_AV),--sync-av,) \
 	  $(if $(ONLY_DISK),--only-on-disk,)
 
-batch-sync-av: ## Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N]
+batch-sync-av: ## Batch synchronize audio vs video lyrics & calculate offsets: [LIMIT=N] [WORKERS=N] [FORCE=1] [TRACK_ID=N] [FORCE_WAVEFORM=1]
 	$(PYTHON) scripts/batch_sync_audio_video.py \
 	  $(if $(LIMIT),--limit $(LIMIT),) \
 	  $(if $(WORKERS),--workers $(WORKERS),) \
 	  $(if $(FORCE),--force,) \
+	  $(if $(FORCE_WAVEFORM),--force-waveform,) \
 	  $(if $(TRACK_ID),--track-id $(TRACK_ID),)
 
 RADIO_PLAYLIST_ID := PLA9C-EXX-pyg
