@@ -321,3 +321,23 @@ def test_subgenre_ids_combines_opensearch_and_postgres():
         # 1 (OpenSearch top genre match) and 2 (Postgres artist_genres match) before 3 (track-level OS fallback)
         assert set(ids[:2]) == {1, 2}
         assert ids[2] == 3
+
+
+def test_a_minor_tag_named_like_the_list_does_not_get_an_artist_in():
+    from karaoke import localcache
+
+    with localcache.connect() as conn:
+        localcache.ensure_artist_genres_table(conn)
+        for genre, broad, w in (("pop", "pop", 7), ("latin", "latin", 1)):
+            conn.execute("INSERT INTO artist_genres VALUES ('jason derulo', %s, %s, %s, 'musicbrainz', 0)",
+                         (genre, broad, w))
+        for genre, broad, w in (("bolero", "latin", 3),):
+            conn.execute("INSERT INTO artist_genres VALUES ('guadalupe pineda', %s, %s, %s, 'wikidata', 0)",
+                         (genre, broad, w))
+        for artist in ("Jason Derulo", "Guadalupe Pineda"):
+            conn.execute("INSERT INTO tracks (artist, title) VALUES (%s, 'Song')", (artist,))
+        conn.commit()
+        ids = sp.genre_ids("latin", conn)
+        artists = {r["artist"] for r in conn.execute(
+            "SELECT artist FROM tracks WHERE track_id = ANY(%s)", (ids,)).fetchall()}
+        assert artists == {"Guadalupe Pineda"}

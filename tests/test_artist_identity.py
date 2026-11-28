@@ -213,7 +213,7 @@ def test_artist_genres_come_from_main_credits_votes_and_replace_older_rows():
                              (ids[artist], pos, mbid, role))
         conn.commit()
         totals = ai.derive_artist_genres(conn)
-        assert totals == {"from musicbrainz": 2, "kept as was": 1}
+        assert totals == {"from musicbrainz": 2, "no genres": 1}
         rows = conn.execute("SELECT artist_normalized, genre, broad_genre, weight, source"
                             " FROM artist_genres ORDER BY 1, 2, 3").fetchall()
         by = {}
@@ -224,3 +224,47 @@ def test_artist_genres_come_from_main_credits_votes_and_replace_older_rows():
         # The guest's folk does not make the Gorillaz song folk.
         assert {g for g, _, _ in by["gorillaz, fatoumata diawara"]} == {"trip hop", "alternative rock"}
         assert by["nobody known"] == {("folk", 1.0, "seed")}
+
+
+def test_without_votes_wikidata_genres_count_and_unverified_name_guesses_go():
+    from karaoke import artist_wikidata as aw
+
+    with localcache.connect() as conn:
+        ai.ensure_schema(conn)
+        aw.ensure_schema(conn)
+        localcache.ensure_artist_genres_table(conn)
+        # The name-searched classifier's guesses: both wrong-artist latin.
+        for key in ("guadalupe pineda", "liminal"):
+            conn.execute("INSERT INTO artist_genres VALUES (%s, 'latin', 'latin', 1, 'online', 0)", (key,))
+        conn.execute("INSERT INTO artist_genres VALUES ('liminal', 'rock', 'rock', 1, 'seed', 0)")
+        for artist, mbid in (("Guadalupe Pineda", "gp"), ("Liminal", "lim")):
+            tid = _track(conn, artist, "Song")
+            ai.save_artist(_raw(mbid, artist, []), conn)
+            conn.execute("INSERT INTO track_artists VALUES (%s, 0, %s, 'main', '', '', '', 'recording', 0)",
+                         (tid, mbid))
+        aw.save("gp", {"qid": "Q5613250", "genres": [{"qid": "Q1", "label": "bolero"},
+                                                     {"qid": "Q2", "label": "ranchera music"}]}, conn)
+        conn.commit()
+        totals = ai.derive_artist_genres(conn)
+        assert totals == {"from wikidata": 1, "name guess dropped": 1}
+        rows = {(r["artist_normalized"], r["genre"], r["source"]) for r in conn.execute(
+            "SELECT * FROM artist_genres").fetchall()}
+        assert rows == {("guadalupe pineda", "bolero", "wikidata"),
+                        ("guadalupe pineda", "ranchera", "wikidata"),
+                        ("liminal", "rock", "seed")}
+
+
+def _track(conn, artist, title):
+    conn.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s)", (artist, title))
+    conn.commit()
+    return conn.execute("SELECT track_id FROM tracks WHERE artist = %s AND title = %s",
+                        (artist, title)).fetchone()["track_id"]
+
+
+def test_common_musicbrainz_genres_are_mapped():
+    from karaoke.artist_classifier import map_to_broad_genres
+
+    assert map_to_broad_genres("bolero") == ["latin"]
+    assert "electronic" in map_to_broad_genres("edm")
+    assert map_to_broad_genres("neo-psychedelia") == ["rock"]
+    assert map_to_broad_genres("experimental") == []
