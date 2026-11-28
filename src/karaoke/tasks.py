@@ -590,13 +590,14 @@ def sync_av(self, payload: dict[str, Any]) -> dict[str, Any]:
     log.info("celery sync_av: track %s", track_id)
     try:
         from . import localcache
-        from .caption_sync import sync_audio_video_counterparts
+        from .caption_sync import record_av_sync_result, sync_audio_video_counterparts
         from .ytmusic_client import YTMusicClient
 
         with localcache.connect() as conn:
             result = sync_audio_video_counterparts(
                 int(track_id), conn, client=YTMusicClient(), force_waveform=True,
             )
+            record_av_sync_result(conn, int(track_id), result)
         log.info("celery sync_av: track %s -> method=%s offset=%s",
                  track_id, result.get("method"), result.get("offset"))
         return result

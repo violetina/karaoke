@@ -275,9 +275,10 @@ def process_one_track(
     # 5. Audio vs Video Caption Synchronization & Offset Alignment
     if sync_av:
         try:
-            from karaoke.caption_sync import sync_audio_video_counterparts
+            from karaoke.caption_sync import record_av_sync_result, sync_audio_video_counterparts
             from karaoke.ytmusic_client import YTMusicClient
             av_res = sync_audio_video_counterparts(track_id, conn, client=YTMusicClient())
+            record_av_sync_result(conn, track_id, av_res)
             if av_res.get("offset") is not None:
                 status["av_sync"] = True
                 status["av_offset"] = av_res["offset"]

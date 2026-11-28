@@ -26,3 +26,23 @@ def test_process_one_track_passes_force_waveform_and_logs(tmp_path, monkeypatch)
     row = conn.execute("SELECT method FROM av_sync_log WHERE track_id = %s", (tid,)).fetchone()
     assert row["method"] == "waveform"
     conn.close()
+
+
+def test_celery_sync_av_records_av_sync_log(tmp_path, monkeypatch):
+    from karaoke import tasks
+
+    conn = localcache.connect(tmp_path / "test.db")
+    tid = conn.execute("INSERT INTO tracks (artist, title) VALUES ('B', 'U') "
+                       "RETURNING track_id").fetchone()["track_id"]
+    conn.commit()
+    # deferred imports inside the task resolve from the source modules
+    monkeypatch.setattr("karaoke.caption_sync.sync_audio_video_counterparts",
+                        lambda track_id, c, **kw: {"offset": 1.5, "method": "waveform",
+                                                   "confidence": 0.7, "has_audio_lyrics": True,
+                                                   "has_video_lyrics": True})
+    monkeypatch.setattr("karaoke.ytmusic_client.YTMusicClient", lambda *a, **k: object())
+    monkeypatch.setattr("karaoke.localcache.connect", lambda *a, **k: conn)
+
+    tasks.sync_av({"track_id": tid})
+    row = conn.execute("SELECT status, method FROM av_sync_log WHERE track_id = %s", (tid,)).fetchone()
+    assert (row["status"], row["method"]) == ("synced", "waveform")
