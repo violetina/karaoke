@@ -633,3 +633,109 @@ def test_av_sync_status_classification():
                            "has_audio_lyrics": False}) == "no_audio_lyrics"
     assert av_sync_status({"offset": None, "has_video_lyrics": True,
                            "has_audio_lyrics": True}) == "unaligned"
+
+
+# --- derived video rows are not real captions; weak waveform jumps are guarded ---
+
+def _make_derived_track(conn, artist, title, derived_offset=None):
+    """Audio lyrics '[00:10.00] a' plus (optionally) a video row that is our
+    own derived copy shifted by ``derived_offset`` -- what a prior run of
+    sync_audio_video_counterparts leaves behind."""
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id", (artist, title))
+    track_id = cur.fetchone()["track_id"]
+    localcache.put_cached_lyrics(
+        artist, title,
+        Lyrics(plain="a", synced_raw="[00:10.00] a", source="lrclib"),
+        media_type="audio", conn=conn,
+    )
+    if derived_offset is not None:
+        t = 10.0 + derived_offset
+        localcache.put_cached_lyrics(
+            artist, title,
+            Lyrics(plain="a", synced_raw=f"[{int(t)//60:02d}:{t%60:05.2f}] a", source="derived_from_audio"),
+            media_type="video", conn=conn,
+        )
+    return track_id
+
+
+def _no_network(monkeypatch, waveform_info):
+    monkeypatch.setattr("karaoke.caption_sync._try_waveform_offset", lambda track, client: waveform_info)
+    monkeypatch.setattr("karaoke.caption_sync.fetch_video_caption_lyrics", lambda *a, **kw: None)
+    return SimpleNamespace(get_audio_and_video_versions=lambda a, t: {})
+
+
+def _first_video_line_time(conn, track_id):
+    video = localcache.get_lyrics_by_track_id(track_id, conn, media_type="video")
+    assert video.source.startswith("derived_from_audio")
+    return parse_lrc(video.synced_raw)[0][0]
+
+
+def test_stale_derived_video_row_is_regenerated_from_fresh_waveform(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "stale_derived.db")
+    try:
+        track_id = _make_derived_track(conn, "StaleBand", "StaleTrack", derived_offset=0.57)
+        localcache.set_sync_offset(track_id, 0.57, conn, mode="video")
+        client = _no_network(monkeypatch, {"offset": 2.85, "confidence": 0.40, "video_id": "VID"})
+
+        res = sync_audio_video_counterparts(track_id, conn, client=client, force_waveform=True)
+
+        assert res["method"] == "waveform"
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == pytest.approx(2.85, abs=1e-4)
+        assert _first_video_line_time(conn, track_id) == pytest.approx(12.85, abs=0.01)
+    finally:
+        conn.close()
+
+
+def test_guard_keeps_stored_offset_against_weak_big_waveform_jump(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "guard_keep.db")
+    try:
+        track_id = _make_derived_track(conn, "JoyBand", "Shadowplay", derived_offset=-1.95)
+        localcache.set_sync_offset(track_id, -1.95, conn, mode="video")
+        client = _no_network(monkeypatch, {"offset": 14.17, "confidence": 0.20, "video_id": "VID"})
+
+        res = sync_audio_video_counterparts(track_id, conn, client=client, force_waveform=True)
+
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == pytest.approx(-1.95, abs=1e-4)
+        assert res["method"] == "kept_stored"
+        assert res["offset"] == pytest.approx(-1.95, abs=1e-4)
+        assert res["confidence"] == pytest.approx(0.20)
+        assert res["rejected_offset"] == pytest.approx(14.17)
+        assert _first_video_line_time(conn, track_id) == pytest.approx(8.05, abs=0.01)
+    finally:
+        conn.close()
+
+
+def test_guard_accepts_strong_big_waveform_jump(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "guard_strong.db")
+    try:
+        track_id = _make_derived_track(conn, "StrongBand", "StrongTrack", derived_offset=-1.14)
+        localcache.set_sync_offset(track_id, -1.14, conn, mode="video")
+        client = _no_network(monkeypatch, {"offset": 2.85, "confidence": 0.40, "video_id": "VID"})
+
+        res = sync_audio_video_counterparts(track_id, conn, client=client, force_waveform=True)
+
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == pytest.approx(2.85, abs=1e-4)
+        assert res["method"] == "waveform"
+        assert "rejected_offset" not in res
+    finally:
+        conn.close()
+
+
+def test_derived_video_row_is_not_used_for_caption_realignment(tmp_path, monkeypatch):
+    conn = localcache.connect(tmp_path / "derived_not_captions.db")
+    try:
+        # derived row is stale (+0.57) while the stored offset is 3.72: aligning
+        # against our own copy would re-store 0.57 and call it "captions".
+        track_id = _make_derived_track(conn, "CircBand", "CircTrack", derived_offset=0.57)
+        localcache.set_sync_offset(track_id, 3.72, conn, mode="video")
+        client = _no_network(monkeypatch, None)
+
+        res = sync_audio_video_counterparts(track_id, conn, client=client, force_waveform=True)
+
+        assert res["method"] == "cached"
+        assert res["offset"] == pytest.approx(3.72, abs=1e-4)
+        assert localcache.get_sync_offset(track_id, conn, mode="video") == pytest.approx(3.72, abs=1e-4)
+        assert _first_video_line_time(conn, track_id) == pytest.approx(13.72, abs=0.01)
+    finally:
+        conn.close()
