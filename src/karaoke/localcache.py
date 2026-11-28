@@ -1752,7 +1752,15 @@ def ensure_lyrics_media_type_column(conn: Connection) -> None:
 def get_lyrics_by_track_id(
     track_id: int, conn: Connection, media_type: Optional[str] = None
 ) -> Optional[Lyrics]:
-    """Get approved lyrics for a given track ID, with optional media_type ('audio' | 'video') preference."""
+    """Get approved lyrics for a track, preferring ``media_type`` ('audio' | 'video').
+
+    ``None`` means the canonical audio lyrics. caption_sync stores a video copy that is
+    already shifted by the video offset and always newer, so "newest row" would hand
+    every caller that doesn't track the playback mode the shifted lyrics. If the track has
+    no row of the asked type, the newest row of any type is returned.
+    """
+    if media_type is None:
+        media_type = "audio"
     cur = conn.cursor()
     ensure_lyrics_media_type_column(conn)
     row = None

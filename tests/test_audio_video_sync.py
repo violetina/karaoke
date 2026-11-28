@@ -552,3 +552,44 @@ def test_try_waveform_offset_skips_download_on_duration_mismatch(monkeypatch):
 
     assert download_calls == []
     assert info == {"audio_id": "AID", "video_id": "VID", "skipped_reason": "duration_mismatch"}
+
+
+def test_lyrics_lookup_without_media_type_prefers_audio_over_newer_video_row(tmp_path):
+    """caption_sync's shifted video copy is newer; the default must still be the audio row."""
+    conn = localcache.connect(tmp_path / "test.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tracks (artist, title) VALUES ('ArtistD', 'SongD') RETURNING track_id")
+        track_id = cur.fetchone()["track_id"]
+        localcache.put_cached_lyrics(
+            "ArtistD", "SongD",
+            Lyrics(plain="Line", synced_raw="[00:10.00] Line", source="lrclib"),
+            media_type="audio", conn=conn,
+        )
+        localcache.put_cached_lyrics(
+            "ArtistD", "SongD",
+            Lyrics(plain="Line", synced_raw="[00:13.70] Line", source="derived_from_audio"),
+            media_type="video", conn=conn,
+        )
+        got = localcache.get_lyrics_by_track_id(track_id, conn)
+        assert got is not None and got.source == "lrclib"
+        assert "[00:10.00]" in got.synced_raw
+    finally:
+        conn.close()
+
+
+def test_lyrics_lookup_without_media_type_falls_back_to_a_video_only_row(tmp_path):
+    conn = localcache.connect(tmp_path / "test.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tracks (artist, title) VALUES ('ArtistE', 'SongE') RETURNING track_id")
+        track_id = cur.fetchone()["track_id"]
+        localcache.put_cached_lyrics(
+            "ArtistE", "SongE",
+            Lyrics(plain="Line", synced_raw="[00:15.00] Line", source="youtube_caption"),
+            media_type="video", conn=conn,
+        )
+        got = localcache.get_lyrics_by_track_id(track_id, conn)
+        assert got is not None and got.source == "youtube_caption"
+    finally:
+        conn.close()
