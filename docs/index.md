@@ -24,7 +24,7 @@ It combines local music metadata, LRCLIB synced lyrics, optional Whisper transcr
 - [Modes](modes/index.md): a page per mode — scan, spotify, browse, radio, record, sample.
 - [Cache schema](cache-schema.md): the optional OpenSearch vector index and cache/id conventions.
 - [Local cache and stats](local-cache-and-stats.md): PostgreSQL source-of-truth schema, cached lyrics and `make stats`.
-- [Vector search and training plan](vector-search-plan.md): rebuild OpenSearch from PostgreSQL for semantic search, sentiment and timing experiments.
+- [Vector search and training plan](archive/vector-search-plan.md): rebuild OpenSearch from PostgreSQL for semantic search, sentiment and timing experiments.
 - [API reference](api.md): generated from Python docstrings via mkdocstrings.
 - [Workflow](workflow.md): operational project flow.
 - [Smart playlists](smart-playlists.md): auto-generated Genre: and Smart: playlists refreshed with mood and CLAP flow.

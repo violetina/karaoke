@@ -5,7 +5,7 @@ Karaoke now has one operational database and one optional derived index:
 - **PostgreSQL** (`KARAOKE_PG_URL`) is the source of truth for playback, source URLs, lyrics cache, stats, and backfill gaps (see [Database backend](database.md)).
 - **OpenSearch** (`tracks`, on the kind cluster) is a rebuildable derived index for semantic/vector search and future training features.
 
-This page covers the OpenSearch index. For the PostgreSQL schema see [Database backend](database.md); [Local cache and stats](local-cache-and-stats.md) explains playback lookup and statistics. For the re-index/training direction see [Vector search and training plan](vector-search-plan.md).
+This page covers the OpenSearch index. For the PostgreSQL schema see [Database backend](database.md); [Local cache and stats](local-cache-and-stats.md) explains playback lookup and statistics. For the re-index/training direction see [Vector search and training plan](archive/vector-search-plan.md).
 
 The same schema supports:
 
