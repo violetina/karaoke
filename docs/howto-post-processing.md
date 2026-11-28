@@ -65,6 +65,9 @@ print('track_id:', tid, 'needs:', needs_postprocessing(tid, conn))
 > available. To force word timing on a caption-less track, transcribe it with Whisper
 > instead (see `karaoke --youtube <url> --download --force-transcribe`).
 
+The chain also computes the music video's lyrics offset against the audio upload; see
+[Audio vs video lyrics sync](av-sync.md).
+
 ---
 
 ## Architecture
