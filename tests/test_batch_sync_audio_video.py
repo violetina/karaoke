@@ -46,3 +46,35 @@ def test_celery_sync_av_records_av_sync_log(tmp_path, monkeypatch):
     tasks.sync_av({"track_id": tid})
     row = conn.execute("SELECT status, method FROM av_sync_log WHERE track_id = %s", (tid,)).fetchone()
     assert (row["status"], row["method"]) == ("synced", "waveform")
+
+
+def _track_with_two_youtube_sources(conn, artist="Queen", title="Song"):
+    tid = conn.execute("INSERT INTO tracks (artist, title) VALUES (%s, %s) RETURNING track_id",
+                       (artist, title)).fetchone()["track_id"]
+    conn.execute("INSERT INTO lyrics (track_id, kind, synced_lyrics) VALUES (%s, 'approved', %s)",
+                 (tid, "[00:01.00] hello"))
+    conn.execute("INSERT INTO sources (track_id, kind, url) VALUES (%s, 'youtube_music', %s)",
+                 (tid, f"https://music.youtube.com/watch?v=audio{tid}"))
+    conn.execute("INSERT INTO sources (track_id, kind, url) VALUES (%s, 'youtube_video', %s)",
+                 (tid, f"https://www.youtube.com/watch?v=video{tid}"))
+    conn.commit()
+    return tid
+
+
+def test_find_candidates_returns_each_track_once_for_track_ids(tmp_path):
+    conn = localcache.connect(tmp_path / "test.db")
+    batch.ensure_log_table(conn)
+    tid = _track_with_two_youtube_sources(conn)
+    rows = batch.find_candidates(conn, track_ids=[tid])
+    assert [r["track_id"] for r in rows] == [tid]
+    assert rows[0]["url"] == f"https://www.youtube.com/watch?v=video{tid}"
+    conn.close()
+
+
+def test_find_candidates_default_query_returns_each_track_once(tmp_path):
+    conn = localcache.connect(tmp_path / "test.db")
+    batch.ensure_log_table(conn)
+    tid = _track_with_two_youtube_sources(conn)
+    rows = batch.find_candidates(conn, limit=1000)
+    assert [r["track_id"] for r in rows].count(tid) == 1
+    conn.close()

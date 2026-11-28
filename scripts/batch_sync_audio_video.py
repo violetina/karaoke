@@ -40,6 +40,11 @@ def ensure_log_table(conn: Any) -> None:
     conn.commit()
 
 
+# One row per track: when a track has several YouTube sources, pick a
+# www.youtube.com/watch (music video) URL first, then the oldest source.
+_PREFERRED_SOURCE_ORDER = "(s.url LIKE '%%://www.youtube.com/watch%%') DESC, s.source_id ASC"
+
+
 def find_candidates(
     conn: Any,
     limit: int = 50,
@@ -52,10 +57,11 @@ def find_candidates(
     if track_ids:
         cur.execute(
             """
-            SELECT t.track_id, t.artist, t.title, s.url
+            SELECT DISTINCT ON (t.track_id) t.track_id, t.artist, t.title, s.url
             FROM tracks t
             JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
             WHERE t.track_id = ANY(%s)
+            ORDER BY t.track_id, """ + _PREFERRED_SOURCE_ORDER + """
             """,
             (list(track_ids),),
         )
@@ -67,6 +73,7 @@ def find_candidates(
             FROM tracks t
             JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
             WHERE t.track_id = %s
+            ORDER BY """ + _PREFERRED_SOURCE_ORDER + """
             LIMIT 1
             """,
             (track_id,),
@@ -80,7 +87,7 @@ def find_candidates(
         JOIN sources s ON s.track_id = t.track_id AND (s.kind IN ('youtube', 'youtube_video', 'youtube_music') OR s.url LIKE '%%youtube.com/watch%%')
         LEFT JOIN av_sync_log a ON a.track_id = t.track_id
         WHERE (%s OR a.track_id IS NULL OR a.method IS DISTINCT FROM 'waveform')
-        ORDER BY t.track_id ASC
+        ORDER BY t.track_id ASC, """ + _PREFERRED_SOURCE_ORDER + """
         LIMIT %s
     """
     cur.execute(query, (force, limit))
