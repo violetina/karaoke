@@ -71,6 +71,31 @@
 - See [Audio vs video lyrics sync](docs/av-sync.md). On the newest 200 tracks: 75 of 105
   candidates synced by waveform in 9 minutes, 0 errors.
 
+### Desktop app launcher
+
+- **`make desktop-install` / `desktop-uninstall`** (#160): a "Karaoke Dashboard" launcher
+  that opens :8900 as a Chrome `--app` window with its own profile and window class, and
+  starts `karaoke-dashboard.service` first if it isn't up (`scripts/karaoke-dashboard-app.sh`).
+- In that window, browser shortcuts (Ctrl+T/N, Ctrl+Shift+N/T, Ctrl+D/H/J/O/S/P/U, ...) no
+  longer open tabs or windows; they are re-emitted as a `karaoke:shortcut` event. Close,
+  reload, find, zoom, DevTools and clipboard keep working; normal browser tabs are untouched.
+
+### Artist genres
+
+- **Fixed: wrong artists in "Genre: Latin"** (#161), e.g. Jason Derulo, Liminal, Sinatra/Jobim
+  duets. Without MusicBrainz votes, Wikidata genres count; without either, the name-searched
+  classifier's guess is dropped (it was often another artist with the same name).
+- Removed the clause that let any artist with a matching tag into a genre list, bypassing
+  the main-genre rule. More MusicBrainz genres map to broad genres (dance, edm,
+  neo-psychedelia, bolero, mpb, ...).
+- Existing playlists change after `make artists` and `make smart-playlists`.
+
+### Docs
+
+- `scripts/doc_sync.py` compares the whole Makefile-targets page, so changed help text is
+  caught and `--fix` rewrites it; `make docs-write` uses the same generator (#159).
+- Fixed three links to archived plans that made the strict MkDocs build fail (#166).
+
 ## 1.11.0 — Docs cleanup: archive shipped plans, version-stamped wiki, make-target deprecation sweep
 
 ### Docs reorg
