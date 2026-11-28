@@ -162,7 +162,7 @@ Several tables are managed directly by application modules rather than the legac
 ## Unified event store
 
 `karaoke.event_store` implements the single `events` table from the
-[Events & Postgres migration plan](events_and_postgres_plan.md). Every domain
+[Events & Postgres migration plan](archive/events_and_postgres_plan.md). Every domain
 appends to it, so a track's history can be replayed in order across domains
 instead of being reassembled from four tables with four different timestamp
 columns.
