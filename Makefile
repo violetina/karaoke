@@ -256,9 +256,10 @@ desktop-uninstall: ## Remove the "Karaoke Dashboard" app launcher
 smart-playlists: ## Rebuild and upload the Genre:/Smart:/Decade: playlists to YouTube Music (DRY=1 previews, LOCAL=1 skips upload, ONLY="...")
 	$(PYTHON) -m karaoke.smart_playlists $(if $(or $(DRY),$(LOCAL),$(filter 0,$(PUSH))),,--push) $(if $(DRY),--dry-run,) $(if $(ONLY),--only "$(ONLY)",)
 
-artists: ## Resolve artists to MusicBrainz, rewrite their genres, fetch Wikidata, rebuild the artist index
+artists: ## Resolve artists to MusicBrainz, fetch Wikidata, rewrite their genres, rebuild the artist index
 	$(PYTHON) scripts/resolve_artists.py
 	$(PYTHON) scripts/enrich_artists_wikidata.py
+	$(PYTHON) scripts/resolve_artists.py --genres-only
 	$(PYTHON) scripts/index_artists.py
 
 artist-index: ## Rebuild the karaoke-artists OpenSearch index from Postgres (Q="..." searches it instead)
