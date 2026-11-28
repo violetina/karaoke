@@ -86,3 +86,22 @@ def test_audit_documentation():
     assert "documented_api_modules" in audit
     assert "unlinked_docs" in audit
     assert "missing_makefile_targets" in audit
+
+
+
+def test_changed_help_text_is_drift_and_fix_rewrites_it(tmp_path):
+    """A target whose '## ...' text changed is drift, not only a missing target."""
+    from scripts.doc_sync import render_makefile_targets_doc
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "Makefile").write_text("help: ## Show targets\n\techo\nbench: ## New text\n\techo\n")
+    doc = tmp_path / "docs" / "makefile-targets.md"
+    doc.write_text(render_makefile_targets_doc({"help": "Show targets", "bench": "Old text"}))
+
+    audit = audit_documentation(tmp_path)
+    assert audit["missing_makefile_targets"] == []
+    assert audit["stale_makefile_targets_doc"] is True
+
+    assert fix_makefile_targets_doc(tmp_path)
+    assert "New text" in doc.read_text() and "Old text" not in doc.read_text()
+    assert audit_documentation(tmp_path)["stale_makefile_targets_doc"] is False

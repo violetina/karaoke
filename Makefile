@@ -105,11 +105,7 @@ docs-sync: ## Auto-sync documentation (API modules and Makefile targets)
 
 docs-write: deps-make2graph ## Regenerate generated docs
 	@mkdir -p docs/generated docs/assets || true
-	echo  '# Makefile targets' > docs/makefile-targets.md
-	echo 'Generated from make help' >> docs/makefile-targets.md
-	echo '```text' >> docs/makefile-targets.md
-	make help >> docs/makefile-targets.md
-	echo '```' >> docs/makefile-targets.md
+	$(PYTHON) scripts/doc_sync.py --fix >/dev/null   # docs/makefile-targets.md: one locale-independent generator
 	@LC_ALL=C $(MAKE) -Bnd | "$(MAKE2GRAPH_BIN)" --format M > docs/generated/makeflow.mmd
 	@LC_ALL=C $(MAKE) -Bnd | "$(MAKE2GRAPH_BIN)" --format d > docs/generated/makeflow.dot
 
